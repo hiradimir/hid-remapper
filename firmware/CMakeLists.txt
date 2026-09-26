@@ -27,6 +27,12 @@ if((PICO_BOARD STREQUAL "pico") OR (PICO_BOARD STREQUAL "pico2"))
 add_compile_definitions(GPIO_VALID_PINS_BASE=0b00011100011111111111111111111111)
 endif()
 
+# 変更後 ("pico_w" を追加)
+if((PICO_BOARD STREQUAL "pico_w"))
+add_compile_definitions(GPIO_VALID_PINS_BASE=0b00011100011111111111111111111111)
+add_compile_definitions(PICO_DEFAULT_PIO_USB_DP_PIN=2)
+endif()
+
 
 add_executable(remapper
     src/main.cc
