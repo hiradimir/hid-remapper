@@ -1,0 +1,22 @@
+{
+  "name": "Pico W HID-Remapper Dev",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "workspaceFolder": "/workspace",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-vscode.cpptools",
+        "ms-vscode.cmake-tools",
+        "twxs.cmake"
+      ]
+    }
+  },
+  "remoteUser": "root",
+  "containerEnv": {
+    "LESSCHARSET": "utf-8",
+    "LANG": "C.UTF-8"
+  }
+}
