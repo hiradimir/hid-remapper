@@ -16,6 +16,8 @@ void ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len);
 void ble_pair_new_device(void);
 void ble_clear_bonds(void);
 
+void ble_led(bool value);
+
 #ifdef __cplusplus
 }
 #endif

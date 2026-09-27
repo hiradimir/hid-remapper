@@ -28,11 +28,6 @@ void extra_init() {
     pio_cfg.pin_dp = PICO_DEFAULT_PIO_USB_DP_PIN;
     pio_cfg.skip_alarm_pool = true;
     tuh_configure(BOARD_TUH_RHPORT, TUH_CFGID_RPI_PIO_USB_CONFIGURATION, &pio_cfg);
-    
-// #if ENABLE_DUAL_HOST
-    // pio_usb_host_add_port(4, PIO_USB_PINOUT_DPDM);
-// #endif
-
     add_repeating_timer_us(-1000, manual_sof, NULL, &sof_timer);
 }
 

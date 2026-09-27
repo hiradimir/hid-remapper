@@ -33,6 +33,7 @@
 #include "tick.h"
 
 
+extern "C" void usb_cdc_printf(const char *format, ...);
 
 // RP2350 UF2s wipe the last sector of flash every time
 // because of RP2350-E10 errata mitigation. So we put
@@ -77,18 +78,30 @@ void __no_inline_not_in_flash_func(sof_handler)(uint32_t frame_count) {
 }
 
 bool do_send_report(uint8_t interface, const uint8_t* report_with_id, uint8_t len) {
-    // uint8_t report_id = report_with_id[0];
-    // const uint8_t* report_data = report_with_id + 1;
-    // uint8_t report_len = len - 1;
 
-// #if ENABLE_BLE
-//     // USBがPCにマウントされていれば有線、そうでなければBLE
-//     if (tud_mounted() && !tud_suspended()) {
-//         tud_hid_n_report(interface, report_id, report_data, report_len);
-//     } else if (ble_hid_is_connected()) {
-//         ble_hid_send_report(report_id, report_data, report_len);
-//     }
-// #else
+#if ENABLE_BLE
+    uint8_t report_id = report_with_id[0];
+    const uint8_t* report_data = report_with_id + 1;
+    uint8_t report_len = len - 1;
+
+    // BLEで接続がされていたら、優先する
+    if (ble_hid_is_connected()) {
+        // キーボード（ID 2 など）やマウス送信時のパラメータを出力
+        // usb_cdc_printf("[REP] itf=%d id=%d len=%d | %02X %02X %02X %02X\r\n",
+        //                interface, report_id, report_len,
+        //                report_data[0], report_data[1], report_data[2], report_data[3]);
+
+        ble_hid_send_report(report_id, report_data, report_len);
+    } else if (tud_mounted()) {
+        if (tud_suspended() &&
+            (our_descriptor->should_cause_wakeup != nullptr) &&
+            our_descriptor->should_cause_wakeup(interface, report_with_id, len)) {
+            tud_remote_wakeup();
+        } else if (!tud_suspended()) {
+            tud_hid_n_report(interface, report_id, report_data, report_len);
+        }
+    }
+#else
     // 有線専用ビルド
     if (tud_suspended() &&
         (our_descriptor->should_cause_wakeup != nullptr) &&
@@ -97,7 +110,7 @@ bool do_send_report(uint8_t interface, const uint8_t* report_with_id, uint8_t le
     } else {
         tud_hid_n_report(interface, report_with_id[0], report_with_id + 1, len - 1);
     }
-// #endif
+#endif
 
     return true;
 }
@@ -225,13 +238,13 @@ void reset_to_bootloader() {
 
 void pair_new_device() {
 #if ENABLE_BLE
-    // ble_pair_new_device();
+    ble_pair_new_device();
 #endif
 }
 
 void clear_bonds() {
 #if ENABLE_BLE
-    // ble_clear_bonds();
+    ble_clear_bonds();
 #endif
 }
 
@@ -287,13 +300,22 @@ int main() {
 
 #if ENABLE_BLE
     ble_hid_init();
-#endif
-
+#endif    
     tud_sof_isr_set(sof_handler);
 
     next_print = time_us_64() + 1000000;
 
     while (true) {
+
+        // debug用：生存確認用
+        // uint64_t now = time_us_64();
+        // if (now - last_toggle >= 2000000) {
+        //     last_toggle = now;
+        //     led_state = !led_state;
+        //     // ble_led(led_state);
+        //     usb_cdc_printf("[PicoW] alive\r\n");
+        // }
+
         bool tick;
         bool new_report;
         read_report(&new_report, &tick);
@@ -336,15 +358,15 @@ int main() {
             set_gpio_dir();
             set_gpio_dir_pending = false;
         }
-// #if ENABLE_BLE
-//         if ((tud_mounted() && (tud_hid_n_ready(0) || tud_suspended())) || ble_hid_is_connected()) {
-//             send_report(do_send_report);
-//         }
-// #else
+#if ENABLE_BLE
+        if ((tud_mounted() && (tud_hid_n_ready(0) || tud_suspended())) || ble_hid_is_connected()) {
+            send_report(do_send_report);
+        }
+#else
         if (tud_hid_n_ready(0) || tud_suspended()) {
             send_report(do_send_report);
         }
-// #endif
+#endif
         if (monitor_enabled && tud_hid_n_ready(1)) {
             send_monitor_report(do_send_report);
         }
@@ -361,9 +383,6 @@ int main() {
 
         activity_led_off_maybe();
 
-// #if ENABLE_BLE
-//         ble_hid_task();
-// #endif
 
     }
 
