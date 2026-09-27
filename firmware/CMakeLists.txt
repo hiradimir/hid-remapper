@@ -34,7 +34,7 @@ option(ENABLE_BLE "Enable Bluetooth Low Energy (BLE) HID support" OFF)
 option(ENABLE_DUAL_HOST "Enable dual PIO-USB host ports" OFF)
 
 if(PICO_BOARD STREQUAL "pico_w")
-    set(ENABLE_BLE OFF)
+    set(ENABLE_BLE ON)
     set(ENABLE_DUAL_HOST ON)
 endif()
 
@@ -71,31 +71,31 @@ if(ENABLE_DUAL_HOST)
     target_compile_definitions(remapper PUBLIC ENABLE_DUAL_HOST=1)
 endif()
 
-# if(ENABLE_BLE)
-#     target_sources(remapper PRIVATE src/ble_hid.cc)
-#     target_compile_definitions(remapper PUBLIC ENABLE_BLE=1)
+if(ENABLE_BLE)
+    target_sources(remapper PRIVATE src/ble_hid.cc)
+    target_compile_definitions(remapper PUBLIC ENABLE_BLE=1)
 
-#     # GATT コンパイルルールの定義 (ble_mouse.gatt -> ble_mouse.h)
-#     set(GATT_HEADER ${CMAKE_CURRENT_BINARY_DIR}/ble_mouse.h)
-#     add_custom_command(
-#         OUTPUT ${GATT_HEADER}
-#         COMMAND python3 ${PICO_SDK_PATH}/lib/btstack/tool/compile_gatt.py
-#                 ${CMAKE_CURRENT_SOURCE_DIR}/src/ble_mouse.gatt
-#                 ${GATT_HEADER}
-#         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/ble_mouse.gatt
-#         COMMENT "Compiling ble_mouse.gatt to ble_mouse.h"
-#         VERBATIM
-#     )
-#     target_sources(remapper PRIVATE ${GATT_HEADER})
-#     target_include_directories(remapper PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+    # GATT コンパイルルールの定義 (ble_mouse.gatt -> ble_mouse.h)
+    set(GATT_HEADER ${CMAKE_CURRENT_BINARY_DIR}/ble_mouse.h)
+    add_custom_command(
+        OUTPUT ${GATT_HEADER}
+        COMMAND python3 ${PICO_SDK_PATH}/lib/btstack/tool/compile_gatt.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/src/ble_mouse.gatt
+                ${GATT_HEADER}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/ble_mouse.gatt
+        COMMENT "Compiling ble_mouse.gatt to ble_mouse.h"
+        VERBATIM
+    )
+    target_sources(remapper PRIVATE ${GATT_HEADER})
+    target_include_directories(remapper PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
-#     # BTstack / CYW43 ライブラリのリンク
-#     target_link_libraries(remapper
-#         pico_btstack_ble
-#         pico_btstack_cyw43
-#         pico_cyw43_arch_none
-#     )
-# endif()
+    # BTstack / CYW43 ライブラリのリンク
+    target_link_libraries(remapper
+        pico_btstack_ble
+        pico_btstack_cyw43
+        pico_cyw43_arch_none
+    )
+endif()
 
 target_include_directories(remapper PRIVATE
     src
@@ -117,20 +117,19 @@ target_link_libraries(remapper
     usb_midi_host
 )
 
-# if(ENABLE_BLE)
-#     pico_set_binary_type(remapper default)
-# else()
-#     pico_set_binary_type(remapper copy_to_ram)
-# endif()
-
-pico_set_binary_type(remapper copy_to_ram)
-if(PICO_PLATFORM STREQUAL "rp2040")
-    pico_set_linker_script(remapper ${CMAKE_CURRENT_LIST_DIR}/remapper_single.ld)
-elseif(PICO_PLATFORM STREQUAL "rp2350-arm-s")
-    pico_set_linker_script(remapper ${CMAKE_CURRENT_LIST_DIR}/remapper_single_rp2350.ld)
+if(ENABLE_BLE)
+    pico_set_binary_type(remapper default)
 else()
-    message(FATAL_ERROR "Unknown PICO_PLATFORM.")
+    pico_set_binary_type(remapper copy_to_ram)
+    if(PICO_PLATFORM STREQUAL "rp2040")
+        pico_set_linker_script(remapper ${CMAKE_CURRENT_LIST_DIR}/remapper_single.ld)
+    elseif(PICO_PLATFORM STREQUAL "rp2350-arm-s")
+        pico_set_linker_script(remapper ${CMAKE_CURRENT_LIST_DIR}/remapper_single_rp2350.ld)
+    else()
+        message(FATAL_ERROR "Unknown PICO_PLATFORM.")
+    endif()
 endif()
+
 pico_add_extra_outputs(remapper)
 
 

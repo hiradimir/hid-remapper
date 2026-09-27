@@ -10,7 +10,7 @@
 #include <hardware/adc.h>
 #endif
 #if ENABLE_BLE
-// #include "ble_hid.h"
+#include "ble_hid.h"
 #endif
 #include <hardware/flash.h>
 #include <hardware/gpio.h>
@@ -32,15 +32,7 @@
 #include "remapper.h"
 #include "tick.h"
 
-// 最優先で実行されるコンストラクタ
-// extern "C" __attribute__((constructor(101))) void pre_main_probe() {
-//     gpio_init(22);
-//     gpio_set_dir(22, GPIO_OUT);
-//     gpio_put(22, 1);
-//     while (1) {
-//         tight_loop_contents();
-//     }
-// }
+
 
 // RP2350 UF2s wipe the last sector of flash every time
 // because of RP2350-E10 errata mitigation. So we put
@@ -294,7 +286,7 @@ int main() {
     stdio_init_all();
 
 #if ENABLE_BLE
-    // ble_hid_init();
+    ble_hid_init();
 #endif
 
     tud_sof_isr_set(sof_handler);
