@@ -9,6 +9,9 @@
 #ifdef ADC_ENABLED
 #include <hardware/adc.h>
 #endif
+#if ENABLE_BLE
+// #include "ble_hid.h"
+#endif
 #include <hardware/flash.h>
 #include <hardware/gpio.h>
 #include <pico/bootrom.h>
@@ -28,6 +31,16 @@
 #include "platform.h"
 #include "remapper.h"
 #include "tick.h"
+
+// 最優先で実行されるコンストラクタ
+// extern "C" __attribute__((constructor(101))) void pre_main_probe() {
+//     gpio_init(22);
+//     gpio_set_dir(22, GPIO_OUT);
+//     gpio_put(22, 1);
+//     while (1) {
+//         tight_loop_contents();
+//     }
+// }
 
 // RP2350 UF2s wipe the last sector of flash every time
 // because of RP2350-E10 errata mitigation. So we put
@@ -72,6 +85,19 @@ void __no_inline_not_in_flash_func(sof_handler)(uint32_t frame_count) {
 }
 
 bool do_send_report(uint8_t interface, const uint8_t* report_with_id, uint8_t len) {
+    // uint8_t report_id = report_with_id[0];
+    // const uint8_t* report_data = report_with_id + 1;
+    // uint8_t report_len = len - 1;
+
+// #if ENABLE_BLE
+//     // USBがPCにマウントされていれば有線、そうでなければBLE
+//     if (tud_mounted() && !tud_suspended()) {
+//         tud_hid_n_report(interface, report_id, report_data, report_len);
+//     } else if (ble_hid_is_connected()) {
+//         ble_hid_send_report(report_id, report_data, report_len);
+//     }
+// #else
+    // 有線専用ビルド
     if (tud_suspended() &&
         (our_descriptor->should_cause_wakeup != nullptr) &&
         our_descriptor->should_cause_wakeup(report_with_id[0], report_with_id + 1, len - 1)) {
@@ -79,7 +105,9 @@ bool do_send_report(uint8_t interface, const uint8_t* report_with_id, uint8_t le
     } else {
         tud_hid_n_report(interface, report_with_id[0], report_with_id + 1, len - 1);
     }
-    return true;  // XXX?
+// #endif
+
+    return true;
 }
 
 void gpio_pins_init() {
@@ -204,9 +232,15 @@ void reset_to_bootloader() {
 }
 
 void pair_new_device() {
+#if ENABLE_BLE
+    // ble_pair_new_device();
+#endif
 }
 
 void clear_bonds() {
+#if ENABLE_BLE
+    // ble_clear_bonds();
+#endif
 }
 
 void my_mutexes_init() {
@@ -254,7 +288,14 @@ int main() {
     board_init();
     extra_init();
     tusb_init();
+#if ENABLE_DUAL_HOST
+    extra_host_ports_init();
+#endif
     stdio_init_all();
+
+#if ENABLE_BLE
+    // ble_hid_init();
+#endif
 
     tud_sof_isr_set(sof_handler);
 
@@ -303,9 +344,15 @@ int main() {
             set_gpio_dir();
             set_gpio_dir_pending = false;
         }
+// #if ENABLE_BLE
+//         if ((tud_mounted() && (tud_hid_n_ready(0) || tud_suspended())) || ble_hid_is_connected()) {
+//             send_report(do_send_report);
+//         }
+// #else
         if (tud_hid_n_ready(0) || tud_suspended()) {
             send_report(do_send_report);
         }
+// #endif
         if (monitor_enabled && tud_hid_n_ready(1)) {
             send_monitor_report(do_send_report);
         }
@@ -321,6 +368,11 @@ int main() {
         print_stats_maybe();
 
         activity_led_off_maybe();
+
+// #if ENABLE_BLE
+//         ble_hid_task();
+// #endif
+
     }
 
     return 0;

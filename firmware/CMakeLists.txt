@@ -5,6 +5,7 @@ add_subdirectory(usb_midi_host)
 add_compile_definitions(PICO_DEFAULT_UART_BAUD_RATE=921600)
 add_compile_definitions(PERSISTED_CONFIG_SIZE=4096)
 add_compile_definitions(PICO_XOSC_STARTUP_DELAY_MULTIPLIER=64)
+# add_compile_definitions(PICO_STACK_SIZE=0x2000)
 
 set(PICO_SDK_PATH "${CMAKE_CURRENT_LIST_DIR}/pico-sdk")
 set(PICO_TINYUSB_PATH "${CMAKE_CURRENT_LIST_DIR}/tinyusb")
@@ -23,14 +24,18 @@ add_compile_options(-Wall)
 
 add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-std=c++17>)
 
-if((PICO_BOARD STREQUAL "pico") OR (PICO_BOARD STREQUAL "pico2"))
+if((PICO_BOARD STREQUAL "pico") OR (PICO_BOARD STREQUAL "pico2") OR (PICO_BOARD STREQUAL "pico_w"))
 add_compile_definitions(GPIO_VALID_PINS_BASE=0b00011100011111111111111111111111)
 endif()
 
-# 変更後 ("pico_w" を追加)
-if((PICO_BOARD STREQUAL "pico_w"))
-add_compile_definitions(GPIO_VALID_PINS_BASE=0b00011100011111111111111111111111)
-add_compile_definitions(PICO_DEFAULT_PIO_USB_DP_PIN=2)
+
+# オプション定義（デフォルトOFF、コマンドラインやpico_w指定でON）
+option(ENABLE_BLE "Enable Bluetooth Low Energy (BLE) HID support" OFF)
+option(ENABLE_DUAL_HOST "Enable dual PIO-USB host ports" OFF)
+
+if(PICO_BOARD STREQUAL "pico_w")
+    set(ENABLE_BLE OFF)
+    set(ENABLE_DUAL_HOST ON)
 endif()
 
 
@@ -58,7 +63,39 @@ if((PICO_BOARD STREQUAL "pico") OR (PICO_BOARD STREQUAL "pico2"))
 target_compile_definitions(remapper PUBLIC PICO_DEFAULT_UART_TX_PIN=16)
 target_compile_definitions(remapper PUBLIC PICO_DEFAULT_UART_RX_PIN=17)
 target_compile_definitions(remapper PUBLIC PICO_DEFAULT_PIO_USB_DP_PIN=0)
+elseif(PICO_BOARD STREQUAL "pico_w")
+target_compile_definitions(remapper PUBLIC PICO_DEFAULT_PIO_USB_DP_PIN=2)
 endif()
+
+if(ENABLE_DUAL_HOST)
+    target_compile_definitions(remapper PUBLIC ENABLE_DUAL_HOST=1)
+endif()
+
+# if(ENABLE_BLE)
+#     target_sources(remapper PRIVATE src/ble_hid.cc)
+#     target_compile_definitions(remapper PUBLIC ENABLE_BLE=1)
+
+#     # GATT コンパイルルールの定義 (ble_mouse.gatt -> ble_mouse.h)
+#     set(GATT_HEADER ${CMAKE_CURRENT_BINARY_DIR}/ble_mouse.h)
+#     add_custom_command(
+#         OUTPUT ${GATT_HEADER}
+#         COMMAND python3 ${PICO_SDK_PATH}/lib/btstack/tool/compile_gatt.py
+#                 ${CMAKE_CURRENT_SOURCE_DIR}/src/ble_mouse.gatt
+#                 ${GATT_HEADER}
+#         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/ble_mouse.gatt
+#         COMMENT "Compiling ble_mouse.gatt to ble_mouse.h"
+#         VERBATIM
+#     )
+#     target_sources(remapper PRIVATE ${GATT_HEADER})
+#     target_include_directories(remapper PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+
+#     # BTstack / CYW43 ライブラリのリンク
+#     target_link_libraries(remapper
+#         pico_btstack_ble
+#         pico_btstack_cyw43
+#         pico_cyw43_arch_none
+#     )
+# endif()
 
 target_include_directories(remapper PRIVATE
     src
@@ -79,6 +116,12 @@ target_link_libraries(remapper
     tinyusb_pico_pio_usb
     usb_midi_host
 )
+
+# if(ENABLE_BLE)
+#     pico_set_binary_type(remapper default)
+# else()
+#     pico_set_binary_type(remapper copy_to_ram)
+# endif()
 
 pico_set_binary_type(remapper copy_to_ram)
 if(PICO_PLATFORM STREQUAL "rp2040")

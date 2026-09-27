@@ -21,11 +21,27 @@ static repeating_timer_t sof_timer;
 
 void extra_init() {
     pio_usb_configuration_t pio_cfg = PIO_USB_DEFAULT_CONFIG;
+#if ENABLE_DUAL_HOST
+    // pio_cfg.pio_tx_num = 0;
+    // pio_cfg.pio_rx_num = 0;
+#endif
     pio_cfg.pin_dp = PICO_DEFAULT_PIO_USB_DP_PIN;
     pio_cfg.skip_alarm_pool = true;
     tuh_configure(BOARD_TUH_RHPORT, TUH_CFGID_RPI_PIO_USB_CONFIGURATION, &pio_cfg);
+    
+// #if ENABLE_DUAL_HOST
+    // pio_usb_host_add_port(4, PIO_USB_PINOUT_DPDM);
+// #endif
+
     add_repeating_timer_us(-1000, manual_sof, NULL, &sof_timer);
 }
+
+#if ENABLE_DUAL_HOST
+void extra_host_ports_init() {
+    pio_usb_host_add_port(4, PIO_USB_PINOUT_DPDM);  
+}
+#endif
+
 
 uint32_t get_gpio_valid_pins_mask() {
     return GPIO_VALID_PINS_BASE & ~(
@@ -36,7 +52,11 @@ uint32_t get_gpio_valid_pins_mask() {
                                       (1 << PICO_DEFAULT_UART_RX_PIN) |
 #endif
                                       (1 << PICO_DEFAULT_PIO_USB_DP_PIN) |
-                                      (1 << (PICO_DEFAULT_PIO_USB_DP_PIN + 1)));
+                                      (1 << (PICO_DEFAULT_PIO_USB_DP_PIN + 1))
+#if ENABLE_DUAL_HOST
+                                      | (1 << 4) | (1 << 5)
+#endif
+    );
 }
 
 static bool reports_received;

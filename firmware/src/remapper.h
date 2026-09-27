@@ -23,6 +23,11 @@ void handle_received_midi(uint8_t hub_port, uint8_t* midi_msg);
 void set_input_state(uint32_t usage, int32_t state_raw, int32_t state_scaled, uint8_t hub_port = 0);
 
 void extra_init();
+
+#if ENABLE_DUAL_HOST
+void extra_host_ports_init();
+#endif
+
 void read_report(bool* new_report, bool* tick);
 
 void interval_override_updated();
