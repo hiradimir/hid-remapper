@@ -33,7 +33,7 @@ void extra_init() {
 
 #if ENABLE_DUAL_HOST
 void extra_host_ports_init() {
-    pio_usb_host_add_port(4, PIO_USB_PINOUT_DPDM);  
+    pio_usb_host_add_port(PICO_DUAL_PIO_USB_DP_PIN, PIO_USB_PINOUT_DPDM);  
 }
 #endif
 
@@ -49,7 +49,8 @@ uint32_t get_gpio_valid_pins_mask() {
                                       (1 << PICO_DEFAULT_PIO_USB_DP_PIN) |
                                       (1 << (PICO_DEFAULT_PIO_USB_DP_PIN + 1))
 #if ENABLE_DUAL_HOST
-                                      | (1 << 4) | (1 << 5)
+                                      | (1 << PICO_DUAL_PIO_USB_DP_PIN)
+                                      | (1 << (PICO_DUAL_PIO_USB_DP_PIN + 1))
 #endif
     );
 }

@@ -5,7 +5,6 @@ add_subdirectory(usb_midi_host)
 add_compile_definitions(PICO_DEFAULT_UART_BAUD_RATE=921600)
 add_compile_definitions(PERSISTED_CONFIG_SIZE=4096)
 add_compile_definitions(PICO_XOSC_STARTUP_DELAY_MULTIPLIER=64)
-# add_compile_definitions(PICO_STACK_SIZE=0x2000)
 
 set(PICO_SDK_PATH "${CMAKE_CURRENT_LIST_DIR}/pico-sdk")
 set(PICO_TINYUSB_PATH "${CMAKE_CURRENT_LIST_DIR}/tinyusb")
@@ -29,13 +28,10 @@ add_compile_definitions(GPIO_VALID_PINS_BASE=0b00011100011111111111111111111111)
 endif()
 
 
-# オプション定義（デフォルトOFF、コマンドラインやpico_w指定でON）
-option(ENABLE_BLE "Enable Bluetooth Low Energy (BLE) HID support" OFF)
-option(ENABLE_DUAL_HOST "Enable dual PIO-USB host ports" OFF)
+option(ENABLE_BLE "Enable Bluetooth Low Energy support (requires pico_w)")
 
-if(PICO_BOARD STREQUAL "pico_w")
-    set(ENABLE_BLE ON)
-    set(ENABLE_DUAL_HOST ON)
+if(ENABLE_BLE AND NOT PICO_BOARD STREQUAL "pico_w")
+    message(FATAL_ERROR "ENABLE_BLE requires PICO_BOARD=pico_w")
 endif()
 
 
@@ -59,16 +55,15 @@ add_executable(remapper
     src/xbox.cc
 )
 
-if((PICO_BOARD STREQUAL "pico") OR (PICO_BOARD STREQUAL "pico2"))
+if((PICO_BOARD STREQUAL "pico") OR (PICO_BOARD STREQUAL "pico2") OR (PICO_BOARD STREQUAL "pico_w"))
 target_compile_definitions(remapper PUBLIC PICO_DEFAULT_UART_TX_PIN=16)
 target_compile_definitions(remapper PUBLIC PICO_DEFAULT_UART_RX_PIN=17)
 target_compile_definitions(remapper PUBLIC PICO_DEFAULT_PIO_USB_DP_PIN=0)
-elseif(PICO_BOARD STREQUAL "pico_w")
-target_compile_definitions(remapper PUBLIC PICO_DEFAULT_PIO_USB_DP_PIN=2)
 endif()
 
-if(ENABLE_DUAL_HOST)
+if(DEFINED PICO_DUAL_PIO_USB_DP_PIN AND NOT "${PICO_DUAL_PIO_USB_DP_PIN}" STREQUAL "")
     target_compile_definitions(remapper PUBLIC ENABLE_DUAL_HOST=1)
+    target_compile_definitions(remapper PUBLIC PICO_DUAL_PIO_USB_DP_PIN=${PICO_DUAL_PIO_USB_DP_PIN})
 endif()
 
 if(ENABLE_BLE)
