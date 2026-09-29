@@ -5,6 +5,7 @@
 
 #include <bsp/board_api.h>
 #include <tusb.h>
+#include "hardware/structs/timer.h"
 
 #ifdef ADC_ENABLED
 #include <hardware/adc.h>
@@ -77,6 +78,58 @@ void __no_inline_not_in_flash_func(sof_handler)(uint32_t frame_count) {
     sof_callback();
 }
 
+#if ENABLE_BLE
+// キーボードのホットキー（Win/Cmd + Ctrl + F1）をチェックする関数
+static void check_pairing_hotkey(uint8_t interface, const uint8_t* report_with_id, uint8_t len) {
+    // 標準的なブートキーボードレポート (Modifier + Reserved + Keycodes) の長さ・形式チェック
+    if (len < 9) return;
+
+    uint8_t report_id = report_with_id[0];
+    const uint8_t* report_data = report_with_id + 1;
+    uint8_t report_len = len - 1;
+    usb_cdc_printf("[REP] itf=%d id=%d len=%d | %02X %02X %02X %02X %02X %02X %02X %02X %02X\r\n",
+                    interface, report_id, report_len,
+                    report_data[0], report_data[1], report_data[2], report_data[3],
+                    report_data[4], report_data[5], report_data[6], report_data[7], report_data[8]);
+
+
+    // キーボードレポート（ID 2 など、環境に合わせて調整。必要なら条件追加）
+    // ログから: report_data[0] = モディファイア, report_data[7] = F1のビット位置
+    uint8_t modifier = report_data[0];
+    
+    // Left/Right の Ctrl (0x01 / 0x10) と Win/GUI (0x08 / 0x80) の両方が含まれているか
+    bool ctrl_pressed = (modifier & 0x11) != 0; // Left/Right Ctrl
+    bool gui_pressed  = (modifier & 0x88) != 0; // Left/Right GUI (Win/Cmd)
+    bool alt_pressed  = (modifier & 0x44) != 0; // Left/Right Alt (オプション: ボンド削除等に活用可)
+
+    // F1〜F4 の判定 (レポート内のどこにキーコードがあるかに応じて調整)
+    // ログから report_data[7] あたりにビットが立つ場合
+    // F1 〜 F4 のスロット判定
+    int slot = -1;
+    if      ((report_data[7] & 0x40) != 0) slot = 0; // F1 -> Slot 1
+    else if ((report_data[7] & 0x80) != 0) slot = 1; // F2 -> Slot 2
+    else if ((report_data[8] & 0x01) != 0) slot = 2; // F3 -> Slot 3
+    else if ((report_data[8] & 0x02) != 0) slot = 3; // F4 -> Slot 4
+
+    static bool hotkey_was_pressed = false;
+    bool hotkey_now_pressed = (ctrl_pressed && gui_pressed && (slot >= 0));
+
+    if (hotkey_now_pressed && !hotkey_was_pressed) {
+        if (alt_pressed) {
+            // Alt同時押しならそのスロットのペアリングモード / ボンドクリア等
+            usb_cdc_printf("[BT] Hotkey: Enter Pairing Mode for slot %d\r\n", slot + 1);
+            ble_enter_pairing_mode(slot);
+        } else {
+            // 通常ならそのスロットへスイッチ
+            usb_cdc_printf("[BT] Hotkey: Switch to slot %d\r\n", slot + 1);
+            ble_switch_slot(slot);
+        }
+    }
+    hotkey_was_pressed = hotkey_now_pressed;
+
+}
+#endif
+
 bool do_send_report(uint8_t interface, const uint8_t* report_with_id, uint8_t len) {
 
 #if ENABLE_BLE
@@ -84,12 +137,15 @@ bool do_send_report(uint8_t interface, const uint8_t* report_with_id, uint8_t le
     const uint8_t* report_data = report_with_id + 1;
     uint8_t report_len = len - 1;
 
+    check_pairing_hotkey(interface, report_with_id, len);
+
     // BLEで接続がされていたら、優先する
     if (ble_hid_is_connected()) {
         // キーボード（ID 2 など）やマウス送信時のパラメータを出力
         // usb_cdc_printf("[REP] itf=%d id=%d len=%d | %02X %02X %02X %02X\r\n",
         //                interface, report_id, report_len,
         //                report_data[0], report_data[1], report_data[2], report_data[3]);
+
 
         ble_hid_send_report(report_id, report_data, report_len);
     } else if (tud_mounted()) {
@@ -277,6 +333,8 @@ uint64_t get_unique_id() {
 }
 
 int main() {
+    timer_hw->dbgpause = 0; // デバッグ時のタイマ停止を解除
+    
     my_mutexes_init();
     gpio_pins_init();
 #ifdef I2C_ENABLED
@@ -362,6 +420,7 @@ int main() {
         if ((tud_mounted() && (tud_hid_n_ready(0) || tud_suspended())) || ble_hid_is_connected()) {
             send_report(do_send_report);
         }
+        ble_hid_task();
 #else
         if (tud_hid_n_ready(0) || tud_suspended()) {
             send_report(do_send_report);

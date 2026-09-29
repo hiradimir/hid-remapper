@@ -5,11 +5,15 @@
 
 #include "pico/stdlib.h"
 #include "pico/cyw43_arch.h"
+#include "pico/unique_id.h"
 #include "btstack.h"
+#include "btstack_config.h"
 #include "ble/le_device_db.h"
 #include "ble_mouse.h"
 #include "ble_hid.h"
 #include "ble/sm.h"
+
+#define usb_cdc_printf printf
 
 static const uint8_t hid_report_descriptor[] = {
     // --- Mouse (Report ID 1) ---
@@ -90,10 +94,121 @@ static const uint8_t hid_report_descriptor[] = {
     0xC0,                          // End Collection
 };
 
+#define MAX_SLOTS NVM_NUM_DEVICE_DB_ENTRIES
+static bd_addr_t slot_addrs[MAX_SLOTS];
+static bool slot_valid[MAX_SLOTS] = {false, false, false, false};
+static int current_slot = 0;
+
+static bool is_pairing_mode = false;
+static btstack_timer_source_t pairing_timeout_timer;
+static btstack_timer_source_t adv_resume_timer;
 static hci_con_handle_t con_handle = HCI_CON_HANDLE_INVALID;
 static btstack_packet_callback_registration_t sm_event_callback_registration;
 
-extern "C" void usb_cdc_printf(const char *format, ...);
+static volatile bool slot_change_requested = false;
+static volatile int pending_slot = -1;
+static volatile bool pending_is_pairing = false;
+
+// extern "C" void usb_cdc_printf(const char *format, ...);
+
+
+// タイムアウト時のハンドラ（ペアリングモード終了）
+static void pairing_mode_timeout_handler(btstack_timer_source_t *ts) {
+    usb_cdc_printf("[BT] Pairing mode timeout.\r\n");
+    is_pairing_mode = false;
+}
+
+// クールダウン終了後にアドバタイズを再開するハンドラ
+static void adv_resume_timer_handler(btstack_timer_source_t *ts) {
+    usb_cdc_printf("[BT] Resuming advertisements after cool-down...\r\n");
+    ble_led(1);
+    gap_advertisements_enable(1);
+}
+
+// 基板固有 ID とスロット番号から、BLE規格準拠の Static Random Address を生成
+static void get_slot_random_address(int slot, bd_addr_t out_addr) {
+    pico_unique_board_id_t id;
+    pico_get_unique_board_id(&id);
+
+    // Static Random Address の要件: 最上位2ビットが 11 (0xC0以上)
+    out_addr[0] = 0xC0 | (id.id[2] & 0x3F);
+    out_addr[1] = id.id[3];
+    out_addr[2] = id.id[4];
+    out_addr[3] = id.id[5];
+    out_addr[4] = id.id[6];
+    // 末尾バイトにスロット番号をオフセットとして加算（2台目以降も被らない）
+    out_addr[5] = id.id[7] + (uint8_t)slot;
+}
+// スロットごとの名前とアドレスを適用してアドバタイズを安全に再設定する共通関数
+static void apply_slot_identity(int slot) {
+    current_slot = slot;
+    usb_cdc_printf("[BT] -> apply_slot_identity(Slot %d) start\r\n", slot + 1);
+
+    gap_advertisements_enable(0);
+
+    // デバイス名
+    char name_buf[32];
+    snprintf(name_buf, sizeof(name_buf), "Remapper [Slot %d]", slot + 1);
+
+    // アドバタイズパケットの構築 (最大 31 バイト)
+    uint8_t adv_data[31];
+    int adv_data_len = 0;
+
+    // 1. Flags (3 bytes)
+    adv_data[adv_data_len++] = 2;
+    adv_data[adv_data_len++] = BLUETOOTH_DATA_TYPE_FLAGS;
+    adv_data[adv_data_len++] = 0x06;
+
+    // 2. 16-bit Service UUID: HID Service 0x1812 (4 bytes) - これがないとMacに表示されない
+    adv_data[adv_data_len++] = 3;
+    adv_data[adv_data_len++] = BLUETOOTH_DATA_TYPE_COMPLETE_LIST_OF_16_BIT_SERVICE_CLASS_UUIDS;
+    adv_data[adv_data_len++] = 0x12;
+    adv_data[adv_data_len++] = 0x18;
+
+    // 3. Appearance: Generic HID 0x03C0 (4 bytes)
+    adv_data[adv_data_len++] = 3;
+    adv_data[adv_data_len++] = BLUETOOTH_DATA_TYPE_APPEARANCE;
+    adv_data[adv_data_len++] = 0xC0;
+    adv_data[adv_data_len++] = 0x03;
+
+    // 4. Complete Local Name (最大 19 bytes)
+    int name_len = strlen(name_buf);
+    if (name_len > 18) name_len = 18; // 31バイト上限ガード
+    adv_data[adv_data_len++] = name_len + 1;
+    adv_data[adv_data_len++] = BLUETOOTH_DATA_TYPE_COMPLETE_LOCAL_NAME;
+    memcpy(&adv_data[adv_data_len], name_buf, name_len);
+    adv_data_len += name_len;
+
+    gap_advertisements_set_data(adv_data_len, adv_data);
+
+    // スロット固有の Static Random Address を適用
+    bd_addr_t slot_addr;
+    get_slot_random_address(slot, slot_addr);
+    gap_random_address_set_mode(GAP_RANDOM_ADDRESS_TYPE_STATIC);
+    gap_random_address_set(slot_addr);
+
+    // アドバタイズ再開
+    ble_led(1);
+    gap_advertisements_enable(1);
+    usb_cdc_printf("[BT] <- apply_slot_identity done. ADDR=%s\r\n", bd_addr_to_str(slot_addr));
+}
+
+// ホットキーから呼ばれる関数（ここではフラグを立てるだけで即座に抜ける）
+void ble_switch_slot(int slot) {
+    if (slot < 0 || slot >= MAX_SLOTS) return;
+    usb_cdc_printf("[BT] Request Switch to Slot %d\r\n", slot + 1);
+    pending_slot = slot;
+    pending_is_pairing = false;
+    slot_change_requested = true;
+}
+
+void ble_enter_pairing_mode(int slot) {
+    if (slot < 0 || slot >= MAX_SLOTS) return;
+    usb_cdc_printf("[BT] Request Pairing Mode for Slot %d\r\n", slot + 1);
+    pending_slot = slot;
+    pending_is_pairing = true;
+    slot_change_requested = true;
+}
 
 static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size) {
     if (packet_type != HCI_EVENT_PACKET) return;
@@ -106,8 +221,8 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             uint8_t state = btstack_event_state_get_state(packet);
             usb_cdc_printf("[BT] BTSTACK_STATE: %d\r\n", state);
             if (state == HCI_STATE_WORKING) {
-                ble_led(1);
-                gap_advertisements_enable(1);
+                // チップが完全に起動したこの瞬間に初期スロットを適用する
+                apply_slot_identity(current_slot);
             }
             break;
         }
@@ -121,16 +236,22 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
 
         case HCI_EVENT_LE_META: {
             uint8_t subevent = hci_event_le_meta_get_subevent_code(packet);
-            usb_cdc_printf("[BT] LE_META subevent: 0x%02X\r\n", subevent);
             if (subevent == HCI_SUBEVENT_LE_CONNECTION_COMPLETE) {
                 con_handle = hci_subevent_le_connection_complete_get_connection_handle(packet);
+                bd_addr_t peer_addr;
+                hci_subevent_le_connection_complete_get_peer_address(packet, peer_addr);
+
+                is_pairing_mode = false;
+                slot_valid[current_slot] = true;
+
+                // 通信パラメータの最適化要求
                 gap_request_connection_parameter_update(con_handle, 6, 9, 0, 400);
-                
-                usb_cdc_printf("[BT] Connected! handle=0x%04X\r\n", con_handle);
+                usb_cdc_printf("[BT] Connected successfully to Slot %d! peer=%s\r\n", current_slot + 1, bd_addr_to_str(peer_addr));
                 ble_led(0);
             }
             break;
         }
+
         // Security Manager (SM) イベントの処理
         case SM_EVENT_JUST_WORKS_REQUEST: {
             hci_con_handle_t handle = sm_event_just_works_request_get_handle(packet);
@@ -153,6 +274,11 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
         case SM_EVENT_PAIRING_COMPLETE: {
             uint8_t status = sm_event_pairing_complete_get_status(packet);
             usb_cdc_printf("[BT] SM_EVENT_PAIRING_COMPLETE status=0x%02X\r\n", status);
+            if (status == ERROR_CODE_SUCCESS) {
+                // 新規ペアリングが成功したらペアリングモードを終了
+                is_pairing_mode = false;
+                btstack_run_loop_remove_timer(&pairing_timeout_timer);
+            }
             break;
         }
 
@@ -163,17 +289,20 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             break;
         }
 
-        case HCI_EVENT_DISCONNECTION_COMPLETE:
+        case HCI_EVENT_DISCONNECTION_COMPLETE: {
             con_handle = HCI_CON_HANDLE_INVALID;
-            usb_cdc_printf("[BT] Disconnected!\r\n");
+            uint8_t reason = hci_event_disconnection_complete_get_reason(packet);
+            usb_cdc_printf("[BT] Disconnected! reason=0x%02X\r\n", reason);
             ble_led(1);
             gap_advertisements_enable(1);
             break;
+        }
 
         default:
             break;
     }
 }
+
 
 void ble_hid_init(void) {
     if (cyw43_arch_init()) {
@@ -192,27 +321,41 @@ void ble_hid_init(void) {
     sm_add_event_handler(&sm_event_callback_registration);
     att_server_register_packet_handler(packet_handler);
 
-    static const uint8_t adv_data[] = {
-        0x02, BLUETOOTH_DATA_TYPE_FLAGS, 0x06,
-        0x0c, BLUETOOTH_DATA_TYPE_COMPLETE_LOCAL_NAME, 'P', 'i', 'c', 'o', 'W', ' ', 'C', 'o', 'm', 'b', 'o',
-        0x03, BLUETOOTH_DATA_TYPE_COMPLETE_LIST_OF_16_BIT_SERVICE_CLASS_UUIDS, 0x12, 0x18,
-        0x03, BLUETOOTH_DATA_TYPE_APPEARANCE, 0xc0, 0x03,
-    };
-
+    // パラメータのみ設定し、データ適用はチップ起動後に委ねる
     uint16_t adv_int_min = 0x0030;
     uint16_t adv_int_max = 0x0030;
-    uint8_t adv_type = 0;
     bd_addr_t null_addr;
     memset(null_addr, 0, 6);
-    gap_advertisements_set_params(adv_int_min, adv_int_max, adv_type, 0, null_addr, 0x07, 0x00);
-    gap_advertisements_set_data(sizeof(adv_data), (uint8_t*) adv_data);
-    gap_advertisements_enable(1);
-    hci_power_control(HCI_POWER_ON);
+    gap_advertisements_set_params(adv_int_min, adv_int_max, 0, 0, null_addr, 0x07, 0x00);
 
+    hci_power_control(HCI_POWER_ON);
 }
 
+
 void ble_hid_task(void) {
-    cyw43_arch_poll();
+    if (slot_change_requested) {
+        slot_change_requested = false;
+        int slot = pending_slot;
+        bool is_pairing = pending_is_pairing;
+
+        usb_cdc_printf("[BT] Processing slot change to %d (pairing=%d)\r\n", slot + 1, is_pairing);
+
+        is_pairing_mode = is_pairing;
+        if (is_pairing) {
+            btstack_run_loop_remove_timer(&pairing_timeout_timer);
+            btstack_run_loop_set_timer_handler(&pairing_timeout_timer, pairing_mode_timeout_handler);
+            btstack_run_loop_set_timer(&pairing_timeout_timer, 60000);
+            btstack_run_loop_add_timer(&pairing_timeout_timer);
+        }
+
+        // 既存接続があれば切断
+        if (con_handle != HCI_CON_HANDLE_INVALID) {
+            gap_disconnect(con_handle);
+        }
+
+        // 新しいスロットのアイデンティティを適用
+        apply_slot_identity(slot);
+    }
 }
 
 bool ble_hid_is_connected(void) {
