@@ -13,7 +13,21 @@
 #include "ble_hid.h"
 #include "ble/sm.h"
 
+#include "hardware/flash.h"
+#include "pico/btstack_flash_bank.h"
+#include "btstack_tlv_flash_bank.h"
+#include "ble/le_device_db_tlv.h"
+
 #define usb_cdc_printf printf
+
+// Flash 末尾手前の 8KB（セクタ 2 個分）を TLV 領域に割り当て
+// hid-remapper (0x1FF000〜) の直前：0x1FD000〜0x1FEFFF
+#define TLV_FLASH_OFFSET (PICO_FLASH_SIZE_BYTES - (3 * FLASH_SECTOR_SIZE))
+
+// スロット番号を保存するための独自タグ ID ('S' 'L' 'O' 'T')
+#define TLV_TAG_CURRENT_SLOT 0x534c4f54
+
+#define MAX_SLOTS NVM_NUM_DEVICE_DB_ENTRIES
 
 static const uint8_t hid_report_descriptor[] = {
     // --- Mouse (Report ID 1) ---
@@ -94,7 +108,6 @@ static const uint8_t hid_report_descriptor[] = {
     0xC0,                          // End Collection
 };
 
-#define MAX_SLOTS NVM_NUM_DEVICE_DB_ENTRIES
 static bd_addr_t slot_addrs[MAX_SLOTS];
 static bool slot_valid[MAX_SLOTS] = {false, false, false, false};
 static int current_slot = 0;
@@ -105,12 +118,34 @@ static btstack_timer_source_t adv_resume_timer;
 static hci_con_handle_t con_handle = HCI_CON_HANDLE_INVALID;
 static btstack_packet_callback_registration_t sm_event_callback_registration;
 
+static btstack_tlv_flash_bank_t tlv_context;
+static const btstack_tlv_t *tlv_impl = NULL;
+
 static volatile bool slot_change_requested = false;
 static volatile int pending_slot = -1;
 static volatile bool pending_is_pairing = false;
 
 // extern "C" void usb_cdc_printf(const char *format, ...);
 
+// Flash (TLV) から最後に使っていたスロット番号を復元
+static void load_current_slot(void) {
+    if (!tlv_impl) return;
+    uint8_t saved_slot = 0;
+    int len = tlv_impl->get_tag(&tlv_context, TLV_TAG_CURRENT_SLOT, &saved_slot, sizeof(saved_slot));
+    if (len == sizeof(saved_slot) && saved_slot < MAX_SLOTS) {
+        current_slot = saved_slot;
+        usb_cdc_printf("[BT] Restored current_slot: %d from TLV\r\n", current_slot + 1);
+    } else {
+        usb_cdc_printf("[BT] No saved slot found, defaulting to Slot 1\r\n");
+    }
+}
+
+// Flash (TLV) に現在のスロット番号を保存
+static void save_current_slot(uint8_t slot) {
+    if (!tlv_impl) return;
+    tlv_impl->store_tag(&tlv_context, TLV_TAG_CURRENT_SLOT, &slot, sizeof(slot));
+    usb_cdc_printf("[BT] Saved current_slot: %d to TLV\r\n", slot + 1);
+}
 
 // タイムアウト時のハンドラ（ペアリングモード終了）
 static void pairing_mode_timeout_handler(btstack_timer_source_t *ts) {
@@ -142,6 +177,8 @@ static void get_slot_random_address(int slot, bd_addr_t out_addr) {
 // スロットごとの名前とアドレスを適用してアドバタイズを安全に再設定する共通関数
 static void apply_slot_identity(int slot) {
     current_slot = slot;
+    save_current_slot((uint8_t)slot); // Flash に保存
+
     usb_cdc_printf("[BT] -> apply_slot_identity(Slot %d) start\r\n", slot + 1);
 
     gap_advertisements_enable(0);
@@ -303,13 +340,31 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
     }
 }
 
-
 void ble_hid_init(void) {
     if (cyw43_arch_init()) {
         return;
     }
 
+    // 1. Flash Bank インスタンスを取得（PICO_FLASH_BANK_STORAGE_OFFSET が自動適用）
+    const hal_flash_bank_t *hal_flash_bank_impl = pico_flash_bank_instance();
+
+    // 2. BTstack TLV Flash Bank の初期化
+    tlv_impl = btstack_tlv_flash_bank_init_instance(
+        &tlv_context,
+        hal_flash_bank_impl,
+        NULL
+    );
+    btstack_tlv_set_instance(tlv_impl, &tlv_context);
+
+    // 3. スロット番号の復元
+    load_current_slot();
+
     l2cap_init();
+
+    // 4. ペアリング鍵 DB に TLV を接続
+    le_device_db_tlv_configure(tlv_impl, &tlv_context);
+
+    // 5. SM の初期化
     sm_init();
     sm_set_io_capabilities(IO_CAPABILITY_NO_INPUT_NO_OUTPUT);
     sm_set_authentication_requirements(SM_AUTHREQ_BONDING);
@@ -321,7 +376,6 @@ void ble_hid_init(void) {
     sm_add_event_handler(&sm_event_callback_registration);
     att_server_register_packet_handler(packet_handler);
 
-    // パラメータのみ設定し、データ適用はチップ起動後に委ねる
     uint16_t adv_int_min = 0x0030;
     uint16_t adv_int_max = 0x0030;
     bd_addr_t null_addr;

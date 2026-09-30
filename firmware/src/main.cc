@@ -20,6 +20,7 @@
 #include <pico/platform.h>
 #include <pico/stdio.h>
 #include <pico/unique_id.h>
+#include "pico/stdio_uart.h"
 
 #include "activity_led.h"
 #include "config.h"
@@ -334,9 +335,12 @@ uint64_t get_unique_id() {
 
 int main() {
     timer_hw->dbgpause = 0; // デバッグ時のタイマ停止を解除
-    
+
     my_mutexes_init();
     gpio_pins_init();
+    
+    stdio_init_all();
+    printf("\r\n\r\n=== Remapper BLE Booting ===\r\n");
 #ifdef I2C_ENABLED
     our_i2c_init();
 #endif
@@ -354,7 +358,6 @@ int main() {
 #if ENABLE_DUAL_HOST
     extra_host_ports_init();
 #endif
-    stdio_init_all();
 
 #if ENABLE_BLE
     ble_hid_init();

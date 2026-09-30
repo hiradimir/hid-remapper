@@ -34,6 +34,8 @@ if(ENABLE_BLE AND NOT PICO_BOARD STREQUAL "pico_w")
     message(FATAL_ERROR "ENABLE_BLE requires PICO_BOARD=pico_w")
 endif()
 
+# 2097152 (2MB) - 3 * 4096 (12KB) = 2084864
+add_compile_definitions(PICO_FLASH_BANK_STORAGE_OFFSET=2084864)
 
 add_executable(remapper
     src/main.cc
@@ -53,6 +55,10 @@ add_executable(remapper
     src/ps_auth.cc
     src/app_driver.cc
     src/xbox.cc
+)
+
+target_compile_options(remapper PRIVATE
+    -ffile-prefix-map=/workspace=/Users/yutaka/git/hid-remapper-bt
 )
 
 if((PICO_BOARD STREQUAL "pico") OR (PICO_BOARD STREQUAL "pico2") OR (PICO_BOARD STREQUAL "pico_w"))
@@ -89,6 +95,8 @@ if(ENABLE_BLE)
         pico_btstack_ble
         pico_btstack_cyw43
         pico_cyw43_arch_none
+        hardware_flash
+        pico_btstack_flash_bank
     )
 endif()
 
@@ -111,6 +119,9 @@ target_link_libraries(remapper
     tinyusb_pico_pio_usb
     usb_midi_host
 )
+
+pico_enable_stdio_uart(remapper 1)
+pico_enable_stdio_usb(remapper 0)
 
 if(ENABLE_BLE)
     pico_set_binary_type(remapper default)
