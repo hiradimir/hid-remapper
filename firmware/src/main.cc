@@ -159,6 +159,50 @@ static bool check_pairing_hotkey(uint8_t interface, const uint8_t* report_with_i
 }
 #endif
 
+extern std::unordered_map<uint8_t, uint8_t> hub_ports;
+
+#if ENABLE_BLE && ENABLE_OLED
+// W-01: USB Host P1/P2 のデバイス種別（KBD/MS/DEV/---）を正確かつ安全に検出
+static void update_usb_ports_status(void) {
+    const char* p1_dev = "---";
+    const char* p2_dev = "---";
+
+    for (uint8_t dev_addr = 1; dev_addr <= 4; dev_addr++) {
+        if (tuh_mounted(dev_addr)) {
+            uint8_t hub_addr = 0;
+            uint8_t hub_port = 0;
+            tuh_get_hub_addr_port(dev_addr, &hub_addr, &hub_port);
+            if (hub_port == 0) {
+                auto it = hub_ports.find(dev_addr);
+                if (it != hub_ports.end()) {
+                    hub_port = it->second;
+                }
+            }
+
+            const char* dev_type = "DEV";
+            tuh_itf_info_t itf_info;
+            if (tuh_hid_itf_get_info(dev_addr, 0, &itf_info)) {
+                uint8_t proto = itf_info.desc.bInterfaceProtocol;
+                if (proto == HID_ITF_PROTOCOL_KEYBOARD) {
+                    dev_type = "KBD";
+                } else if (proto == HID_ITF_PROTOCOL_MOUSE) {
+                    dev_type = "MS ";
+                }
+            }
+
+            if (hub_port == 1) {
+                p1_dev = dev_type;
+            } else if (hub_port == 2) {
+                p2_dev = dev_type;
+            }
+        }
+    }
+
+    oled_set_usb_port(0, p1_dev);
+    oled_set_usb_port(1, p2_dev);
+}
+#endif
+
 bool do_send_report(uint8_t interface, const uint8_t* report_with_id, uint8_t len) {
 
 #if ENABLE_BLE
@@ -183,6 +227,9 @@ bool do_send_report(uint8_t interface, const uint8_t* report_with_id, uint8_t le
         }
     }
     prev_ble_connected = curr_ble_connected;
+
+    oled_set_mode(curr_ble_connected);
+    oled_notify_tx();
 
     // BLEで接続がされていたら、優先する
     if (curr_ble_connected) {
@@ -455,6 +502,14 @@ int main() {
         bool tick;
         bool new_report;
         read_report(&new_report, &tick);
+#if ENABLE_BLE && ENABLE_OLED
+        static uint32_t last_usb_check_ms = 0;
+        uint32_t now_ms = (uint32_t)(time_us_64() / 1000);
+        if (now_ms - last_usb_check_ms >= 50) {
+            last_usb_check_ms = now_ms;
+            update_usb_ports_status();
+        }
+#endif
         if (new_report) {
             activity_led_on();
         }

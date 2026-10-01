@@ -21,22 +21,30 @@ void oled_init(void);
 void oled_task(void);
 
 // 状態更新関数（スレッドセーフ：Core 0 から随時更新可能）
+void oled_set_mode(bool ble_mode); // true: BLE, false: USB
 void oled_set_slot(uint8_t slot);
 void oled_set_bt_state(oled_bt_state_t state);
+void oled_set_slot_bonded(uint8_t slot, bool bonded);
+void oled_set_slot_os(uint8_t slot, char os_char);
+void oled_set_usb_port(uint8_t port, const char* dev_str); // port: 0 (P1), 1 (P2), dev_str: "KBD", "MS ", "DEV", "---"
 void oled_set_status(const char* status_msg);
-void oled_set_line1(const char* text);
-void oled_set_line2(const char* text);
+void oled_set_peer_addr(const char* peer_addr_str);
+void oled_notify_tx(void);
 
 #else
 
 // ENABLE_OLED=OFF 時のインラインスタブ（呼び出し側のオーバーヘッドを完全にゼロ化）
 static inline void oled_init(void) {}
 static inline void oled_task(void) {}
+static inline void oled_set_mode(bool ble_mode) { (void)ble_mode; }
 static inline void oled_set_slot(uint8_t slot) { (void)slot; }
 static inline void oled_set_bt_state(oled_bt_state_t state) { (void)state; }
+static inline void oled_set_slot_bonded(uint8_t slot, bool bonded) { (void)slot; (void)bonded; }
+static inline void oled_set_slot_os(uint8_t slot, char os_char) { (void)slot; (void)os_char; }
+static inline void oled_set_usb_port(uint8_t port, const char* dev_str) { (void)port; (void)dev_str; }
 static inline void oled_set_status(const char* status_msg) { (void)status_msg; }
-static inline void oled_set_line1(const char* text) { (void)text; }
-static inline void oled_set_line2(const char* text) { (void)text; }
+static inline void oled_set_peer_addr(const char* peer_addr_str) { (void)peer_addr_str; }
+static inline void oled_notify_tx(void) {}
 
 #endif
 
@@ -44,4 +52,4 @@ static inline void oled_set_line2(const char* text) { (void)text; }
 }
 #endif
 
-#endif
+#endif // OLED_H

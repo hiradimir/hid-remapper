@@ -153,6 +153,9 @@ static void load_current_slot(void) {
     usb_cdc_printf("[BT] Bonded devices in DB: %d\r\n", num_bonded);
     oled_set_slot(current_slot);
     oled_set_bt_state(OLED_BT_DISCONNECTED);
+    for (int i = 0; i < 4; i++) {
+        oled_set_slot_bonded(i, i < num_bonded);
+    }
 }
 
 // Flash (TLV) に現在のスロット番号を保存
@@ -276,6 +279,7 @@ void ble_switch_slot(int slot) {
     slot_change_requested = true;
     oled_set_slot(slot);
     oled_set_bt_state(OLED_BT_SWITCHING);
+    oled_set_peer_addr("");
     oled_set_status("Switching...");
 }
 
@@ -291,6 +295,7 @@ void ble_enter_pairing_mode(int slot) {
     slot_change_requested = true;
     oled_set_slot(slot);
     oled_set_bt_state(OLED_BT_PAIRING);
+    oled_set_peer_addr("");
     oled_set_status("Pairing (60s)");
 }
 
@@ -376,7 +381,8 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     usb_cdc_printf("[BT] Connected to Slot %d (peer=%s)\r\n", current_slot + 1, bd_addr_to_str(peer_addr));
                     oled_set_slot(current_slot);
                     oled_set_bt_state(OLED_BT_CONNECTED);
-                    oled_set_status("Connected");
+                    oled_set_slot_bonded(current_slot, true);
+                    oled_set_peer_addr(bd_addr_to_str(peer_addr));
                 }
             }
             break;
@@ -416,7 +422,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                 gap_advertisements_set_params(0x00A0, 0x00C0, 0, 0, null_addr, 0x07, 0x00);
                 oled_set_slot(current_slot);
                 oled_set_bt_state(OLED_BT_CONNECTED);
-                oled_set_status("Paired OK");
+                oled_set_slot_bonded(current_slot, true);
             }
             break;
         }
@@ -462,6 +468,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                 usb_cdc_printf("[BT] Disconnected (reason=0x%02X)\r\n", reason);
                 oled_set_slot(current_slot);
                 oled_set_bt_state(OLED_BT_DISCONNECTED);
+                oled_set_peer_addr("");
                 oled_set_status("Disconnected");
 
             // スロット切り替え待ちがある場合、切断完了後に安全に新スロットを適用して再開
@@ -605,6 +612,7 @@ bool ble_hid_can_send(void) {
 
 void ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len) {
     if (con_handle != HCI_CON_HANDLE_INVALID && ble_reports_enabled) {
+        oled_notify_tx();
         uint8_t status = hids_device_send_input_report_for_id(con_handle, report_id, (uint8_t*)data, len);
         if (status == ERROR_CODE_SUCCESS) {
             ble_can_send = false;

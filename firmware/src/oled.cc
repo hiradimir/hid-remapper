@@ -13,7 +13,7 @@
 #define I2C_TIMEOUT_US 5000
 
 #define SSD1306_WIDTH 128
-#define SSD1306_HEIGHT 64
+#define SSD1306_HEIGHT 32
 
 #define FONT_WIDTH 6
 #define FONT_FIRST_CHAR 0x20
@@ -137,9 +137,16 @@ static bool need_redraw = true;
 static volatile uint8_t cur_slot = 0;
 static volatile oled_bt_state_t cur_bt_state = OLED_BT_DISCONNECTED;
 static char line1_text[32] = "";
-static char line2_text[32] = "Remapper BLE";
-static char custom_line1[32] = "";
-static char custom_line2[32] = "";
+static volatile bool ui_ble_mode = true;
+static volatile oled_bt_state_t ui_bt_state = OLED_BT_DISCONNECTED;
+static volatile uint8_t ui_current_slot = 0;
+static volatile bool ui_slot_bonded[4] = {false, false, false, false};
+static volatile char ui_slot_os[4] = {'M', 'W', 'A', 'I'};
+static char ui_p1_dev[4] = "---";
+static char ui_p2_dev[4] = "---";
+static char ui_status_msg[32] = "Remapper [Slot 1]";
+static char ui_peer_addr[24] = "";
+static volatile int ui_tx_timer = 0;
 
 static bool ssd1306_cmd(uint8_t cmd) {
     uint8_t buf[2] = {0x00, cmd};
@@ -173,8 +180,8 @@ static void set_pixel(uint8_t x, uint8_t y, bool on) {
     }
 }
 
-// 8x16 フォント描画（横1ピクセル字間追加、縦2倍拡大）
-static void draw_char_8x16(uint8_t x, uint8_t y, char ch) {
+// 6x8 フォント描画（128x32 に横21文字 x 縦4行配置）
+static void draw_char_6x8(uint8_t x, uint8_t y, char ch) {
     unsigned char uch = (unsigned char)ch;
     if (uch < FONT_FIRST_CHAR || uch > FONT_LAST_CHAR) return;
     const uint8_t* cdata = font_data[uch - FONT_FIRST_CHAR];
@@ -182,24 +189,15 @@ static void draw_char_8x16(uint8_t x, uint8_t y, char ch) {
     for (uint8_t col = 0; col < FONT_WIDTH; col++) {
         uint8_t p = cdata[col];
         for (uint8_t bit = 0; bit < 8; bit++) {
-            bool on = (p & (1 << bit)) != 0;
-            // 縦に 2 ピクセル分描画
-            set_pixel(x + col, y + bit * 2, on);
-            set_pixel(x + col, y + bit * 2 + 1, on);
-        }
-    }
-    // 字間（col = FONT_WIDTH .. 7）
-    for (uint8_t col = FONT_WIDTH; col < 8; col++) {
-        for (uint8_t bit = 0; bit < 16; bit++) {
-            set_pixel(x + col, y + bit, false);
+            set_pixel(x + col, y + bit, (p & (1 << bit)) != 0);
         }
     }
 }
 
-static void draw_string_8x16(uint8_t x, uint8_t y, const char* str) {
-    while (*str && x + 8 <= SSD1306_WIDTH) {
-        draw_char_8x16(x, y, *str);
-        x += 8;
+static void draw_string_6x8(uint8_t x, uint8_t y, const char* str) {
+    while (*str && x + FONT_WIDTH <= SSD1306_WIDTH) {
+        draw_char_6x8(x, y, *str);
+        x += FONT_WIDTH;
         str++;
     }
 }
@@ -222,13 +220,18 @@ void oled_init(void) {
     oled_present = true;
 
     ssd1306_cmd(0x20); ssd1306_cmd(0x00); // Horizontal addressing mode
-    ssd1306_cmd(0xA8); ssd1306_cmd(SSD1306_HEIGHT - 1); // Multiplex ratio
+    ssd1306_cmd(0xA8); ssd1306_cmd(SSD1306_HEIGHT - 1); // Multiplex ratio (0x1F for 32)
     ssd1306_cmd(0xD3); ssd1306_cmd(0x00); // Display offset
     ssd1306_cmd(0x40);                   // Start line 0
     ssd1306_cmd(0xA1);                   // Segment remap (column 127 mapped to SEG0)
     ssd1306_cmd(0xC8);                   // COM output scan direction (remapped)
-    ssd1306_cmd(0xDA); ssd1306_cmd(0x12); // COM pins configuration (0x12 for 64, 0x02 for 32)
-    ssd1306_cmd(0x81); ssd1306_cmd(0xCF); // Contrast
+#if SSD1306_HEIGHT == 32
+    ssd1306_cmd(0xDA); ssd1306_cmd(0x02); // COM pins configuration for 32
+    ssd1306_cmd(0x81); ssd1306_cmd(0x8F); // Contrast for 32
+#else
+    ssd1306_cmd(0xDA); ssd1306_cmd(0x12); // COM pins configuration for 64
+    ssd1306_cmd(0x81); ssd1306_cmd(0xCF); // Contrast for 64
+#endif
     ssd1306_cmd(0xA4);                   // Resume to RAM content
     ssd1306_cmd(0xA6);                   // Normal display
     ssd1306_cmd(0xD9); ssd1306_cmd(0xF1); // Pre-charge period
@@ -237,41 +240,79 @@ void oled_init(void) {
     ssd1306_cmd(0x2E);                   // Deactivate scroll
     ssd1306_cmd(0xAF);                   // Display ON
 
-    printf("[OLED] SSD1306 128x64 initialized on I2C0 (GP4/GP5)\r\n");
+    printf("[OLED] SSD1306 %dx%d initialized on I2C0 (GP4/GP5)\r\n", SSD1306_WIDTH, SSD1306_HEIGHT);
     need_redraw = true;
 }
 
+void oled_set_mode(bool ble_mode) {
+    if (ui_ble_mode != ble_mode) {
+        ui_ble_mode = ble_mode;
+        need_redraw = true;
+    }
+}
+
 void oled_set_slot(uint8_t slot) {
-    if (cur_slot != slot) {
-        cur_slot = slot;
+    if (ui_current_slot != slot) {
+        ui_current_slot = slot;
         need_redraw = true;
     }
 }
 
 void oled_set_bt_state(oled_bt_state_t state) {
-    if (cur_bt_state != state) {
-        cur_bt_state = state;
+    if (ui_bt_state != state) {
+        ui_bt_state = state;
         need_redraw = true;
+    }
+}
+
+void oled_set_slot_bonded(uint8_t slot, bool bonded) {
+    if (slot < 4 && ui_slot_bonded[slot] != bonded) {
+        ui_slot_bonded[slot] = bonded;
+        need_redraw = true;
+    }
+}
+
+void oled_set_slot_os(uint8_t slot, char os_char) {
+    if (slot < 4 && ui_slot_os[slot] != os_char) {
+        ui_slot_os[slot] = os_char;
+        need_redraw = true;
+    }
+}
+
+// W-01: USB Host P1/P2 のデバイス種別を設定 (port: 0=P1, 1=P2)
+void oled_set_usb_port(uint8_t port, const char* dev_str) {
+    if (port == 0) {
+        if (strncmp(ui_p1_dev, dev_str, 3) != 0) {
+            snprintf(ui_p1_dev, sizeof(ui_p1_dev), "%-3.3s", dev_str);
+            need_redraw = true;
+        }
+    } else if (port == 1) {
+        if (strncmp(ui_p2_dev, dev_str, 3) != 0) {
+            snprintf(ui_p2_dev, sizeof(ui_p2_dev), "%-3.3s", dev_str);
+            need_redraw = true;
+        }
     }
 }
 
 void oled_set_status(const char* status_msg) {
-    if (strncmp(line2_text, status_msg, sizeof(line2_text)) != 0) {
-        strncpy(line2_text, status_msg, sizeof(line2_text) - 1);
-        line2_text[sizeof(line2_text) - 1] = '\0';
+    if (strncmp(ui_status_msg, status_msg, sizeof(ui_status_msg)) != 0) {
+        strncpy(ui_status_msg, status_msg, sizeof(ui_status_msg) - 1);
+        ui_status_msg[sizeof(ui_status_msg) - 1] = '\0';
         need_redraw = true;
     }
 }
 
-void oled_set_line1(const char* text) {
-    strncpy(custom_line1, text, sizeof(custom_line1) - 1);
-    custom_line1[sizeof(custom_line1) - 1] = '\0';
-    need_redraw = true;
+// W-02: 接続先ホストの MAC アドレスを設定
+void oled_set_peer_addr(const char* peer_addr_str) {
+    if (strncmp(ui_peer_addr, peer_addr_str, sizeof(ui_peer_addr)) != 0) {
+        strncpy(ui_peer_addr, peer_addr_str, sizeof(ui_peer_addr) - 1);
+        ui_peer_addr[sizeof(ui_peer_addr) - 1] = '\0';
+        need_redraw = true;
+    }
 }
 
-void oled_set_line2(const char* text) {
-    strncpy(custom_line2, text, sizeof(custom_line2) - 1);
-    custom_line2[sizeof(custom_line2) - 1] = '\0';
+void oled_notify_tx(void) {
+    ui_tx_timer = 3;
     need_redraw = true;
 }
 
@@ -283,47 +324,72 @@ void oled_task(void) {
     static uint64_t last_refresh_us = 0;
     uint64_t now_us = time_us_64();
 
-    // 変更がない場合は 1 秒に 1 回のみ再描画（低負荷化）
-    if (!need_redraw && (now_us - last_refresh_us < 1000000)) {
+    // 約 25 FPS (40ms) または 状態変更時に描画
+    if (!need_redraw && (now_us - last_refresh_us < 40000)) {
         return;
     }
 
     need_redraw = false;
     last_refresh_us = now_us;
 
-    // Line 1 のテキスト生成
-    if (custom_line1[0] != '\0') {
-        strncpy(line1_text, custom_line1, sizeof(line1_text) - 1);
-        line1_text[sizeof(line1_text) - 1] = '\0';
-    } else {
-        const char* st_str = "DISC";
-        switch (cur_bt_state) {
-            case OLED_BT_CONNECTED:    st_str = "CONN"; break;
-            case OLED_BT_PAIRING:      st_str = "PAIR"; break;
-            case OLED_BT_SWITCHING:    st_str = "WAIT"; break;
-            default:                   st_str = "DISC"; break;
-        }
-        snprintf(line1_text, sizeof(line1_text), "SLOT %d [%s]", cur_slot + 1, st_str);
+    // Line 0: Mode + Status + TX (21 chars)
+    const char* mode_str = ui_ble_mode ? "[BT ]" : "[USB]";
+    const char* state_str = "DISC ";
+    switch (ui_bt_state) {
+        case OLED_BT_CONNECTED: state_str = "CONN "; break;
+        case OLED_BT_PAIRING:   state_str = "PAIR "; break;
+        case OLED_BT_SWITCHING: state_str = "WAIT "; break;
+        default:                state_str = "DISC "; break;
     }
+    const char* tx_str = "[  ]";
+    if (ui_tx_timer > 0) {
+        tx_str = "[TX]";
+        ui_tx_timer--;
+    }
+    char line0[24];
+    snprintf(line0, sizeof(line0), "%-5s %-5s      %-4s", mode_str, state_str, tx_str);
 
-    // Line 2 のテキスト生成
-    const char* l2_src = (custom_line2[0] != '\0') ? custom_line2 : line2_text;
+    // Line 1: 各スロット状態 1:M* 2:W  3:A  4:I  (21 chars)
+    char line1[24];
+    char s_os[4];
+    char s_star[4];
+    for (int i = 0; i < 4; i++) {
+        s_os[i] = ui_slot_os[i];
+        if (!ui_slot_bonded[i] && (i != ui_current_slot)) {
+            s_os[i] = '-';
+        }
+        s_star[i] = (i == ui_current_slot) ? '*' : ' ';
+    }
+    snprintf(line1, sizeof(line1), "1:%c%c 2:%c%c 3:%c%c 4:%c%c ",
+             s_os[0], s_star[0],
+             s_os[1], s_star[1],
+             s_os[2], s_star[2],
+             s_os[3], s_star[3]);
+
+    // Line 2 (W-01): USB ポート情報 USB: P1:KBD  P2:MS   (21 chars)
+    char line2[24];
+    snprintf(line2, sizeof(line2), "USB: P1:%-3.3s  P2:%-3.3s  ", ui_p1_dev, ui_p2_dev);
+
+    // Line 3 (W-02): ステータスメッセージ または BTアイコン+MACアドレス右寄せ (21 chars)
+    char line3[24];
+    if (ui_bt_state == OLED_BT_CONNECTED && ui_peer_addr[0] != '\0') {
+        int pad = 20 - (int)strlen(ui_peer_addr);
+        if (pad < 0) pad = 0;
+        snprintf(line3, sizeof(line3), "%*s\x7F%s", pad, "", ui_peer_addr);
+    } else {
+        snprintf(line3, sizeof(line3), "%-21.21s", ui_status_msg);
+    }
 
     // バッファクリア
     memset(ssd1306_buffer, 0, sizeof(ssd1306_buffer));
 
-    // LINE 1 (Y = 8, 8x16 font, 16文字)
-    draw_string_8x16(0, 8, line1_text);
+    // 4行描画 (128x32: Y=0, 8, 16, 24)
+    draw_string_6x8(0, 0, line0);
+    draw_string_6x8(0, 8, line1);
+    draw_string_6x8(0, 16, line2);
+    draw_string_6x8(0, 24, line3);
 
-    // 中央セパレータ線 (Y = 28)
-    for (uint8_t x = 0; x < SSD1306_WIDTH; x++) {
-        set_pixel(x, 28, true);
-    }
-
-    // LINE 2 (Y = 36, 8x16 font, 16文字)
-    draw_string_8x16(0, 36, l2_src);
-
-    // 画面へ転送 (Horizontal addressing: Page 0..7)
+    // 画面へ転送 (Horizontal addressing: Page 0..3)
     ssd1306_cmd(0x21); ssd1306_cmd(0); ssd1306_cmd(SSD1306_WIDTH - 1);
     ssd1306_cmd(0x22); ssd1306_cmd(0); ssd1306_cmd((SSD1306_HEIGHT / 8) - 1);
     ssd1306_data(ssd1306_buffer, sizeof(ssd1306_buffer));
