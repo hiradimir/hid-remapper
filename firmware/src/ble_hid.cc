@@ -18,6 +18,7 @@
 #include "pico/btstack_flash_bank.h"
 #include "btstack_tlv_flash_bank.h"
 #include "ble/le_device_db_tlv.h"
+#include "oled.h"
 
 #define usb_cdc_printf printf
 
@@ -150,6 +151,8 @@ static void load_current_slot(void) {
     }
     int num_bonded = le_device_db_count();
     usb_cdc_printf("[BT] Bonded devices in DB: %d\r\n", num_bonded);
+    oled_set_slot(current_slot);
+    oled_set_bt_state(OLED_BT_DISCONNECTED);
 }
 
 // Flash (TLV) に現在のスロット番号を保存
@@ -168,6 +171,10 @@ static void save_current_slot(uint8_t slot) {
 static void pairing_mode_timeout_handler(btstack_timer_source_t *ts) {
     usb_cdc_printf("[BT] Pairing mode timeout.\r\n");
     is_pairing_mode = false;
+    bd_addr_t null_addr = {0};
+    gap_advertisements_set_params(0x00A0, 0x00C0, 0, 0, null_addr, 0x07, 0x00);
+    oled_set_bt_state(OLED_BT_DISCONNECTED);
+    oled_set_status("Timeout");
 }
 
 // クールダウン終了後にアドバタイズを再開するハンドラ
@@ -208,6 +215,8 @@ static void apply_slot_identity(int slot) {
     save_current_slot((uint8_t)slot); // Flash に保存
 
     usb_cdc_printf("[BT] -> apply_slot_identity(Slot %d) start\r\n", slot + 1);
+    oled_set_slot(slot);
+    oled_set_bt_state(is_pairing_mode ? OLED_BT_PAIRING : OLED_BT_DISCONNECTED);
 
     gap_advertisements_enable(0);
 
@@ -265,6 +274,9 @@ void ble_switch_slot(int slot) {
     pending_slot = slot;
     pending_is_pairing = false;
     slot_change_requested = true;
+    oled_set_slot(slot);
+    oled_set_bt_state(OLED_BT_SWITCHING);
+    oled_set_status("Switching...");
 }
 
 void ble_hid_switch_host(uint8_t slot) {
@@ -277,6 +289,9 @@ void ble_enter_pairing_mode(int slot) {
     pending_slot = slot;
     pending_is_pairing = true;
     slot_change_requested = true;
+    oled_set_slot(slot);
+    oled_set_bt_state(OLED_BT_PAIRING);
+    oled_set_status("Pairing (60s)");
 }
 
 static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size) {
@@ -357,7 +372,11 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     ble_can_send = true;
                     slot_disconnect_after_zero = false;
                     zero_sent_waiting_ack = false;
+                    gap_advertisements_enable(0);
                     usb_cdc_printf("[BT] Connected to Slot %d (peer=%s)\r\n", current_slot + 1, bd_addr_to_str(peer_addr));
+                    oled_set_slot(current_slot);
+                    oled_set_bt_state(OLED_BT_CONNECTED);
+                    oled_set_status("Connected");
                 }
             }
             break;
@@ -380,6 +399,8 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
 
         case SM_EVENT_PAIRING_STARTED:
             usb_cdc_printf("[BT] SM_EVENT_PAIRING_STARTED\r\n");
+            oled_set_bt_state(OLED_BT_PAIRING);
+            oled_set_status("Pairing...");
             break;
 
         case SM_EVENT_PAIRING_COMPLETE: {
@@ -391,6 +412,11 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                 btstack_run_loop_remove_timer(&pairing_timeout_timer);
                 int count = le_device_db_count();
                 usb_cdc_printf("[BT] Pairing complete, total bonded devices: %d\r\n", count);
+                bd_addr_t null_addr = {0};
+                gap_advertisements_set_params(0x00A0, 0x00C0, 0, 0, null_addr, 0x07, 0x00);
+                oled_set_slot(current_slot);
+                oled_set_bt_state(OLED_BT_CONNECTED);
+                oled_set_status("Paired OK");
             }
             break;
         }
@@ -434,6 +460,9 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                 zero_sent_waiting_ack = false;
                 uint8_t reason = hci_event_disconnection_complete_get_reason(packet);
                 usb_cdc_printf("[BT] Disconnected (reason=0x%02X)\r\n", reason);
+                oled_set_slot(current_slot);
+                oled_set_bt_state(OLED_BT_DISCONNECTED);
+                oled_set_status("Disconnected");
 
             // スロット切り替え待ちがある場合、切断完了後に安全に新スロットを適用して再開
             if (switch_pending) {
@@ -445,6 +474,11 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     btstack_run_loop_set_timer_handler(&pairing_timeout_timer, pairing_mode_timeout_handler);
                     btstack_run_loop_set_timer(&pairing_timeout_timer, 60000);
                     btstack_run_loop_add_timer(&pairing_timeout_timer);
+                    bd_addr_t null_addr = {0};
+                    gap_advertisements_set_params(0x0050, 0x0060, 0, 0, null_addr, 0x07, 0x00);
+                } else {
+                    bd_addr_t null_addr = {0};
+                    gap_advertisements_set_params(0x00A0, 0x00C0, 0, 0, null_addr, 0x07, 0x00);
                 }
                 usb_cdc_printf("[BT] Applying new slot identity after disconnect: Slot %d (pairing=%d)\r\n", slot + 1, is_pairing_mode);
                 apply_slot_identity(slot);
@@ -503,8 +537,9 @@ void ble_hid_init(void) {
     hci_event_callback_registration.callback = &packet_handler;
     hci_add_event_handler(&hci_event_callback_registration);
 
-    uint16_t adv_int_min = 0x0030;
-    uint16_t adv_int_max = 0x0030;
+    // アドバタイズ間隔を 100ms〜120ms (0x00A0〜0x00C0) に設定
+    uint16_t adv_int_min = 0x00A0; // 100 ms
+    uint16_t adv_int_max = 0x00C0; // 120 ms
     bd_addr_t null_addr;
     memset(null_addr, 0, 6);
     gap_advertisements_set_params(adv_int_min, adv_int_max, 0, 0, null_addr, 0x07, 0x00);

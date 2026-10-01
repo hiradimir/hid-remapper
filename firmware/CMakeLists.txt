@@ -32,6 +32,7 @@ endif()
 
 
 option(ENABLE_BLE "Enable Bluetooth Low Energy support (requires pico_w)")
+option(ENABLE_OLED "Enable SSD1306 OLED display" OFF)
 
 if(ENABLE_BLE AND NOT PICO_BOARD STREQUAL "pico_w")
     message(FATAL_ERROR "ENABLE_BLE requires PICO_BOARD=pico_w")
@@ -72,6 +73,12 @@ endif()
 if(ENABLE_BLE)
     target_sources(remapper PRIVATE src/ble_hid.cc)
     target_compile_definitions(remapper PUBLIC ENABLE_BLE=1)
+
+    if(ENABLE_OLED)
+        target_sources(remapper PRIVATE src/oled.cc)
+        target_compile_definitions(remapper PUBLIC ENABLE_OLED=1)
+        target_link_libraries(remapper hardware_i2c)
+    endif()
 
     # GATT コンパイルルールの定義 (ble_mouse.gatt -> ble_mouse.h)
     set(GATT_HEADER ${CMAKE_CURRENT_BINARY_DIR}/ble_mouse.h)

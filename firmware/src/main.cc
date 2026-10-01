@@ -12,6 +12,7 @@
 #endif
 #if ENABLE_BLE
 #include "ble_hid.h"
+#include "oled.h"
 #endif
 #include <hardware/flash.h>
 #include <hardware/gpio.h>
@@ -115,12 +116,17 @@ static bool check_pairing_hotkey(uint8_t interface, const uint8_t* report_with_i
     bool gui_pressed  = (modifier & 0x88) != 0; // Left/Right GUI (Win/Cmd)
     bool alt_pressed  = (modifier & 0x44) != 0; // Left/Right Alt
 
-    // F1 〜 F4 のスロット判定
+    // F1 〜 F4 のスロット判定（通常数字キーやテンキーの誤判定を完全に排除）
     int slot = -1;
     if      ((report_data[7] & 0x40) != 0) slot = 0; // F1 -> Slot 1
     else if ((report_data[7] & 0x80) != 0) slot = 1; // F2 -> Slot 2
     else if ((report_data[8] & 0x01) != 0) slot = 2; // F3 -> Slot 3
     else if ((report_data[8] & 0x02) != 0) slot = 3; // F4 -> Slot 4
+
+    // デバッグ出力: Ctrl+Win と F1..F4 が押されたら UART に出力
+    if (ctrl_pressed && gui_pressed && slot >= 0) {
+        printf("[KBD-DEBUG] mod=0x%02X(count=%d) slot=%d\r\n", modifier, 2 + (alt_pressed ? 1 : 0), slot + 1);
+    }
 
     static bool hotkey_was_pressed = false;
     bool hotkey_now = (ctrl_pressed && gui_pressed && (slot >= 0));
@@ -132,10 +138,16 @@ static bool check_pairing_hotkey(uint8_t interface, const uint8_t* report_with_i
             send_all_release_reports();
 
             if (alt_pressed) {
-                usb_cdc_printf("[BT] Hotkey: Enter Pairing Mode for slot %d\r\n", slot + 1);
+                printf("[BT] *** HOTKEY: Enter Pairing Mode for slot %d ***\r\n", slot + 1);
+                oled_set_slot(slot);
+                oled_set_bt_state(OLED_BT_PAIRING);
+                oled_set_status("Pairing (60s)");
                 ble_enter_pairing_mode(slot);
             } else {
-                usb_cdc_printf("[BT] Hotkey: Switch to slot %d\r\n", slot + 1);
+                printf("[BT] *** HOTKEY: Switch to slot %d ***\r\n", slot + 1);
+                oled_set_slot(slot);
+                oled_set_bt_state(OLED_BT_SWITCHING);
+                oled_set_status("Switching...");
                 ble_switch_slot(slot);
             }
         }
@@ -200,6 +212,10 @@ bool do_send_report(uint8_t interface, const uint8_t* report_with_id, uint8_t le
 
 void gpio_pins_init() {
     gpio_valid_pins_mask = get_gpio_valid_pins_mask();
+#if ENABLE_BLE && ENABLE_OLED
+    // GP4 (I2C0 SDA) と GP5 (I2C0 SCL) を OLED 専用として GPIO マッピングから除外
+    gpio_valid_pins_mask &= ~((1 << 4) | (1 << 5));
+#endif
     gpio_init_mask(gpio_valid_pins_mask);
 }
 
@@ -362,11 +378,27 @@ uint64_t get_unique_id() {
 
 // Core 1 用メイン関数
 // 将来の OLED 状態表示（BTスロット、接続先情報など）の描画タスクをここに配置可能
+// Core 1 用メイン関数
+// sleep_ms() はハードウェアタイマ割り込み(TIMER_IRQ)を伴い Core 1 で未処理IRQトラップを引き起こす危険があるため、
+// time_us_64() と tight_loop_contents() による安全なノンブロッキング待機を使用
 void core1_main(void) {
     multicore_lockout_victim_init();
+#if ENABLE_BLE && ENABLE_OLED
+    oled_init();
+    uint64_t next_oled_us = time_us_64() + 50000;
     while (true) {
-        sleep_ms(10);
+        uint64_t now_us = time_us_64();
+        if (now_us >= next_oled_us) {
+            next_oled_us = now_us + 50000;
+            oled_task();
+        }
+        tight_loop_contents();
     }
+#else
+    while (true) {
+        tight_loop_contents();
+    }
+#endif
 }
 
 int main() {
