@@ -20,6 +20,7 @@
 #include <pico/platform.h>
 #include <pico/stdio.h>
 #include <pico/unique_id.h>
+#include <pico/multicore.h>
 #include "pico/stdio_uart.h"
 
 #include "activity_led.h"
@@ -82,18 +83,15 @@ void __no_inline_not_in_flash_func(sof_handler)(uint32_t frame_count) {
 #if ENABLE_BLE
 // 空のレポート（全キー・全ボタン離下）を送信してホスト側のキー押しっぱなし（スタック）を防止する
 static void send_all_release_reports(void) {
-    uint8_t zero_mouse[9] = {0};
     uint8_t zero_kbd[16] = {0};
 
-    // USB 側に全離下を送信
+    // USB 側にキーボード全離下を送信
     if (tud_mounted() && !tud_suspended()) {
-        tud_hid_n_report(0, 1, zero_mouse, sizeof(zero_mouse));
         tud_hid_n_report(0, 2, zero_kbd, sizeof(zero_kbd));
     }
 
-    // BLE 側にも全離下を送信
+    // BLE 側にもキーボード全離下を送信
     if (ble_hid_is_connected()) {
-        ble_hid_send_report(1, zero_mouse, sizeof(zero_mouse));
         ble_hid_send_report(2, zero_kbd, sizeof(zero_kbd));
     }
 }
@@ -124,11 +122,12 @@ static bool check_pairing_hotkey(uint8_t interface, const uint8_t* report_with_i
     else if ((report_data[8] & 0x01) != 0) slot = 2; // F3 -> Slot 3
     else if ((report_data[8] & 0x02) != 0) slot = 3; // F4 -> Slot 4
 
-    static bool hotkey_was_pressed = false;
-    bool hotkey_now_pressed = (ctrl_pressed && gui_pressed && (slot >= 0));
+    static bool hotkey_latch = false;
+    bool hotkey_now = (ctrl_pressed && gui_pressed && (slot >= 0));
 
-    if (hotkey_now_pressed) {
-        if (!hotkey_was_pressed) {
+    if (hotkey_now) {
+        if (!hotkey_latch) {
+            hotkey_latch = true;
             // ホットキー成立直前に先行してホストに届いてしまった Ctrl/Cmd を打ち消すため全離下を送信
             send_all_release_reports();
 
@@ -140,11 +139,26 @@ static bool check_pairing_hotkey(uint8_t interface, const uint8_t* report_with_i
                 ble_switch_slot(slot);
             }
         }
-        hotkey_was_pressed = true;
         return true; // ホットキーは消費して OS には送信しない
     }
 
-    hotkey_was_pressed = false;
+    if (hotkey_latch) {
+        // ホットキー成立後、修飾キー（Ctrl/Win）を含むすべてのキーが完全に離されるまで
+        // OS へのキー送信をマスク（破棄）して、ゴースト入力を防止する
+        bool any_key_pressed = (modifier != 0);
+        for (int k = 1; k < report_len; k++) {
+            if (report_data[k] != 0) {
+                any_key_pressed = true;
+                break;
+            }
+        }
+        if (!any_key_pressed) {
+            hotkey_latch = false; // すべて離されたらラッチ解除
+            return false; // ★ 全キー離下レポート（修飾キーもキーも全て0）は OS へ正常に送信して解除する！
+        }
+        return true; // キーが残っている間は破棄
+    }
+
     return false;
 }
 #endif
@@ -168,9 +182,7 @@ bool do_send_report(uint8_t interface, const uint8_t* report_with_id, uint8_t le
     if (curr_ble_connected && !prev_ble_connected) {
         usb_cdc_printf("[BT] Switched to BLE priority, clearing USB reports\r\n");
         uint8_t zero_kbd[16] = {0};
-        uint8_t zero_mouse[9] = {0};
         if (tud_mounted() && !tud_suspended()) {
-            tud_hid_n_report(0, 1, zero_mouse, sizeof(zero_mouse));
             tud_hid_n_report(0, 2, zero_kbd, sizeof(zero_kbd));
         }
     }
@@ -363,6 +375,16 @@ uint64_t get_unique_id() {
     return ret;
 }
 
+
+// Core 1 用メイン関数
+// 将来の OLED 状態表示（BTスロット、接続先情報など）の描画タスクをここに配置可能
+void core1_main(void) {
+    multicore_lockout_victim_init();
+    while (true) {
+        sleep_ms(10);
+    }
+}
+
 int main() {
     timer_hw->dbgpause = 0; // デバッグ時のタイマ停止を解除
 
@@ -372,6 +394,12 @@ int main() {
     stdio_init_all();
     printf("\r\n\r\n=== REMAPPER BOOT ===\r\n");
     fflush(stdout);
+
+    // デバッガ接続時や再起動時にも Core 1 を確実に起動させるため、
+    // まずハードウェアリセットと FIFO クリアを行ってから launch する
+    multicore_reset_core1();
+    multicore_fifo_drain();
+    multicore_launch_core1(core1_main);
 #ifdef I2C_ENABLED
     our_i2c_init();
 #endif
@@ -451,7 +479,14 @@ int main() {
             set_gpio_dir_pending = false;
         }
 #if ENABLE_BLE
-        if ((tud_mounted() && (tud_hid_n_ready(0) || tud_suspended())) || ble_hid_is_connected()) {
+        bool ready_to_send = false;
+        if (ble_hid_is_connected()) {
+            ready_to_send = ble_hid_can_send();
+        } else if (tud_mounted()) {
+            ready_to_send = tud_hid_n_ready(0) || tud_suspended();
+        }
+
+        if (ready_to_send) {
             send_report(do_send_report);
         }
         ble_hid_task();

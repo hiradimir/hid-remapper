@@ -15,6 +15,11 @@ include(pico_sdk_import.cmake)
 
 project(remapper)
 
+# 2097152 (2MB) - 3 * 4096 (12KB) = 2084864 (TLV領域を hid-remapper config の手前に配置)
+add_compile_definitions(PICO_FLASH_BANK_STORAGE_OFFSET=2084864)
+# Core 1 は RAM 常駐アイドル中のため Flash アクセス競合なしとみなす
+add_compile_definitions(PICO_FLASH_ASSUME_CORE1_SAFE=1)
+
 pico_sdk_init()
 
 check_and_add_pico_pio_usb_support()
@@ -34,8 +39,6 @@ if(ENABLE_BLE AND NOT PICO_BOARD STREQUAL "pico_w")
     message(FATAL_ERROR "ENABLE_BLE requires PICO_BOARD=pico_w")
 endif()
 
-# 2097152 (2MB) - 3 * 4096 (12KB) = 2084864
-add_compile_definitions(PICO_FLASH_BANK_STORAGE_OFFSET=2084864)
 
 add_executable(remapper
     src/main.cc
@@ -93,6 +96,7 @@ if(ENABLE_BLE)
         pico_cyw43_arch_none
         hardware_flash
         pico_btstack_flash_bank
+        pico_multicore
     )
 endif()
 

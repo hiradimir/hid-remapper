@@ -11,6 +11,7 @@ extern "C" {
 void ble_hid_init(void);
 void ble_hid_task(void);
 bool ble_hid_is_connected(void);
+bool ble_hid_can_send(void);
 void ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len);
 
 void ble_pair_new_device(void);
