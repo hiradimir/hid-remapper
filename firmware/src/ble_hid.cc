@@ -273,6 +273,10 @@ static void apply_slot_identity(int slot) {
 // ホットキーから呼ばれる関数（ここではフラグを立てるだけで即座に抜ける）
 void ble_switch_slot(int slot) {
     if (slot < 0 || slot >= MAX_SLOTS) return;
+    if (slot == current_slot) {
+        usb_cdc_printf("[BT] Already on Slot %d, ignoring slot switch\r\n", slot + 1);
+        return;
+    }
     usb_cdc_printf("[BT] Request Switch to Slot %d\r\n", slot + 1);
     pending_slot = slot;
     pending_is_pairing = false;
@@ -381,6 +385,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     usb_cdc_printf("[BT] Connected to Slot %d (peer=%s)\r\n", current_slot + 1, bd_addr_to_str(peer_addr));
                     oled_set_slot(current_slot);
                     oled_set_bt_state(OLED_BT_CONNECTED);
+                    oled_set_mode(true);
                     oled_set_slot_bonded(current_slot, true);
                     oled_set_peer_addr(bd_addr_to_str(peer_addr));
                 }

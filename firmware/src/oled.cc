@@ -332,22 +332,23 @@ void oled_task(void) {
     need_redraw = false;
     last_refresh_us = now_us;
 
-    // Line 0: Mode + Status + TX (21 chars)
-    const char* mode_str = ui_ble_mode ? "[BT ]" : "[USB]";
-    const char* state_str = "DISC ";
+    // Line 0: Mode icon (BT: 0x7F / USB: 0x86) + Status + TX electric icon (0x85) (21 chars, no brackets)
+    bool is_bt_mode = (ui_bt_state == OLED_BT_CONNECTED) ? true : ui_ble_mode;
+    const char* mode_icon = is_bt_mode ? "\x7F" : "\x86";
+    const char* state_str = "DISC";
     switch (ui_bt_state) {
-        case OLED_BT_CONNECTED: state_str = "CONN "; break;
-        case OLED_BT_PAIRING:   state_str = "PAIR "; break;
-        case OLED_BT_SWITCHING: state_str = "WAIT "; break;
-        default:                state_str = "DISC "; break;
+        case OLED_BT_CONNECTED: state_str = "CONN"; break;
+        case OLED_BT_PAIRING:   state_str = "PAIR"; break;
+        case OLED_BT_SWITCHING: state_str = "WAIT"; break;
+        default:                state_str = "DISC"; break;
     }
-    const char* tx_str = "[  ]";
+    const char* tx_icon = " ";
     if (ui_tx_timer > 0) {
-        tx_str = "[TX]";
+        tx_icon = "\x85"; // 0x85: 稲妻/電気アイコン (TX点滅)
         ui_tx_timer--;
     }
     char line0[24];
-    snprintf(line0, sizeof(line0), "%-5s %-5s      %-4s", mode_str, state_str, tx_str);
+    snprintf(line0, sizeof(line0), "%s %-4s              %s", mode_icon, state_str, tx_icon);
 
     // Line 1: 各スロット状態 1:M* 2:W  3:A  4:I  (21 chars)
     char line1[24];
@@ -370,12 +371,12 @@ void oled_task(void) {
     char line2[24];
     snprintf(line2, sizeof(line2), "USB: P1:%-3.3s  P2:%-3.3s  ", ui_p1_dev, ui_p2_dev);
 
-    // Line 3 (W-02): ステータスメッセージ または BTアイコン+MACアドレス右寄せ (21 chars)
+    // Line 3 (W-02/W-14): ステータスメッセージ または BTアイコン左寄せ+MACアドレス右寄せ (21 chars)
     char line3[24];
     if (ui_bt_state == OLED_BT_CONNECTED && ui_peer_addr[0] != '\0') {
         int pad = 20 - (int)strlen(ui_peer_addr);
         if (pad < 0) pad = 0;
-        snprintf(line3, sizeof(line3), "%*s\x7F%s", pad, "", ui_peer_addr);
+        snprintf(line3, sizeof(line3), "\x7F%*s%s", pad, "", ui_peer_addr);
     } else {
         snprintf(line3, sizeof(line3), "%-21.21s", ui_status_msg);
     }
