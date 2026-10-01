@@ -18,6 +18,7 @@ void ble_clear_bonds(void);
 
 void ble_enter_pairing_mode(int slot);
 void ble_switch_slot(int slot);
+void ble_hid_switch_host(uint8_t slot);
 
 void ble_led(bool value);
 

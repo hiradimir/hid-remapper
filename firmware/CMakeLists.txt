@@ -57,10 +57,6 @@ add_executable(remapper
     src/xbox.cc
 )
 
-target_compile_options(remapper PRIVATE
-    -ffile-prefix-map=/workspace=/Users/yutaka/git/hid-remapper-bt
-)
-
 if((PICO_BOARD STREQUAL "pico") OR (PICO_BOARD STREQUAL "pico2") OR (PICO_BOARD STREQUAL "pico_w"))
 target_compile_definitions(remapper PUBLIC PICO_DEFAULT_UART_TX_PIN=16)
 target_compile_definitions(remapper PUBLIC PICO_DEFAULT_UART_RX_PIN=17)

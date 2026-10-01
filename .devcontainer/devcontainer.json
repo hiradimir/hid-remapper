@@ -2,15 +2,17 @@
   "name": "Pico W HID-Remapper Dev",
   "build": {
     "dockerfile": "Dockerfile"
-  },
+  },"runArgs": [
+    "--privileged" // コンテナから /dev/bus/usb や /dev/ttyACM* へのフルアクセスを許可
+  ],
   "workspaceFolder": "/workspace",
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
   "customizations": {
     "vscode": {
       "extensions": [
-        "ms-vscode.cpptools",
-        "ms-vscode.cmake-tools",
-        "twxs.cmake"
+        "ms-vscode.vscode-serial-monitor", // VS Code 公式 Serial Monitor
+        "marus25.cortex-debug",            // SWD デバッグ用
+        "ms-vscode.cmake-tools"
       ]
     }
   },

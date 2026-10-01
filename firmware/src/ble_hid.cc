@@ -124,6 +124,7 @@ static const btstack_tlv_t *tlv_impl = NULL;
 static volatile bool slot_change_requested = false;
 static volatile int pending_slot = -1;
 static volatile bool pending_is_pairing = false;
+static volatile bool switch_pending = false;
 
 // extern "C" void usb_cdc_printf(const char *format, ...);
 
@@ -239,6 +240,10 @@ void ble_switch_slot(int slot) {
     slot_change_requested = true;
 }
 
+void ble_hid_switch_host(uint8_t slot) {
+    ble_switch_slot((int)slot);
+}
+
 void ble_enter_pairing_mode(int slot) {
     if (slot < 0 || slot >= MAX_SLOTS) return;
     usb_cdc_printf("[BT] Request Pairing Mode for Slot %d\r\n", slot + 1);
@@ -319,6 +324,21 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             break;
         }
 
+        // 既知ホストの再接続検知
+        case SM_EVENT_IDENTITY_RESOLVING_SUCCEEDED: {
+            hci_con_handle_t handle = sm_event_identity_resolving_succeeded_get_handle(packet);
+            if (is_pairing_mode) {
+                // ペアリングモード中に既知ホストが再接続してきた場合は即座に切断し、オープン広告を維持
+                usb_cdc_printf("[BT] Known host reconnected during pairing mode! Disconnecting handle 0x%04X\r\n", handle);
+                gap_disconnect(handle);
+                gap_advertisements_enable(1);
+                break;
+            }
+            int device_index = sm_event_identity_resolving_succeeded_get_index(packet);
+            usb_cdc_printf("[BT] Identity resolved: device_index=%d\r\n", device_index);
+            break;
+        }
+
         case HCI_EVENT_ENCRYPTION_CHANGE: {
             uint8_t status = hci_event_encryption_change_get_status(packet);
             uint8_t enabled = hci_event_encryption_change_get_encryption_enabled(packet);
@@ -330,8 +350,24 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             con_handle = HCI_CON_HANDLE_INVALID;
             uint8_t reason = hci_event_disconnection_complete_get_reason(packet);
             usb_cdc_printf("[BT] Disconnected! reason=0x%02X\r\n", reason);
-            ble_led(1);
-            gap_advertisements_enable(1);
+
+            // スロット切り替え待ちがある場合、切断完了後に安全に新スロットを適用して再開
+            if (switch_pending) {
+                switch_pending = false;
+                int slot = pending_slot;
+                is_pairing_mode = pending_is_pairing;
+                if (is_pairing_mode) {
+                    btstack_run_loop_remove_timer(&pairing_timeout_timer);
+                    btstack_run_loop_set_timer_handler(&pairing_timeout_timer, pairing_mode_timeout_handler);
+                    btstack_run_loop_set_timer(&pairing_timeout_timer, 60000);
+                    btstack_run_loop_add_timer(&pairing_timeout_timer);
+                }
+                usb_cdc_printf("[BT] Applying new slot identity after disconnect: Slot %d (pairing=%d)\r\n", slot + 1, is_pairing_mode);
+                apply_slot_identity(slot);
+            } else {
+                ble_led(1);
+                gap_advertisements_enable(1);
+            }
             break;
         }
 
@@ -394,21 +430,22 @@ void ble_hid_task(void) {
 
         usb_cdc_printf("[BT] Processing slot change to %d (pairing=%d)\r\n", slot + 1, is_pairing);
 
-        is_pairing_mode = is_pairing;
-        if (is_pairing) {
-            btstack_run_loop_remove_timer(&pairing_timeout_timer);
-            btstack_run_loop_set_timer_handler(&pairing_timeout_timer, pairing_mode_timeout_handler);
-            btstack_run_loop_set_timer(&pairing_timeout_timer, 60000);
-            btstack_run_loop_add_timer(&pairing_timeout_timer);
-        }
-
-        // 既存接続があれば切断
+        // 既存接続がある場合は切断のみを発行し、実処理は DISCONNECTION_COMPLETE で実行
         if (con_handle != HCI_CON_HANDLE_INVALID) {
+            switch_pending = true;
             gap_disconnect(con_handle);
+        } else {
+            // 未接続状態であれば即座に新スロットを適用
+            switch_pending = false;
+            is_pairing_mode = is_pairing;
+            if (is_pairing) {
+                btstack_run_loop_remove_timer(&pairing_timeout_timer);
+                btstack_run_loop_set_timer_handler(&pairing_timeout_timer, pairing_mode_timeout_handler);
+                btstack_run_loop_set_timer(&pairing_timeout_timer, 60000);
+                btstack_run_loop_add_timer(&pairing_timeout_timer);
+            }
+            apply_slot_identity(slot);
         }
-
-        // 新しいスロットのアイデンティティを適用
-        apply_slot_identity(slot);
     }
 }
 
