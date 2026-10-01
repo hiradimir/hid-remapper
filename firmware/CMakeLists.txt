@@ -17,8 +17,6 @@ project(remapper)
 
 # 2097152 (2MB) - 3 * 4096 (12KB) = 2084864 (TLV領域を hid-remapper config の手前に配置)
 add_compile_definitions(PICO_FLASH_BANK_STORAGE_OFFSET=2084864)
-# Core 1 は RAM 常駐アイドル中のため Flash アクセス競合なしとみなす
-add_compile_definitions(PICO_FLASH_ASSUME_CORE1_SAFE=1)
 
 pico_sdk_init()
 

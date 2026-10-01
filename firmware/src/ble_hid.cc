@@ -122,6 +122,7 @@ static int current_slot = 0;
 static bool is_pairing_mode = false;
 static btstack_timer_source_t pairing_timeout_timer;
 static btstack_timer_source_t adv_resume_timer;
+static btstack_timer_source_t disconnect_timeout_timer;
 static hci_con_handle_t con_handle = HCI_CON_HANDLE_INVALID;
 static btstack_packet_callback_registration_t hci_event_callback_registration;
 static btstack_packet_callback_registration_t sm_event_callback_registration;
@@ -190,6 +191,17 @@ static void get_slot_random_address(int slot, bd_addr_t out_addr) {
     // 末尾バイトにスロット番号をオフセットとして加算（2台目以降も被らない）
     out_addr[5] = id.id[7] + (uint8_t)slot;
 }
+// ホストが休止・サスペンド等で切断シーケンスに応答しない場合の安全タイムアウト (300ms)
+static void disconnect_timeout_handler(btstack_timer_source_t *ts) {
+    if (con_handle != HCI_CON_HANDLE_INVALID && slot_disconnect_after_zero) {
+        usb_cdc_printf("[BT] Disconnect timeout (host suspended/unresponsive). Forcing disconnect.\r\n");
+        slot_disconnect_after_zero = false;
+        zero_sent_waiting_ack = false;
+        switch_pending = true;
+        gap_disconnect(con_handle);
+    }
+}
+
 // スロットごとの名前とアドレスを適用してアドバタイズを安全に再設定する共通関数
 static void apply_slot_identity(int slot) {
     current_slot = slot;
@@ -413,6 +425,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
         }
 
         case HCI_EVENT_DISCONNECTION_COMPLETE: {
+            btstack_run_loop_remove_timer(&disconnect_timeout_timer);
             if (con_handle != HCI_CON_HANDLE_INVALID) {
                 con_handle = HCI_CON_HANDLE_INVALID;
                 ble_reports_enabled = false;
@@ -512,6 +525,13 @@ void ble_hid_task(void) {
         if (con_handle != HCI_CON_HANDLE_INVALID) {
             slot_disconnect_after_zero = true;
             zero_sent_waiting_ack = false;
+            switch_pending = true;
+
+            // ホストが休止・サスペンド等で応答しない場合の安全タイムアウト (300ms)
+            btstack_run_loop_remove_timer(&disconnect_timeout_timer);
+            btstack_run_loop_set_timer_handler(&disconnect_timeout_timer, disconnect_timeout_handler);
+            btstack_run_loop_set_timer(&disconnect_timeout_timer, 300);
+            btstack_run_loop_add_timer(&disconnect_timeout_timer);
             if (ble_can_send) {
                 uint8_t zero_kbd[16] = {0};
                 uint8_t status = hids_device_send_input_report_for_id(con_handle, 2, zero_kbd, sizeof(zero_kbd));

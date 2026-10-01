@@ -122,12 +122,12 @@ static bool check_pairing_hotkey(uint8_t interface, const uint8_t* report_with_i
     else if ((report_data[8] & 0x01) != 0) slot = 2; // F3 -> Slot 3
     else if ((report_data[8] & 0x02) != 0) slot = 3; // F4 -> Slot 4
 
-    static bool hotkey_latch = false;
+    static bool hotkey_was_pressed = false;
     bool hotkey_now = (ctrl_pressed && gui_pressed && (slot >= 0));
 
     if (hotkey_now) {
-        if (!hotkey_latch) {
-            hotkey_latch = true;
+        if (!hotkey_was_pressed) {
+            hotkey_was_pressed = true;
             // ホットキー成立直前に先行してホストに届いてしまった Ctrl/Cmd を打ち消すため全離下を送信
             send_all_release_reports();
 
@@ -142,23 +142,7 @@ static bool check_pairing_hotkey(uint8_t interface, const uint8_t* report_with_i
         return true; // ホットキーは消費して OS には送信しない
     }
 
-    if (hotkey_latch) {
-        // ホットキー成立後、修飾キー（Ctrl/Win）を含むすべてのキーが完全に離されるまで
-        // OS へのキー送信をマスク（破棄）して、ゴースト入力を防止する
-        bool any_key_pressed = (modifier != 0);
-        for (int k = 1; k < report_len; k++) {
-            if (report_data[k] != 0) {
-                any_key_pressed = true;
-                break;
-            }
-        }
-        if (!any_key_pressed) {
-            hotkey_latch = false; // すべて離されたらラッチ解除
-            return false; // ★ 全キー離下レポート（修飾キーもキーも全て0）は OS へ正常に送信して解除する！
-        }
-        return true; // キーが残っている間は破棄
-    }
-
+    hotkey_was_pressed = false;
     return false;
 }
 #endif
@@ -484,6 +468,11 @@ int main() {
             ready_to_send = ble_hid_can_send();
         } else if (tud_mounted()) {
             ready_to_send = tud_hid_n_ready(0) || tud_suspended();
+        } else {
+            // BLE未接続かつUSB未接続（給電のみ、または未接続時）でも
+            // ホットキー判定および内部バッファ（OR_BUFSIZE=8）の溢れ（overflow!）防止のために
+            // send_report を呼び出してキューを安全に消化する
+            ready_to_send = true;
         }
 
         if (ready_to_send) {
