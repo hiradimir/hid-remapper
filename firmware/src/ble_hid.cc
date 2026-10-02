@@ -115,12 +115,28 @@ static const uint8_t hid_report_descriptor[] = {
 };
 
 static hids_device_report_t hid_reports[2];
-static bool ble_reports_enabled = false;
+
+// 【BL-14】統一ステートマシンの定義
+typedef enum {
+    BLE_STATE_STANDBY_SILENT = 0, // 未ボンドスロット：電波完全停止 (OLED: DISC, LED: OFF, Status: Ready)
+    BLE_STATE_PAIRING = 1,        // ペアリング待機中 (60s限定・高速30ms・Flags:0x06, LED: ON, OLED: PAIR, Status: Pairing (60s))
+    BLE_STATE_RECONNECTING = 2,   // ボンド済み再接続待機中 (30ms・Flags:0x04, LED: OFF, OLED: DISC, Status: Ready)
+    BLE_STATE_CONNECTING = 3,     // 物理リンク接続中（暗号化・購読未完了、送信完全ブロック, OLED: WAIT, Status: Connecting...）
+    BLE_STATE_CONNECTED = 4,      // 暗号化・レポート購読完了（論理接続確立、送信許可, OLED: CONN, Status: Conn: <addr>）
+    BLE_STATE_SWITCHING = 5,      // スロット切替遷移中（切断待ち, OLED: WAIT, Status: Switching...）
+} ble_state_t;
+
+static ble_state_t current_state = BLE_STATE_STANDBY_SILENT;
+
+// 【BL-15】暗号化および各レポート有効化の厳密な個別管理
+static bool ble_kbd_ready = false;      // Report ID 2 (Keyboard) subscribed
+static bool ble_mouse_ready = false;    // Report ID 1 (Mouse) subscribed
+static bool ble_encrypted = false;      // Link encrypted
 static bool ble_can_send = true;
 static bool slot_disconnect_after_zero = false;
 static bool zero_sent_waiting_ack = false;
-static bd_addr_t slot_addrs[MAX_SLOTS];
-static bool slot_valid[MAX_SLOTS] = {false, false, false, false};
+static char current_peer_addr[18] = "";
+
 static int current_slot = 0;
 
 static bool is_pairing_mode = false;
@@ -139,8 +155,57 @@ static volatile int pending_slot = -1;
 static volatile bool pending_is_pairing = false;
 static volatile bool switch_pending = false;
 
-
 static void apply_slot_identity(int slot);
+
+// 状態に応じた OLED / LED の一元更新
+static void update_ui_for_state(ble_state_t state) {
+    oled_set_slot((uint8_t)current_slot);
+    switch (state) {
+        case BLE_STATE_STANDBY_SILENT:
+            oled_set_bt_state(OLED_BT_DISCONNECTED);
+            oled_set_mode(false);
+            oled_set_status("Ready");
+            oled_set_peer_addr("");
+            ble_led(0);
+            break;
+        case BLE_STATE_PAIRING:
+            oled_set_bt_state(OLED_BT_PAIRING);
+            oled_set_mode(false);
+            oled_set_status("Pairing (60s)");
+            oled_set_peer_addr("");
+            ble_led(1);
+            break;
+        case BLE_STATE_RECONNECTING:
+            oled_set_bt_state(OLED_BT_DISCONNECTED);
+            oled_set_mode(false);
+            oled_set_status("Ready");
+            oled_set_peer_addr("");
+            ble_led(0);
+            break;
+        case BLE_STATE_CONNECTING:
+            oled_set_bt_state(OLED_BT_SWITCHING); // WAIT
+            oled_set_mode(false);
+            oled_set_status("Connecting...");
+            oled_set_peer_addr("");
+            ble_led(0);
+            break;
+        case BLE_STATE_CONNECTED:
+            oled_set_bt_state(OLED_BT_CONNECTED);
+            oled_set_mode(true);
+            ble_led(0);
+            if (current_peer_addr[0] != '\0') {
+                oled_set_peer_addr(current_peer_addr);
+            }
+            break;
+        case BLE_STATE_SWITCHING:
+            oled_set_bt_state(OLED_BT_SWITCHING); // WAIT
+            oled_set_mode(false);
+            oled_set_status("Switching...");
+            oled_set_peer_addr("");
+            ble_led(0);
+            break;
+    }
+}
 
 static void save_slot_bonded_mask(uint8_t mask) {
     slot_bonded_mask = mask;
@@ -237,9 +302,8 @@ static void adv_resume_timer_handler(btstack_timer_source_t *ts) {
     if (!is_pairing_mode && !is_bonded) {
         printf("[BT] Slot %d is unbonded and not in pairing mode. Radio OFF (silent).\r\n", current_slot + 1);
         gap_advertisements_enable(0);
-        ble_led(0);
-        oled_set_bt_state(OLED_BT_DISCONNECTED);
-        oled_set_status("Ready");
+        current_state = BLE_STATE_STANDBY_SILENT;
+        update_ui_for_state(current_state);
         return;
     }
 
@@ -287,11 +351,16 @@ static void adv_resume_timer_handler(btstack_timer_source_t *ts) {
     gap_random_address_set_mode(GAP_RANDOM_ADDRESS_TYPE_STATIC);
     gap_random_address_set(slot_addr);
 
-    // アドバタイズ再開
-    ble_led(1);
+    if (is_pairing_mode) {
+        current_state = BLE_STATE_PAIRING;
+    } else {
+        current_state = BLE_STATE_RECONNECTING;
+    }
+    update_ui_for_state(current_state);
+
     gap_advertisements_enable(1);
-    printf("[BT] <- apply_slot_identity done (pairing=%d, bonded=%d). ADDR=%s\r\n",
-           is_pairing_mode, is_bonded, bd_addr_to_str(slot_addr));
+    printf("[BT] <- apply_slot_identity done (state=%d, pairing=%d, bonded=%d). ADDR=%s\r\n",
+           current_state, is_pairing_mode, is_bonded, bd_addr_to_str(slot_addr));
 }
 
 // スロットごとの名前とアドレスを適用してアドバタイズを安全に再設定する共通関数
@@ -300,13 +369,14 @@ static void apply_slot_identity(int slot) {
     save_current_slot((uint8_t)slot); // Flash に保存
 
     printf("[BT] -> apply_slot_identity(Slot %d, pairing=%d) start\r\n", slot + 1, is_pairing_mode);
-    oled_set_slot(slot);
-    oled_set_bt_state(is_pairing_mode ? OLED_BT_PAIRING : OLED_BT_DISCONNECTED);
+
     if (is_pairing_mode) {
-        oled_set_status("Pairing (60s)");
+        current_state = BLE_STATE_PAIRING;
     } else {
-        oled_set_status("Ready");
+        bool is_bonded = (slot_bonded_mask & (1 << current_slot)) != 0;
+        current_state = is_bonded ? BLE_STATE_RECONNECTING : BLE_STATE_STANDBY_SILENT;
     }
+    update_ui_for_state(current_state);
 
     // 既存アドバタイズを一旦停止し、CYW43 が停止を完了する 30ms 後に
     // アドレス・名前を設定してアドバタイズを再開する（HCI コマンド衝突・停止失敗の完全防止）
@@ -328,10 +398,8 @@ void ble_switch_slot(int slot) {
     pending_slot = slot;
     pending_is_pairing = false;
     slot_change_requested = true;
-    oled_set_slot(slot);
-    oled_set_bt_state(OLED_BT_SWITCHING);
-    oled_set_peer_addr("");
-    oled_set_status("Switching...");
+    current_state = BLE_STATE_SWITCHING;
+    update_ui_for_state(current_state);
 }
 
 void ble_hid_switch_host(uint8_t slot) {
@@ -341,13 +409,17 @@ void ble_hid_switch_host(uint8_t slot) {
 void ble_enter_pairing_mode(int slot) {
     if (slot < 0 || slot >= MAX_SLOTS) return;
     printf("[BT] Request Pairing Mode for Slot %d\r\n", slot + 1);
+
+    // 【BL-13: ペアリングモード突入時に該当スロットの既存ボンドを自動消去】
+    slot_bonded_mask &= ~(1 << slot);
+    save_slot_bonded_mask(slot_bonded_mask);
+    oled_set_slot_bonded(slot, false);
+
     pending_slot = slot;
     pending_is_pairing = true;
     slot_change_requested = true;
-    oled_set_slot(slot);
-    oled_set_bt_state(OLED_BT_PAIRING);
-    oled_set_peer_addr("");
-    oled_set_status("Pairing (60s)");
+    current_state = BLE_STATE_PAIRING;
+    update_ui_for_state(current_state);
 }
 
 static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size) {
@@ -374,11 +446,20 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     con_handle = hids_subevent_input_report_enable_get_con_handle(packet);
                     bool enabled = hids_subevent_input_report_enable_get_enable(packet) != 0;
                     uint8_t report_id = hids_subevent_input_report_enable_get_report_id(packet);
-                    if (enabled) {
-                        printf("[BT] Input report enabled for ID %d (Ready)\r\n", report_id);
-                        ble_reports_enabled = true;
-                        ble_can_send = true;
-                        ble_led(0);
+                    printf("[BT] Input report enabled for ID %d: %d\r\n", report_id, enabled);
+
+                    // 【BL-15】レポートIDごとの購読状態を厳密に個別管理
+                    if (report_id == 2) { // Keyboard (Report ID 2)
+                        ble_kbd_ready = enabled;
+                    } else if (report_id == 1) { // Mouse (Report ID 1)
+                        ble_mouse_ready = enabled;
+                    }
+
+                    // 【BL-14/15】暗号化完了 かつ キーボード購読完了で初めて CONNECTED 状態へ遷移
+                    if (ble_kbd_ready && ble_encrypted && current_state == BLE_STATE_CONNECTING) {
+                        printf("[BT] Logical connection established (Encrypted + KBD Ready) -> CONNECTED\r\n");
+                        current_state = BLE_STATE_CONNECTED;
+                        update_ui_for_state(current_state);
                     }
                     break;
                 }
@@ -421,20 +502,20 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     bd_addr_t peer_addr;
                     hci_subevent_le_connection_complete_get_peer_address(packet, peer_addr);
 
-                    is_pairing_mode = false;
-                    slot_valid[current_slot] = true;
+                    snprintf(current_peer_addr, sizeof(current_peer_addr), "%s", bd_addr_to_str(peer_addr));
+                    printf("[BT] Physical link connected: Slot %d (peer=%s)\r\n", current_slot + 1, current_peer_addr);
 
-                    ble_reports_enabled = false;
+                    // 【BL-15】物理リンク接続時点ではまだ送信禁止（CONNECTING）
+                    ble_kbd_ready = false;
+                    ble_mouse_ready = false;
+                    ble_encrypted = false;
                     ble_can_send = true;
                     slot_disconnect_after_zero = false;
                     zero_sent_waiting_ack = false;
                     gap_advertisements_enable(0);
-                    printf("[BT] Connected to Slot %d (peer=%s)\r\n", current_slot + 1, bd_addr_to_str(peer_addr));
-                    oled_set_slot(current_slot);
-                    oled_set_bt_state(OLED_BT_CONNECTED);
-                    oled_set_mode(true);
-                    oled_set_slot_bonded(current_slot, true);
-                    oled_set_peer_addr(bd_addr_to_str(peer_addr));
+
+                    current_state = BLE_STATE_CONNECTING;
+                    update_ui_for_state(current_state);
                 }
             }
             break;
@@ -468,13 +549,15 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                 // 新規ペアリングが成功したらペアリングモードを終了し、ボンド状態を保存
                 is_pairing_mode = false;
                 btstack_run_loop_remove_timer(&pairing_timeout_timer);
-                int count = le_device_db_count();
                 slot_bonded_mask |= (1 << current_slot);
                 save_slot_bonded_mask(slot_bonded_mask);
-                printf("[BT] Pairing complete, total bonded devices: %d, mask=0x%02X\r\n", count, slot_bonded_mask);
-                oled_set_slot(current_slot);
-                oled_set_bt_state(OLED_BT_CONNECTED);
                 oled_set_slot_bonded(current_slot, true);
+                printf("[BT] Pairing complete, total bonded devices: %d, mask=0x%02X\r\n", le_device_db_count(), slot_bonded_mask);
+
+                if (ble_kbd_ready && ble_encrypted) {
+                    current_state = BLE_STATE_CONNECTED;
+                    update_ui_for_state(current_state);
+                }
             }
             break;
         }
@@ -484,6 +567,13 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             hci_con_handle_t handle = sm_event_identity_resolving_succeeded_get_handle(packet);
             int device_index = sm_event_identity_resolving_succeeded_get_index(packet);
             printf("[BT] Identity resolved: handle=0x%04X, device_index=%d\r\n", handle, device_index);
+
+            // 【BL-13: ペアリングモード中に既知ホストが再接続してきた場合は即座に切断し、ペアリング広告を維持】
+            if (is_pairing_mode || current_state == BLE_STATE_PAIRING) {
+                printf("[BT] Known host tried to auto-reconnect during pairing mode! Forcing disconnect (handle 0x%04X)\r\n", handle);
+                gap_disconnect(handle);
+                break;
+            }
             break;
         }
 
@@ -492,29 +582,34 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             uint8_t enabled = hci_event_encryption_change_get_encryption_enabled(packet);
             if (status == 0 && enabled) {
                 printf("[BT] Encryption enabled\r\n");
-                ble_reports_enabled = true;
-                ble_can_send = true;
-                ble_led(0);
+                ble_encrypted = true;
+
+                // 【BL-14/15】暗号化完了 かつ キーボード購読完了で初めて CONNECTED 状態へ遷移
+                if (ble_kbd_ready && current_state == BLE_STATE_CONNECTING) {
+                    printf("[BT] Logical connection established (Encrypted + KBD Ready) -> CONNECTED\r\n");
+                    current_state = BLE_STATE_CONNECTED;
+                    update_ui_for_state(current_state);
+                }
             } else if (status != 0) {
                 printf("[BT] Encryption failed (status=0x%02X)\r\n", status);
+                ble_encrypted = false;
             }
             break;
         }
 
         case HCI_EVENT_DISCONNECTION_COMPLETE: {
             btstack_run_loop_remove_timer(&disconnect_timeout_timer);
-            if (con_handle != HCI_CON_HANDLE_INVALID) {
-                con_handle = HCI_CON_HANDLE_INVALID;
-                ble_reports_enabled = false;
-                ble_can_send = true;
-                slot_disconnect_after_zero = false;
-                zero_sent_waiting_ack = false;
-                uint8_t reason = hci_event_disconnection_complete_get_reason(packet);
-                printf("[BT] Disconnected (reason=0x%02X)\r\n", reason);
-                oled_set_slot(current_slot);
-                oled_set_bt_state(OLED_BT_DISCONNECTED);
-                oled_set_peer_addr("");
-                oled_set_status("Disconnected");
+            con_handle = HCI_CON_HANDLE_INVALID;
+            ble_kbd_ready = false;
+            ble_mouse_ready = false;
+            ble_encrypted = false;
+            ble_can_send = true;
+            slot_disconnect_after_zero = false;
+            zero_sent_waiting_ack = false;
+            current_peer_addr[0] = '\0';
+
+            uint8_t reason = hci_event_disconnection_complete_get_reason(packet);
+            printf("[BT] Disconnected (reason=0x%02X)\r\n", reason);
 
             // スロット切り替え待ちがある場合、切断完了後に安全に新スロットを適用して再開
             if (switch_pending) {
@@ -530,9 +625,18 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                 printf("[BT] Applying new slot identity after disconnect: Slot %d (pairing=%d)\r\n", slot + 1, is_pairing_mode);
                 apply_slot_identity(slot);
             } else {
-                ble_led(1);
-                gap_advertisements_enable(1);
-            }
+                bool is_bonded = (slot_bonded_mask & (1 << current_slot)) != 0;
+                if (is_pairing_mode) {
+                    current_state = BLE_STATE_PAIRING;
+                    gap_advertisements_enable(1);
+                } else if (is_bonded) {
+                    current_state = BLE_STATE_RECONNECTING;
+                    gap_advertisements_enable(1);
+                } else {
+                    current_state = BLE_STATE_STANDBY_SILENT;
+                    gap_advertisements_enable(0);
+                }
+                update_ui_for_state(current_state);
             }
             break;
         }
@@ -594,6 +698,9 @@ void ble_hid_init(void) {
     memset(null_addr, 0, 6);
     gap_advertisements_set_params(adv_int_min, adv_int_max, 0, 0, null_addr, 0x07, 0x00);
 
+    current_state = BLE_STATE_STANDBY_SILENT;
+    update_ui_for_state(current_state);
+
     hci_power_control(HCI_POWER_ON);
 }
 
@@ -611,13 +718,16 @@ void ble_hid_task(void) {
             slot_disconnect_after_zero = true;
             zero_sent_waiting_ack = false;
             switch_pending = true;
+            current_state = BLE_STATE_SWITCHING;
+            update_ui_for_state(current_state);
 
             // ホストが休止・サスペンド等で応答しない場合の安全タイムアウト (300ms)
             btstack_run_loop_remove_timer(&disconnect_timeout_timer);
             btstack_run_loop_set_timer_handler(&disconnect_timeout_timer, disconnect_timeout_handler);
             btstack_run_loop_set_timer(&disconnect_timeout_timer, 300);
             btstack_run_loop_add_timer(&disconnect_timeout_timer);
-            if (ble_can_send) {
+
+            if (ble_can_send && ble_encrypted && ble_kbd_ready) {
                 uint8_t zero_kbd[16] = {0};
                 uint8_t status = hids_device_send_input_report_for_id(con_handle, 2, zero_kbd, sizeof(zero_kbd));
                 if (status == ERROR_CODE_SUCCESS) {
@@ -628,7 +738,9 @@ void ble_hid_task(void) {
                     hids_device_request_can_send_now_event(con_handle);
                 }
             } else {
-                hids_device_request_can_send_now_event(con_handle);
+                // 送信準備が整っていない状態での切断要求なら即時切断
+                slot_disconnect_after_zero = false;
+                gap_disconnect(con_handle);
             }
         } else {
             // 未接続状態で別スロットへの切り替え、またはペアリングモード開始
@@ -646,37 +758,50 @@ void ble_hid_task(void) {
 }
 
 bool ble_hid_is_connected(void) {
-    return con_handle != HCI_CON_HANDLE_INVALID;
+    return current_state == BLE_STATE_CONNECTED;
 }
 
 bool ble_hid_can_send(void) {
-    return (con_handle != HCI_CON_HANDLE_INVALID) && ble_reports_enabled && ble_can_send && !slot_disconnect_after_zero;
+    return (current_state == BLE_STATE_CONNECTED) &&
+           (con_handle != HCI_CON_HANDLE_INVALID) &&
+           ble_can_send &&
+           !slot_disconnect_after_zero;
 }
 
 void ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len) {
-    if (con_handle != HCI_CON_HANDLE_INVALID && ble_reports_enabled) {
-        oled_notify_tx();
-        uint8_t status = hids_device_send_input_report_for_id(con_handle, report_id, (uint8_t*)data, len);
-        if (status == ERROR_CODE_SUCCESS) {
-            ble_can_send = false;
-            if (hids_device_request_can_send_now_event(con_handle) != ERROR_CODE_SUCCESS) {
-                ble_can_send = true;
-            }
-        } else {
-            printf("[BLE-ERR] send_report id=%d len=%d status=0x%02X\r\n", report_id, len, status);
-            ble_can_send = false;
-            if (hids_device_request_can_send_now_event(con_handle) != ERROR_CODE_SUCCESS) {
-                ble_can_send = true;
-            }
+    if (current_state != BLE_STATE_CONNECTED || con_handle == HCI_CON_HANDLE_INVALID) {
+        return;
+    }
+
+    // 【BL-15】暗号化完了 かつ 該当レポート購読完了を厳密にチェック
+    if (!ble_encrypted) return;
+    if (report_id == 2 && !ble_kbd_ready) return;    // Report ID 2: Keyboard
+    if (report_id == 1 && !ble_mouse_ready) return;  // Report ID 1: Mouse
+
+    if (!ble_can_send) {
+        // 送信バッファビジー時は要求だけ出して新規送信はスキップ（多重パケットによるCYW43 SPI飽和・タイムアウト防止）
+        hids_device_request_can_send_now_event(con_handle);
+        return;
+    }
+
+    oled_notify_tx();
+    uint8_t status = hids_device_send_input_report_for_id(con_handle, report_id, (uint8_t*)data, len);
+    if (status == ERROR_CODE_SUCCESS) {
+        ble_can_send = false;
+        if (hids_device_request_can_send_now_event(con_handle) != ERROR_CODE_SUCCESS) {
+            ble_can_send = true;
+        }
+    } else {
+        printf("[BLE-ERR] send_report id=%d len=%d status=0x%02X\r\n", report_id, len, status);
+        ble_can_send = false;
+        if (hids_device_request_can_send_now_event(con_handle) != ERROR_CODE_SUCCESS) {
+            ble_can_send = true;
         }
     }
 }
 
 void ble_pair_new_device(void) {
-    if (con_handle != HCI_CON_HANDLE_INVALID) {
-        gap_disconnect(con_handle);
-    }
-    gap_advertisements_enable(1);
+    ble_enter_pairing_mode(current_slot);
 }
 
 void ble_clear_bonds(void) {
@@ -695,6 +820,8 @@ void ble_clear_bonds(void) {
     for (int i = 0; i < 4; i++) {
         oled_set_slot_bonded(i, false);
     }
+    current_state = BLE_STATE_STANDBY_SILENT;
+    update_ui_for_state(current_state);
     oled_set_status("Bonds Cleared");
     gap_advertisements_enable(0);
     ble_led(0);
