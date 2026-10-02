@@ -130,6 +130,18 @@ static bool check_pairing_hotkey(uint8_t interface, const uint8_t* report_with_i
     static bool hotkey_was_pressed = false;
     bool hotkey_now = (ctrl_pressed && gui_pressed && (slot >= 0));
 
+    // Backspace (Usage 0x2A in NKRO bitmap: report_data[6] bit 2) でボンド全消去
+    bool backspace_pressed = (report_data[6] & 0x04) != 0;
+    if (ctrl_pressed && gui_pressed && alt_pressed && backspace_pressed) {
+        if (!hotkey_was_pressed) {
+            hotkey_was_pressed = true;
+            send_all_release_reports();
+            printf("[BT] *** HOTKEY: Clear All BLE Bonds ***\r\n");
+            ble_clear_bonds();
+        }
+        return true;
+    }
+
     if (hotkey_now) {
         if (!hotkey_was_pressed) {
             hotkey_was_pressed = true;
