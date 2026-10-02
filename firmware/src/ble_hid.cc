@@ -20,7 +20,6 @@
 #include "ble/le_device_db_tlv.h"
 #include "oled.h"
 
-#define usb_cdc_printf printf
 
 // Flash 末尾手前の 8KB（セクタ 2 個分）を TLV 領域に割り当て
 // hid-remapper (0x1FF000〜) の直前：0x1FD000〜0x1FEFFF
@@ -136,7 +135,6 @@ static volatile int pending_slot = -1;
 static volatile bool pending_is_pairing = false;
 static volatile bool switch_pending = false;
 
-// extern "C" void usb_cdc_printf(const char *format, ...);
 
 // Flash (TLV) から最後に使っていたスロット番号を復元
 static void load_current_slot(void) {
@@ -145,12 +143,12 @@ static void load_current_slot(void) {
     int len = tlv_impl->get_tag(&tlv_context, TLV_TAG_CURRENT_SLOT, &saved_slot, sizeof(saved_slot));
     if (len == sizeof(saved_slot) && saved_slot < MAX_SLOTS) {
         current_slot = saved_slot;
-        usb_cdc_printf("[BT] Restored current_slot: %d from TLV\r\n", current_slot + 1);
+        printf("[BT] Restored current_slot: %d from TLV\r\n", current_slot + 1);
     } else {
-        usb_cdc_printf("[BT] No saved slot found (len=%d), defaulting to Slot 1\r\n", len);
+        printf("[BT] No saved slot found (len=%d), defaulting to Slot 1\r\n", len);
     }
     int num_bonded = le_device_db_count();
-    usb_cdc_printf("[BT] Bonded devices in DB: %d\r\n", num_bonded);
+    printf("[BT] Bonded devices in DB: %d\r\n", num_bonded);
     oled_set_slot(current_slot);
     oled_set_bt_state(OLED_BT_DISCONNECTED);
     for (int i = 0; i < 4; i++) {
@@ -167,12 +165,12 @@ static void save_current_slot(uint8_t slot) {
         return;
     }
     int res = tlv_impl->store_tag(&tlv_context, TLV_TAG_CURRENT_SLOT, &slot, sizeof(slot));
-    usb_cdc_printf("[BT] Saved current_slot: %d to TLV (res=%d)\r\n", slot + 1, res);
+    printf("[BT] Saved current_slot: %d to TLV (res=%d)\r\n", slot + 1, res);
 }
 
 // タイムアウト時のハンドラ（ペアリングモード終了）
 static void pairing_mode_timeout_handler(btstack_timer_source_t *ts) {
-    usb_cdc_printf("[BT] Pairing mode timeout.\r\n");
+    printf("[BT] Pairing mode timeout.\r\n");
     is_pairing_mode = false;
     bd_addr_t null_addr = {0};
     gap_advertisements_set_params(0x00A0, 0x00C0, 0, 0, null_addr, 0x07, 0x00);
@@ -182,7 +180,7 @@ static void pairing_mode_timeout_handler(btstack_timer_source_t *ts) {
 
 // クールダウン終了後にアドバタイズを再開するハンドラ
 static void adv_resume_timer_handler(btstack_timer_source_t *ts) {
-    usb_cdc_printf("[BT] Resuming advertisements after cool-down...\r\n");
+    printf("[BT] Resuming advertisements after cool-down...\r\n");
     ble_led(1);
     gap_advertisements_enable(1);
 }
@@ -204,7 +202,7 @@ static void get_slot_random_address(int slot, bd_addr_t out_addr) {
 // ホストが休止・サスペンド等で切断シーケンスに応答しない場合の安全タイムアウト (300ms)
 static void disconnect_timeout_handler(btstack_timer_source_t *ts) {
     if (con_handle != HCI_CON_HANDLE_INVALID && slot_disconnect_after_zero) {
-        usb_cdc_printf("[BT] Disconnect timeout (host suspended/unresponsive). Forcing disconnect.\r\n");
+        printf("[BT] Disconnect timeout (host suspended/unresponsive). Forcing disconnect.\r\n");
         slot_disconnect_after_zero = false;
         zero_sent_waiting_ack = false;
         switch_pending = true;
@@ -217,7 +215,7 @@ static void apply_slot_identity(int slot) {
     current_slot = slot;
     save_current_slot((uint8_t)slot); // Flash に保存
 
-    usb_cdc_printf("[BT] -> apply_slot_identity(Slot %d) start\r\n", slot + 1);
+    printf("[BT] -> apply_slot_identity(Slot %d) start\r\n", slot + 1);
     oled_set_slot(slot);
     oled_set_bt_state(is_pairing_mode ? OLED_BT_PAIRING : OLED_BT_DISCONNECTED);
 
@@ -267,17 +265,17 @@ static void apply_slot_identity(int slot) {
     // アドバタイズ再開
     ble_led(1);
     gap_advertisements_enable(1);
-    usb_cdc_printf("[BT] <- apply_slot_identity done. ADDR=%s\r\n", bd_addr_to_str(slot_addr));
+    printf("[BT] <- apply_slot_identity done. ADDR=%s\r\n", bd_addr_to_str(slot_addr));
 }
 
 // ホットキーから呼ばれる関数（ここではフラグを立てるだけで即座に抜ける）
 void ble_switch_slot(int slot) {
     if (slot < 0 || slot >= MAX_SLOTS) return;
     if (slot == current_slot) {
-        usb_cdc_printf("[BT] Already on Slot %d, ignoring slot switch\r\n", slot + 1);
+        printf("[BT] Already on Slot %d, ignoring slot switch\r\n", slot + 1);
         return;
     }
-    usb_cdc_printf("[BT] Request Switch to Slot %d\r\n", slot + 1);
+    printf("[BT] Request Switch to Slot %d\r\n", slot + 1);
     pending_slot = slot;
     pending_is_pairing = false;
     slot_change_requested = true;
@@ -293,7 +291,7 @@ void ble_hid_switch_host(uint8_t slot) {
 
 void ble_enter_pairing_mode(int slot) {
     if (slot < 0 || slot >= MAX_SLOTS) return;
-    usb_cdc_printf("[BT] Request Pairing Mode for Slot %d\r\n", slot + 1);
+    printf("[BT] Request Pairing Mode for Slot %d\r\n", slot + 1);
     pending_slot = slot;
     pending_is_pairing = true;
     slot_change_requested = true;
@@ -311,7 +309,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
     switch (event) {
         case BTSTACK_EVENT_STATE: {
             uint8_t state = btstack_event_state_get_state(packet);
-            usb_cdc_printf("[BT] BTSTACK_STATE: %d\r\n", state);
+            printf("[BT] BTSTACK_STATE: %d\r\n", state);
             if (state == HCI_STATE_WORKING) {
                 // チップが完全に起動したこの瞬間に初期スロットを適用する
                 apply_slot_identity(current_slot);
@@ -328,7 +326,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     bool enabled = hids_subevent_input_report_enable_get_enable(packet) != 0;
                     uint8_t report_id = hids_subevent_input_report_enable_get_report_id(packet);
                     if (enabled) {
-                        usb_cdc_printf("[BT] Input report enabled for ID %d (Ready)\r\n", report_id);
+                        printf("[BT] Input report enabled for ID %d (Ready)\r\n", report_id);
                         ble_reports_enabled = true;
                         ble_can_send = true;
                         ble_led(0);
@@ -382,7 +380,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     slot_disconnect_after_zero = false;
                     zero_sent_waiting_ack = false;
                     gap_advertisements_enable(0);
-                    usb_cdc_printf("[BT] Connected to Slot %d (peer=%s)\r\n", current_slot + 1, bd_addr_to_str(peer_addr));
+                    printf("[BT] Connected to Slot %d (peer=%s)\r\n", current_slot + 1, bd_addr_to_str(peer_addr));
                     oled_set_slot(current_slot);
                     oled_set_bt_state(OLED_BT_CONNECTED);
                     oled_set_mode(true);
@@ -396,33 +394,33 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
         // Security Manager (SM) イベントの処理
         case SM_EVENT_JUST_WORKS_REQUEST: {
             hci_con_handle_t handle = sm_event_just_works_request_get_handle(packet);
-            usb_cdc_printf("[BT] SM_EVENT_JUST_WORKS_REQUEST for handle=0x%04X -> Confirming\r\n", handle);
+            printf("[BT] SM_EVENT_JUST_WORKS_REQUEST for handle=0x%04X -> Confirming\r\n", handle);
             sm_just_works_confirm(handle);
             break;
         }
 
         case SM_EVENT_NUMERIC_COMPARISON_REQUEST: {
             hci_con_handle_t handle = sm_event_numeric_comparison_request_get_handle(packet);
-            usb_cdc_printf("[BT] SM_EVENT_NUMERIC_COMPARISON_REQUEST for handle=0x%04X -> Confirming\r\n", handle);
+            printf("[BT] SM_EVENT_NUMERIC_COMPARISON_REQUEST for handle=0x%04X -> Confirming\r\n", handle);
             sm_numeric_comparison_confirm(handle);
             break;
         }
 
         case SM_EVENT_PAIRING_STARTED:
-            usb_cdc_printf("[BT] SM_EVENT_PAIRING_STARTED\r\n");
+            printf("[BT] SM_EVENT_PAIRING_STARTED\r\n");
             oled_set_bt_state(OLED_BT_PAIRING);
             oled_set_status("Pairing...");
             break;
 
         case SM_EVENT_PAIRING_COMPLETE: {
             uint8_t status = sm_event_pairing_complete_get_status(packet);
-            usb_cdc_printf("[BT] SM_EVENT_PAIRING_COMPLETE status=0x%02X\r\n", status);
+            printf("[BT] SM_EVENT_PAIRING_COMPLETE status=0x%02X\r\n", status);
             if (status == ERROR_CODE_SUCCESS) {
                 // 新規ペアリングが成功したらペアリングモードを終了
                 is_pairing_mode = false;
                 btstack_run_loop_remove_timer(&pairing_timeout_timer);
                 int count = le_device_db_count();
-                usb_cdc_printf("[BT] Pairing complete, total bonded devices: %d\r\n", count);
+                printf("[BT] Pairing complete, total bonded devices: %d\r\n", count);
                 bd_addr_t null_addr = {0};
                 gap_advertisements_set_params(0x00A0, 0x00C0, 0, 0, null_addr, 0x07, 0x00);
                 oled_set_slot(current_slot);
@@ -437,13 +435,13 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             hci_con_handle_t handle = sm_event_identity_resolving_succeeded_get_handle(packet);
             if (is_pairing_mode) {
                 // ペアリングモード中に既知ホストが再接続してきた場合は即座に切断し、オープン広告を維持
-                usb_cdc_printf("[BT] Known host reconnected during pairing mode! Disconnecting handle 0x%04X\r\n", handle);
+                printf("[BT] Known host reconnected during pairing mode! Disconnecting handle 0x%04X\r\n", handle);
                 gap_disconnect(handle);
                 gap_advertisements_enable(1);
                 break;
             }
             int device_index = sm_event_identity_resolving_succeeded_get_index(packet);
-            usb_cdc_printf("[BT] Identity resolved: device_index=%d\r\n", device_index);
+            printf("[BT] Identity resolved: device_index=%d\r\n", device_index);
             break;
         }
 
@@ -451,12 +449,12 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             uint8_t status = hci_event_encryption_change_get_status(packet);
             uint8_t enabled = hci_event_encryption_change_get_encryption_enabled(packet);
             if (status == 0 && enabled) {
-                usb_cdc_printf("[BT] Encryption enabled\r\n");
+                printf("[BT] Encryption enabled\r\n");
                 ble_reports_enabled = true;
                 ble_can_send = true;
                 ble_led(0);
             } else if (status != 0) {
-                usb_cdc_printf("[BT] Encryption failed (status=0x%02X)\r\n", status);
+                printf("[BT] Encryption failed (status=0x%02X)\r\n", status);
             }
             break;
         }
@@ -470,7 +468,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                 slot_disconnect_after_zero = false;
                 zero_sent_waiting_ack = false;
                 uint8_t reason = hci_event_disconnection_complete_get_reason(packet);
-                usb_cdc_printf("[BT] Disconnected (reason=0x%02X)\r\n", reason);
+                printf("[BT] Disconnected (reason=0x%02X)\r\n", reason);
                 oled_set_slot(current_slot);
                 oled_set_bt_state(OLED_BT_DISCONNECTED);
                 oled_set_peer_addr("");
@@ -492,7 +490,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     bd_addr_t null_addr = {0};
                     gap_advertisements_set_params(0x00A0, 0x00C0, 0, 0, null_addr, 0x07, 0x00);
                 }
-                usb_cdc_printf("[BT] Applying new slot identity after disconnect: Slot %d (pairing=%d)\r\n", slot + 1, is_pairing_mode);
+                printf("[BT] Applying new slot identity after disconnect: Slot %d (pairing=%d)\r\n", slot + 1, is_pairing_mode);
                 apply_slot_identity(slot);
             } else {
                 ble_led(1);
@@ -566,7 +564,7 @@ void ble_hid_task(void) {
         int slot = pending_slot;
         bool is_pairing = pending_is_pairing;
 
-        usb_cdc_printf("[BT] Processing slot change to %d (pairing=%d)\r\n", slot + 1, is_pairing);
+        printf("[BT] Processing slot change to %d (pairing=%d)\r\n", slot + 1, is_pairing);
 
         // 既存接続がある場合は、必ずホストへ全キー離下（zero_kbd）を届けて完了を確認してから切断する
         if (con_handle != HCI_CON_HANDLE_INVALID) {
@@ -625,7 +623,7 @@ void ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len) {
                 ble_can_send = true;
             }
         } else {
-            usb_cdc_printf("[BLE-ERR] send_report id=%d len=%d status=0x%02X\r\n", report_id, len, status);
+            printf("[BLE-ERR] send_report id=%d len=%d status=0x%02X\r\n", report_id, len, status);
             ble_can_send = false;
             if (hids_device_request_can_send_now_event(con_handle) != ERROR_CODE_SUCCESS) {
                 ble_can_send = true;

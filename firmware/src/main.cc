@@ -37,7 +37,6 @@
 #include "tick.h"
 
 
-extern "C" void usb_cdc_printf(const char *format, ...);
 
 // RP2350 UF2s wipe the last sector of flash every time
 // because of RP2350-E10 errata mitigation. So we put
@@ -251,7 +250,7 @@ static void update_usb_ports_status(void) {
     if (strncmp(prev_p1, p1_dev, 3) != 0 || strncmp(prev_p2, p2_dev, 3) != 0) {
         strncpy(prev_p1, p1_dev, sizeof(prev_p1));
         strncpy(prev_p2, p2_dev, sizeof(prev_p2));
-        usb_cdc_printf("[USB] Ports updated -> P1:%s, P2:%s (count=%d, p1_pin=%d, p2_pin=%d)\r\n", 
+        printf("[USB] Ports updated -> P1:%s, P2:%s (count=%d, p1_pin=%d, p2_pin=%d)\r\n", 
                        p1_dev, p2_dev, mounted_count, port1_phys, port2_phys);
     }
 
@@ -277,7 +276,7 @@ bool do_send_report(uint8_t interface, const uint8_t* report_with_id, uint8_t le
     static bool prev_ble_connected = false;
     bool curr_ble_connected = ble_hid_is_connected();
     if (curr_ble_connected && !prev_ble_connected) {
-        usb_cdc_printf("[BT] Switched to BLE priority, clearing USB reports\r\n");
+        printf("[BT] Switched to BLE priority, clearing USB reports\r\n");
         uint8_t zero_kbd[16] = {0};
         if (tud_mounted() && !tud_suspended()) {
             tud_hid_n_report(0, 2, zero_kbd, sizeof(zero_kbd));
@@ -547,14 +546,6 @@ int main() {
 
     while (true) {
 
-        // debug用：生存確認用
-        // uint64_t now = time_us_64();
-        // if (now - last_toggle >= 2000000) {
-        //     last_toggle = now;
-        //     led_state = !led_state;
-        //     // ble_led(led_state);
-        //     usb_cdc_printf("[PicoW] alive\r\n");
-        // }
 
         bool tick;
         bool new_report;
