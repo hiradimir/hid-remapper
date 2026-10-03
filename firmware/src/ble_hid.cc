@@ -158,6 +158,8 @@ static btstack_timer_source_t disconnect_timeout_timer;
 static btstack_timer_source_t conn_stabilize_timer;
 static btstack_timer_source_t can_send_timeout_timer;
 static btstack_timer_source_t reconnect_timeout_timer;
+static btstack_timer_source_t conn_handshake_timeout_timer;
+static bool adv_cooldown_active = false;
 static hci_con_handle_t con_handle = HCI_CON_HANDLE_INVALID;
 static btstack_packet_callback_registration_t hci_event_callback_registration;
 static btstack_packet_callback_registration_t sm_event_callback_registration;
@@ -172,6 +174,8 @@ static volatile bool switch_pending = false;
 
 static void apply_slot_identity(int slot);
 static void update_ui_for_state(ble_state_t state);
+static void save_slot_bonded_mask(uint8_t mask);
+static void save_slot_peers(void);
 
 // 状態に応じた OLED / LED の一元更新
 static void update_ui_for_state(ble_state_t state) {
@@ -240,11 +244,22 @@ static void reconnect_timeout_handler(btstack_timer_source_t *ts) {
     }
 }
 
+static void conn_handshake_timeout_handler(btstack_timer_source_t *ts) {
+    if (con_handle != HCI_CON_HANDLE_INVALID && current_state == BLE_STATE_CONNECTING) {
+        printf("[BT] Handshake timeout (10s expired without encryption/subscription). Disconnecting stalled link.\r\n");
+        gap_disconnect(con_handle);
+    }
+}
+
 static void conn_stabilize_timer_handler(btstack_timer_source_t *ts) {
     if (con_handle != HCI_CON_HANDLE_INVALID && ble_kbd_ready && ble_encrypted) {
         printf("[BT] Connection stabilized -> CONNECTED (Ready to send)\r\n");
+        btstack_run_loop_remove_timer(&conn_handshake_timeout_timer);
         current_state = BLE_STATE_CONNECTED;
         update_ui_for_state(current_state);
+        // ハンドシェイク完了・通信安定後に安全に Flash へ永続化（SPI 通信中の Flash 消去ブロック回避）
+        save_slot_bonded_mask(slot_bonded_mask);
+        save_slot_peers();
     }
 }
 
@@ -294,6 +309,7 @@ static void load_slot_peers(void) {
 
 static bool is_slot_bonded(int slot) {
     if (slot < 0 || slot >= MAX_SLOTS) return false;
+    if (is_pairing_mode && slot == current_slot) return false;
     if (slot_bonded_mask & (1 << slot)) return true;
     if (slot_peers[slot].valid) return true;
 
@@ -310,7 +326,6 @@ static bool is_slot_bonded(int slot) {
             }
             if (not_zero) {
                 slot_bonded_mask |= (1 << slot);
-                save_slot_bonded_mask(slot_bonded_mask);
                 oled_set_slot_bonded(slot, true);
                 return true;
             }
@@ -319,7 +334,6 @@ static bool is_slot_bonded(int slot) {
     // フォールバック: slot 0 (Slot 1) で DB に 1 件以上あれば Slot 1 はボンド済み
     if (slot == 0 && db_count > 0) {
         slot_bonded_mask |= 0x01;
-        save_slot_bonded_mask(slot_bonded_mask);
         oled_set_slot_bonded(0, true);
         return true;
     }
@@ -414,8 +428,9 @@ static void disconnect_timeout_handler(btstack_timer_source_t *ts) {
     }
 }
 
-// クールダウン終了後にアドバタイズを設定・再開するハンドラ
+// クールダウン終了後に電波送出（アドバタイズ）を再開するハンドラ
 static void adv_resume_timer_handler(btstack_timer_source_t *ts) {
+    adv_cooldown_active = false;
     if (con_handle != HCI_CON_HANDLE_INVALID) {
         printf("[BT] adv_resume_timer fired but already connected (handle=0x%04X). Aborting.\r\n", con_handle);
         return;
@@ -423,7 +438,6 @@ static void adv_resume_timer_handler(btstack_timer_source_t *ts) {
     bool is_bonded = is_slot_bonded(current_slot);
 
     // 【厳格なペアリング制御】
-    // 未ペアリングのスロットで、かつペアリングモードでない場合は電波を完全に停止する（無駄な電波垂れ流しの根絶）
     if (!is_pairing_mode && !is_bonded) {
         printf("[BT] Slot %d is unbonded and not in pairing mode. Radio OFF (silent).\r\n", current_slot + 1);
         gap_advertisements_enable(0);
@@ -432,53 +446,6 @@ static void adv_resume_timer_handler(btstack_timer_source_t *ts) {
         return;
     }
 
-    char name_buf[32];
-    snprintf(name_buf, sizeof(name_buf), "Remapper [Slot %d]", current_slot + 1);
-
-    // アドバタイズパケットの構築 (最大 31 バイト)
-    uint8_t adv_data[31];
-    int adv_data_len = 0;
-
-    // 1. Flags (3 bytes)
-    // ペアリングモード時: 0x06 (LE General Discoverable Mode | BR/EDR Not Supported) -> 新規検索一覧に出現
-    // 既知ホスト再接続時: 0x04 (BR/EDR Not Supported のみ、Non-Discoverable) -> 新規検索一覧には出ないが登録ホストは再接続可能
-    adv_data[adv_data_len++] = 2;
-    adv_data[adv_data_len++] = BLUETOOTH_DATA_TYPE_FLAGS;
-    // ペアリングモード・再接続待機中ともに 0x06 (LE General Discoverable Mode | BR/EDR Not Supported)
-    // 0x04 (Non-Discoverable) だと macOS / Windows / Android のバックグラウンドスキャナに除外され
-    // 自動再接続がトリガーされないため、規格準拠の 0x06 (General Discoverable) を送出する。
-    adv_data[adv_data_len++] = 0x06;
-
-    // 2. 16-bit Service UUID: HID Service 0x1812 (4 bytes) - これがないとMacに表示されない
-    adv_data[adv_data_len++] = 3;
-    adv_data[adv_data_len++] = BLUETOOTH_DATA_TYPE_COMPLETE_LIST_OF_16_BIT_SERVICE_CLASS_UUIDS;
-    adv_data[adv_data_len++] = 0x12;
-    adv_data[adv_data_len++] = 0x18;
-
-    // 3. Appearance: Keyboard 0x03C1 (4 bytes)
-    // Windows 11 の Bluetooth デバイス追加画面では Generic HID (0x03C0) だと
-    // マウス/キーボード一覧から除外・フィルタリングされて検出できないため、Keyboard (0x03C1) に設定
-    adv_data[adv_data_len++] = 3;
-    adv_data[adv_data_len++] = BLUETOOTH_DATA_TYPE_APPEARANCE;
-    adv_data[adv_data_len++] = 0xC1;
-    adv_data[adv_data_len++] = 0x03;
-
-    // 4. Complete Local Name (最大 19 bytes)
-    int name_len = strlen(name_buf);
-    if (name_len > 18) name_len = 18; // 31バイト上限ガード
-    adv_data[adv_data_len++] = name_len + 1;
-    adv_data[adv_data_len++] = BLUETOOTH_DATA_TYPE_COMPLETE_LOCAL_NAME;
-    memcpy(&adv_data[adv_data_len], name_buf, name_len);
-    adv_data_len += name_len;
-
-    gap_advertisements_set_data(adv_data_len, adv_data);
-
-    // スロット固有の Static Random Address を適用
-    bd_addr_t slot_addr;
-    get_slot_random_address(current_slot, slot_addr);
-    gap_random_address_set_mode(GAP_RANDOM_ADDRESS_TYPE_STATIC);
-    gap_random_address_set(slot_addr);
-
     if (is_pairing_mode) {
         current_state = BLE_STATE_PAIRING;
     } else {
@@ -486,6 +453,8 @@ static void adv_resume_timer_handler(btstack_timer_source_t *ts) {
     }
     update_ui_for_state(current_state);
 
+    bd_addr_t slot_addr;
+    get_slot_random_address(current_slot, slot_addr);
     gap_advertisements_enable(1);
     printf("[BT] <- apply_slot_identity done (state=%d, pairing=%d, bonded=%d). ADDR=%s\r\n",
            current_state, is_pairing_mode, is_bonded, bd_addr_to_str(slot_addr));
@@ -497,6 +466,11 @@ static void apply_slot_identity(int slot) {
     save_current_slot((uint8_t)slot); // Flash に保存
 
     printf("[BT] -> apply_slot_identity(Slot %d, pairing=%d) start\r\n", slot + 1, is_pairing_mode);
+
+    // 既存アドバタイズを一旦即座に停止
+    gap_advertisements_enable(0);
+    btstack_run_loop_remove_timer(&adv_resume_timer);
+    adv_cooldown_active = false;
 
     if (is_pairing_mode) {
         current_state = BLE_STATE_PAIRING;
@@ -512,12 +486,53 @@ static void apply_slot_identity(int slot) {
     }
     update_ui_for_state(current_state);
 
-    // 既存アドバタイズを一旦停止し、CYW43 が停止を完了する 30ms 後に
-    // アドレス・名前を設定してアドバタイズを再開する（HCI コマンド衝突・停止失敗の完全防止）
-    // 既存アドバタイズを停止し、ホスト側 (macOS等) のドライバ破棄猶予(500ms)を確保してから
-    // 新スロットのアドレス・名前を設定してアドバタイズを再開する（急速切替によるホストBTクラッシュ防止）
-    gap_advertisements_enable(0);
-    btstack_run_loop_remove_timer(&adv_resume_timer);
+    bool is_bonded = is_slot_bonded(current_slot);
+    // 【厳格なペアリング制御】未ペアリングかつペアリングモードでない場合は電波を完全停止
+    if (!is_pairing_mode && !is_bonded) {
+        printf("[BT] Slot %d is unbonded and not in pairing mode. Radio OFF (silent).\r\n", current_slot + 1);
+        current_state = BLE_STATE_STANDBY_SILENT;
+        update_ui_for_state(current_state);
+        return;
+    }
+
+    // スロット固有の Static Random Address を即時適用（キックやホスト接続時のアドレス不整合を完全防止）
+    bd_addr_t slot_addr;
+    get_slot_random_address(current_slot, slot_addr);
+    gap_random_address_set_mode(GAP_RANDOM_ADDRESS_TYPE_STATIC);
+    gap_random_address_set(slot_addr);
+
+    // アドバタイズパケットの構築 (最大 31 バイト)
+    char name_buf[32];
+    snprintf(name_buf, sizeof(name_buf), "Remapper [Slot %d]", current_slot + 1);
+
+    uint8_t adv_data[31];
+    int adv_data_len = 0;
+
+    adv_data[adv_data_len++] = 2;
+    adv_data[adv_data_len++] = BLUETOOTH_DATA_TYPE_FLAGS;
+    adv_data[adv_data_len++] = 0x06;
+
+    adv_data[adv_data_len++] = 3;
+    adv_data[adv_data_len++] = BLUETOOTH_DATA_TYPE_COMPLETE_LIST_OF_16_BIT_SERVICE_CLASS_UUIDS;
+    adv_data[adv_data_len++] = 0x12;
+    adv_data[adv_data_len++] = 0x18;
+
+    adv_data[adv_data_len++] = 3;
+    adv_data[adv_data_len++] = BLUETOOTH_DATA_TYPE_APPEARANCE;
+    adv_data[adv_data_len++] = 0xC1;
+    adv_data[adv_data_len++] = 0x03;
+
+    int name_len = strlen(name_buf);
+    if (name_len > 18) name_len = 18; // 31バイト上限ガード
+    adv_data[adv_data_len++] = name_len + 1;
+    adv_data[adv_data_len++] = BLUETOOTH_DATA_TYPE_COMPLETE_LOCAL_NAME;
+    memcpy(&adv_data[adv_data_len], name_buf, name_len);
+    adv_data_len += name_len;
+
+    gap_advertisements_set_data(adv_data_len, adv_data);
+
+    // ホスト側 (macOS等) のドライバ破棄猶予(500ms)を確保してから電波送出を再開
+    adv_cooldown_active = true;
     btstack_run_loop_set_timer_handler(&adv_resume_timer, adv_resume_timer_handler);
     btstack_run_loop_set_timer(&adv_resume_timer, 500);
     btstack_run_loop_add_timer(&adv_resume_timer);
@@ -562,6 +577,7 @@ void ble_enter_pairing_mode(int slot) {
 
     // 【スロット指定のボンド消去】
     // 該当スロットの登録デバイスのみを le_device_db から物理削除し、他スロットのボンドは保護する
+    bool cleared = false;
     if (slot_peers[slot].valid) {
         int db_count = le_device_db_count();
         for (int i = 0; i < db_count; i++) {
@@ -573,12 +589,37 @@ void ble_enter_pairing_mode(int slot) {
                        slot + 1, i, bd_addr_to_str(a_addr));
                 gap_delete_bonding((bd_addr_type_t)a_type, a_addr);
                 le_device_db_remove(i);
+                cleared = true;
                 break;
             }
         }
         slot_peers[slot].valid = 0;
         memset(slot_peers[slot].addr, 0, 6);
         save_slot_peers();
+    }
+    if (!cleared) {
+        int db_count = le_device_db_count();
+        if (slot < db_count) {
+            int a_type = BD_ADDR_TYPE_UNKNOWN;
+            bd_addr_t a_addr;
+            le_device_db_info(slot, &a_type, a_addr, NULL);
+            if (a_type != BD_ADDR_TYPE_UNKNOWN) {
+                gap_delete_bonding((bd_addr_type_t)a_type, a_addr);
+            }
+            le_device_db_remove(slot);
+            printf("[BT] Cleared Slot %d bond from le_device_db by index %d\r\n", slot + 1, slot);
+        } else if (slot == 0 && db_count > 0) {
+            for (int i = db_count - 1; i >= 0; i--) {
+                int a_type = BD_ADDR_TYPE_UNKNOWN;
+                bd_addr_t a_addr;
+                le_device_db_info(i, &a_type, a_addr, NULL);
+                if (a_type != BD_ADDR_TYPE_UNKNOWN) {
+                    gap_delete_bonding((bd_addr_type_t)a_type, a_addr);
+                }
+                le_device_db_remove(i);
+            }
+            printf("[BT] Cleared all lingering bonds from le_device_db for Slot 1 pairing\r\n");
+        }
     }
 
     slot_bonded_mask &= ~(1 << slot);
@@ -668,7 +709,15 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     btstack_run_loop_remove_timer(&conn_stabilize_timer);
                     btstack_run_loop_remove_timer(&adv_resume_timer);
                     btstack_run_loop_remove_timer(&reconnect_timeout_timer);
+                    adv_cooldown_active = false;
                     con_handle = new_handle;
+
+                    // ハンドシェイク完了安全タイムアウト (10秒)
+                    btstack_run_loop_remove_timer(&conn_handshake_timeout_timer);
+                    btstack_run_loop_set_timer_handler(&conn_handshake_timeout_timer, conn_handshake_timeout_handler);
+                    btstack_run_loop_set_timer(&conn_handshake_timeout_timer, 10000);
+                    btstack_run_loop_add_timer(&conn_handshake_timeout_timer);
+
                     bd_addr_t peer_addr;
                     hci_subevent_le_connection_complete_get_peer_address(packet, peer_addr);
 
@@ -686,6 +735,8 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
 
                     current_state = BLE_STATE_CONNECTING;
                     update_ui_for_state(current_state);
+
+                    // Central (Mac/Win/iOS) 側からのペアリング/暗号化要求を待機（Security Request 重複衝突を防止）
                 }
             }
             break;
@@ -720,11 +771,10 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                 is_pairing_mode = false;
                 btstack_run_loop_remove_timer(&pairing_timeout_timer);
                 slot_bonded_mask |= (1 << current_slot);
-                save_slot_bonded_mask(slot_bonded_mask);
                 oled_set_slot_bonded(current_slot, true);
                 printf("[BT] Pairing complete, total bonded devices: %d, mask=0x%02X\r\n", le_device_db_count(), slot_bonded_mask);
 
-                // ペアリング完了したホストの登録情報を記録
+                // ペアリング完了したホストの登録情報をメモリ上に記録（Flash保存は接続安定化ハンドラで実行）
                 int newest_idx = le_device_db_count() - 1;
                 if (newest_idx >= 0) {
                     int a_type = BD_ADDR_TYPE_UNKNOWN;
@@ -734,7 +784,6 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                         slot_peers[current_slot].valid = 1;
                         slot_peers[current_slot].addr_type = a_type;
                         memcpy(slot_peers[current_slot].addr, a_addr, 6);
-                        save_slot_peers();
                         printf("[BT] Recorded Slot %d peer in DB: type=%d, addr=%s\r\n",
                                current_slot + 1, a_type, bd_addr_to_str(a_addr));
                     }
@@ -764,7 +813,6 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                 // 暗号化成功＝このスロットに有効なボンドが存在することを確定
                 if (!(slot_bonded_mask & (1 << current_slot))) {
                     slot_bonded_mask |= (1 << current_slot);
-                    save_slot_bonded_mask(slot_bonded_mask);
                     oled_set_slot_bonded(current_slot, true);
                     printf("[BT] Confirmed Slot %d bonded via encryption, mask=0x%02X\r\n", current_slot + 1, slot_bonded_mask);
                 }
@@ -784,6 +832,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
         case HCI_EVENT_DISCONNECTION_COMPLETE: {
             btstack_run_loop_remove_timer(&disconnect_timeout_timer);
             btstack_run_loop_remove_timer(&conn_stabilize_timer);
+            btstack_run_loop_remove_timer(&conn_handshake_timeout_timer);
             con_handle = HCI_CON_HANDLE_INVALID;
             ble_kbd_ready = false;
             ble_mouse_ready = false;
@@ -830,6 +879,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                 // 500ms の静音期間をおいてからアドバタイズを再開する（再接続ストーム・ホストBTクラッシュの完全防止）
                 gap_advertisements_enable(0);
                 if (current_state != BLE_STATE_STANDBY_SILENT) {
+                    adv_cooldown_active = true;
                     btstack_run_loop_remove_timer(&adv_resume_timer);
                     btstack_run_loop_set_timer_handler(&adv_resume_timer, adv_resume_timer_handler);
                     btstack_run_loop_set_timer(&adv_resume_timer, 500);
@@ -1010,6 +1060,9 @@ void ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len) {
 
 
 void ble_hid_kick_reconnect(void) {
+    if (adv_cooldown_active) {
+        return;
+    }
     if (current_state == BLE_STATE_RECONNECTING && con_handle == HCI_CON_HANDLE_INVALID) {
         static uint32_t last_kick_ms = 0;
         uint32_t now = to_ms_since_boot(get_absolute_time());
