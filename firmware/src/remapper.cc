@@ -71,7 +71,7 @@ uint8_t* report_masks_relative[MAX_INPUT_REPORT_ID + 1];
 uint8_t* report_masks_absolute[MAX_INPUT_REPORT_ID + 1];
 uint16_t report_sizes[MAX_INPUT_REPORT_ID + 1];
 
-#define OR_BUFSIZE 8
+#define OR_BUFSIZE 32
 uint8_t outgoing_reports[OR_BUFSIZE][MAX_REPORT_SIZE + 1];
 uint8_t or_head = 0;
 uint8_t or_tail = 0;
@@ -1398,8 +1398,9 @@ void process_mapping(bool auto_repeat) {
         }
         if (needs_to_be_sent(report_id)) {
             if (or_items == OR_BUFSIZE) {
-                printf("overflow!\n");
-                break;
+                // バッファ満杯時は最も古い未送信レポートを破棄して最新レポートを格納
+                or_head = (or_head + 1) % OR_BUFSIZE;
+                or_items--;
             }
             uint8_t prev = (or_tail + OR_BUFSIZE - 1) % OR_BUFSIZE;
             if ((or_items > 0) &&

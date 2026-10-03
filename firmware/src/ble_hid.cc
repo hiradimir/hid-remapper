@@ -1136,18 +1136,13 @@ void ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len) {
 
     oled_notify_tx();
     uint8_t status = hids_device_send_input_report_for_id(con_handle, report_id, (uint8_t*)data, len);
-    if (status == ERROR_CODE_SUCCESS) {
+    if (status == ERROR_CODE_SUCCESS || status == 0x57) { // 0x57: BTSTACK_ACL_BUFFERS_FULL
         ble_can_send = false;
         btstack_run_loop_remove_timer(&can_send_timeout_timer);
         btstack_run_loop_set_timer_handler(&can_send_timeout_timer, can_send_timeout_handler);
         btstack_run_loop_set_timer(&can_send_timeout_timer, 2000); // 2秒の安全ウォッチドッグ
         btstack_run_loop_add_timer(&can_send_timeout_timer);
         hids_device_request_can_send_now_event(con_handle);
-    } else if (status == 0x57) { // BTSTACK_ACL_BUFFERS_FULL
-        // ACLバッファ満杯時は新規送信を行わず、進行中パケットの CAN_SEND_NOW 完了を待機する。
-        // ※ここでタイマーを再設定したり can_send_now を二重要求すると COMMAND_DISALLOWED となり
-        // 永久に 250ms タイマーループ（4fps固定）に陥るため、何もしないのが正しいフロー制御。
-        ble_can_send = false;
     } else {
         printf("[BLE-ERR] send_report id=%d len=%d status=0x%02X\r\n", report_id, len, status);
         ble_can_send = true;
