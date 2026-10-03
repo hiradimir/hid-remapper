@@ -302,13 +302,16 @@ bool do_send_report(uint8_t interface, const uint8_t* report_with_id, uint8_t le
     // BLEで接続がされていたら、優先する
     if (curr_ble_connected) {
         ble_hid_send_report(report_id, report_data, report_len);
-    } else if (tud_mounted()) {
+    } else {
+        ble_hid_kick_reconnect();
+        if (tud_mounted()) {
         if (tud_suspended() &&
             (our_descriptor->should_cause_wakeup != nullptr) &&
             our_descriptor->should_cause_wakeup(interface, report_with_id, len)) {
             tud_remote_wakeup();
         } else if (!tud_suspended()) {
             tud_hid_n_report(interface, report_id, report_data, report_len);
+        }
         }
     }
 #else

@@ -13,6 +13,7 @@ void ble_hid_task(void);
 bool ble_hid_is_connected(void);
 bool ble_hid_can_send(void);
 void ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len);
+void ble_hid_kick_reconnect(void);
 
 void ble_pair_new_device(void);
 void ble_clear_bonds(void);
