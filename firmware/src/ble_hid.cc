@@ -240,8 +240,9 @@ static void update_ui_for_state(ble_state_t state) {
 
 static void can_send_timeout_handler(btstack_timer_source_t *ts) {
     if (!ble_can_send && con_handle != HCI_CON_HANDLE_INVALID) {
-        printf("[BT] WARNING: CAN_SEND_NOW event timed out (250ms). Unfreezing flow control.\r\n");
+        printf("[BT] WARNING: CAN_SEND_NOW watchdog timed out (2000ms). Resetting flow control.\r\n");
         ble_can_send = true;
+        hids_device_request_can_send_now_event(con_handle);
     }
 }
 
@@ -1139,26 +1140,17 @@ void ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len) {
         ble_can_send = false;
         btstack_run_loop_remove_timer(&can_send_timeout_timer);
         btstack_run_loop_set_timer_handler(&can_send_timeout_timer, can_send_timeout_handler);
-        btstack_run_loop_set_timer(&can_send_timeout_timer, 250);
+        btstack_run_loop_set_timer(&can_send_timeout_timer, 2000); // 2秒の安全ウォッチドッグ
         btstack_run_loop_add_timer(&can_send_timeout_timer);
         hids_device_request_can_send_now_event(con_handle);
-    } else {
-        // ACL バッファ満杯 (0x57: BTSTACK_ACL_BUFFERS_FULL 等)
-        // ログ連打による UART 飽和 & SPI スタベーションを防止するためレートリミット (1秒に1回)
-        static uint32_t last_err_ms = 0;
-        uint32_t now = to_ms_since_boot(get_absolute_time());
-        if (now - last_err_ms >= 1000) {
-            last_err_ms = now;
-            printf("[BLE-ERR] send_report id=%d len=%d status=0x%02X (buffer full, decimate intermediate report)\r\n", report_id, len, status);
-        }
-        // 送信バッファ満杯時は ble_can_send を false に維持し、CAN_SEND_NOW イベントを待機
-        // ★ 絶対に ble_can_send = true に戻してはならない（戻すとメインループで 0x57 が無限連打されハングする）
+    } else if (status == 0x57) { // BTSTACK_ACL_BUFFERS_FULL
+        // ACLバッファ満杯時は新規送信を行わず、進行中パケットの CAN_SEND_NOW 完了を待機する。
+        // ※ここでタイマーを再設定したり can_send_now を二重要求すると COMMAND_DISALLOWED となり
+        // 永久に 250ms タイマーループ（4fps固定）に陥るため、何もしないのが正しいフロー制御。
         ble_can_send = false;
-        btstack_run_loop_remove_timer(&can_send_timeout_timer);
-        btstack_run_loop_set_timer_handler(&can_send_timeout_timer, can_send_timeout_handler);
-        btstack_run_loop_set_timer(&can_send_timeout_timer, 250);
-        btstack_run_loop_add_timer(&can_send_timeout_timer);
-        hids_device_request_can_send_now_event(con_handle);
+    } else {
+        printf("[BLE-ERR] send_report id=%d len=%d status=0x%02X\r\n", report_id, len, status);
+        ble_can_send = true;
     }
 }
 
