@@ -438,7 +438,10 @@ bool read_adc() {
 }
 #endif
 
-void do_persist_config(uint8_t* buffer) {
+void __no_inline_not_in_flash_func(do_persist_config)(uint8_t* buffer) {
+#if ENABLE_BLE
+    multicore_lockout_start_blocking();
+#endif
 #if !PICO_COPY_TO_RAM
     uint32_t ints = save_and_disable_interrupts();
 #endif
@@ -446,6 +449,9 @@ void do_persist_config(uint8_t* buffer) {
     flash_range_program(CONFIG_OFFSET_IN_FLASH, buffer, PERSISTED_CONFIG_SIZE);
 #if !PICO_COPY_TO_RAM
     restore_interrupts(ints);
+#endif
+#if ENABLE_BLE
+    multicore_lockout_end_blocking();
 #endif
 }
 
@@ -499,22 +505,22 @@ uint64_t get_unique_id() {
 // Core 1 用メイン関数
 // sleep_ms() はハードウェアタイマ割り込み(TIMER_IRQ)を伴い Core 1 で未処理IRQトラップを引き起こす危険があるため、
 // time_us_64() と tight_loop_contents() による安全なノンブロッキング待機を使用
-void core1_main(void) {
+void __no_inline_not_in_flash_func(core1_main)(void) {
     multicore_lockout_victim_init();
 #if ENABLE_BLE && ENABLE_OLED
     oled_init();
-    uint64_t next_oled_us = time_us_64() + 50000;
+    uint64_t next_oled_us = time_us_64() + 200000; // 5Hz (200ms)
     while (true) {
         uint64_t now_us = time_us_64();
         if (now_us >= next_oled_us) {
-            next_oled_us = now_us + 50000;
+            next_oled_us = now_us + 200000;
             oled_task();
         }
         tight_loop_contents();
     }
 #else
     while (true) {
-        tight_loop_contents();
+        __wfe(); // イベント待ちで低消費電力スリープ（フラッシュアクセス完全停止）
     }
 #endif
 }
