@@ -66,10 +66,57 @@ bool set_gpio_dir_pending = false;
 uint16_t prev_adc_state[NADCS] = { 0 };
 #endif
 
+#if ENABLE_BLE
+#ifndef OR_BUFSIZE
+#define OR_BUFSIZE 8
+#endif
+#ifndef MAX_REPORT_SIZE
+#define MAX_REPORT_SIZE 64
+#endif
+extern uint8_t outgoing_reports[OR_BUFSIZE][MAX_REPORT_SIZE + 1];
+extern uint8_t or_head;
+extern uint8_t or_items;
+
+static uint64_t mdiag_last_tx_us = 0;
+static uint32_t mdiag_rx_during_stall = 0;
+static uint32_t mdiag_tx_count = 0;
+static uint32_t mdiag_rx_count = 0;
+static uint32_t mdiag_paced_count = 0;
+static int32_t  mdiag_tx_sum_dx = 0;
+static int32_t  mdiag_tx_sum_dy = 0;
+static uint32_t mdiag_min_dt_ms = 999999;
+static uint32_t mdiag_max_dt_ms = 0;
+static uint32_t mdiag_stalls_35ms = 0;
+static uint32_t mdiag_max_stall_ms = 0;
+
+static uint64_t last_mouse_pace_us = 0;
+static uint8_t last_mouse_buttons = 0;
+#endif
+
 void print_stats_maybe() {
     uint64_t now = time_us_64();
     if (now > next_print) {
         print_stats();
+#if ENABLE_BLE
+        ble_hid_print_stats();
+        if (ble_hid_is_connected()) {
+            printf("[M-STAT step1] TX:%lu pkts (dx=%+ld dy=%+ld) | RX:%lu pkts | paced:%lu | dt=[min:%lu, max:%lu]ms | stalls(>=35ms):%lu (max=%lums)\r\n",
+                   mdiag_tx_count, mdiag_tx_sum_dx, mdiag_tx_sum_dy,
+                   mdiag_rx_count,
+                   mdiag_paced_count,
+                   (mdiag_min_dt_ms == 999999) ? 0 : mdiag_min_dt_ms, mdiag_max_dt_ms,
+                   mdiag_stalls_35ms, mdiag_max_stall_ms);
+        }
+        mdiag_tx_count = 0;
+        mdiag_rx_count = 0;
+        mdiag_paced_count = 0;
+        mdiag_tx_sum_dx = 0;
+        mdiag_tx_sum_dy = 0;
+        mdiag_min_dt_ms = 999999;
+        mdiag_max_dt_ms = 0;
+        mdiag_stalls_35ms = 0;
+        mdiag_max_stall_ms = 0;
+#endif
         while (next_print < now) {
             next_print += 1000000;
         }
@@ -271,62 +318,96 @@ static void update_usb_ports_status(void) {
 }
 #endif
 
-bool do_send_report(uint8_t interface, const uint8_t* report_with_id, uint8_t len) {
-
-#if ENABLE_BLE
+// =========================================================================
+// USB 出力専用関数（有線接続時：TinyUSB へ直接送出、BLE 側の影響を一切受けない）
+// =========================================================================
+static bool do_send_report_usb(uint8_t interface, const uint8_t* report_with_id, uint8_t len) {
+    if (check_pairing_hotkey(interface, report_with_id, len)) {
+        return true;
+    }
     uint8_t report_id = report_with_id[0];
     const uint8_t* report_data = report_with_id + 1;
     uint8_t report_len = len - 1;
 
-    // ホットキーが押された場合は OS へ送らず破棄
+#if ENABLE_BLE && ENABLE_OLED
+    oled_set_mode(false); // USB mode
+    oled_notify_tx();
+#endif
+
+    if (tud_suspended() &&
+        (our_descriptor->should_cause_wakeup != nullptr) &&
+        our_descriptor->should_cause_wakeup(interface, report_with_id, len)) {
+        tud_remote_wakeup();
+    } else if (!tud_suspended()) {
+        tud_hid_n_report(interface, report_id, report_data, report_len);
+    }
+    return true;
+}
+
+#if ENABLE_BLE
+// =========================================================================
+// 未接続（給電のみ）専用関数：スロット切替ホットキーの判定とキュー消化
+// =========================================================================
+static bool do_send_report_offline(uint8_t interface, const uint8_t* report_with_id, uint8_t len) {
+    check_pairing_hotkey(interface, report_with_id, len);
+    ble_hid_kick_reconnect();
+    return true;
+}
+
+// =========================================================================
+// BLE 出力専用関数（BLE 接続時：BLE HID スタックへ送出）
+// =========================================================================
+static bool do_send_report_ble(uint8_t interface, const uint8_t* report_with_id, uint8_t len) {
     if (check_pairing_hotkey(interface, report_with_id, len)) {
         return true;
     }
+    uint8_t report_id = report_with_id[0];
+    const uint8_t* report_data = report_with_id + 1;
+    uint8_t report_len = len - 1;
 
-    // BLE 接続状態の変化（未接続 -> 接続完了）を検知し、
-    // USB 側に残っているかもしれないキーを一度完全にクリアする
-    static bool prev_ble_connected = false;
-    bool curr_ble_connected = ble_hid_is_connected();
-    if (curr_ble_connected && !prev_ble_connected) {
-        printf("[BT] Switched to BLE priority, clearing USB reports\r\n");
-        uint8_t zero_kbd[16] = {0};
-        if (tud_mounted() && !tud_suspended()) {
-            tud_hid_n_report(0, 2, zero_kbd, sizeof(zero_kbd));
-        }
-    }
-    prev_ble_connected = curr_ble_connected;
-
-    oled_set_mode(curr_ble_connected);
+#if ENABLE_OLED
+    oled_set_mode(true); // BLE mode
     oled_notify_tx();
-
-    // BLEで接続がされていたら、優先する
-    if (curr_ble_connected) {
-        ble_hid_send_report(report_id, report_data, report_len);
-    } else {
-        ble_hid_kick_reconnect();
-        if (tud_mounted()) {
-        if (tud_suspended() &&
-            (our_descriptor->should_cause_wakeup != nullptr) &&
-            our_descriptor->should_cause_wakeup(interface, report_with_id, len)) {
-            tud_remote_wakeup();
-        } else if (!tud_suspended()) {
-            tud_hid_n_report(interface, report_id, report_data, report_len);
-        }
-        }
-    }
-#else
-    // 有線専用ビルド
-    if (tud_suspended() &&
-        (our_descriptor->should_cause_wakeup != nullptr) &&
-        our_descriptor->should_cause_wakeup(report_with_id[0], report_with_id + 1, len - 1)) {
-        tud_remote_wakeup();
-    } else {
-        tud_hid_n_report(interface, report_with_id[0], report_with_id + 1, len - 1);
-    }
 #endif
 
+    // マウスレポート（ID 1）の統計・診断計測
+    if (report_id == 1 && report_len >= 5) {
+        int16_t dx = (int16_t)(report_data[1] | (report_data[2] << 8));
+        int16_t dy = (int16_t)(report_data[3] | (report_data[4] << 8));
+        uint64_t now_us = time_us_64();
+        uint32_t dt_ms = (mdiag_last_tx_us > 0) ? (uint32_t)((now_us - mdiag_last_tx_us) / 1000) : 0;
+        uint32_t last_ack_ms = ble_hid_get_last_ack_ms();
+        uint32_t csn_idle_ms = ble_hid_get_csn_idle_ms();
+
+        last_mouse_pace_us = now_us;
+        last_mouse_buttons = report_data[0];
+
+        if (dx != 0 || dy != 0) {
+            mdiag_tx_count++;
+            mdiag_tx_sum_dx += dx;
+            mdiag_tx_sum_dy += dy;
+
+            if (dt_ms > 0) {
+                if (dt_ms < mdiag_min_dt_ms) mdiag_min_dt_ms = dt_ms;
+                if (dt_ms > mdiag_max_dt_ms) mdiag_max_dt_ms = dt_ms;
+            }
+
+            if (dt_ms >= 35 && mdiag_rx_during_stall >= 2) {
+                mdiag_stalls_35ms++;
+                if (dt_ms > mdiag_max_stall_ms) mdiag_max_stall_ms = dt_ms;
+                printf("[M-STALL step1] dt=%lums (dx=%d dy=%d) | radio_ack=%lums queue_idle=%lums rx_in_gap=%lu | int=%.2fms lat=%d\r\n",
+                       dt_ms, dx, dy, last_ack_ms, csn_idle_ms, mdiag_rx_during_stall,
+                       ble_hid_get_conn_interval() * 1.25f, ble_hid_get_conn_latency());
+            }
+        }
+        mdiag_last_tx_us = now_us;
+        mdiag_rx_during_stall = 0;
+    }
+
+    ble_hid_send_report(report_id, report_data, report_len);
     return true;
 }
+#endif
 
 void gpio_pins_init() {
     gpio_valid_pins_mask = get_gpio_valid_pins_mask();
@@ -532,7 +613,10 @@ int main() {
     gpio_pins_init();               
     
     stdio_init_all();
-    printf("\r\n\r\n=== REMAPPER BOOT ===\r\n");
+    printf("\r\n\r\n========================================\r\n");
+    printf("   BLE-USB HID Bridge [step1-refactor]\r\n");
+    printf("========================================\r\n");
+    printf("=== REMAPPER BOOT ===\r\n");
     fflush(stdout);
 
     // デバッガ接続時や再起動時にも Core 1 を確実に起動させるため、
@@ -571,10 +655,16 @@ int main() {
         bool tick;
         bool new_report;
         read_report(&new_report, &tick);
+#if ENABLE_BLE
+        if (new_report) {
+            mdiag_rx_during_stall++;
+            mdiag_rx_count++;
+        }
+#endif
 #if ENABLE_BLE && ENABLE_OLED
         static uint32_t last_usb_check_ms = 0;
         uint32_t now_ms = (uint32_t)(time_us_64() / 1000);
-        if (now_ms - last_usb_check_ms >= 50) {
+        if (now_ms - last_usb_check_ms >= 5000) {
             last_usb_check_ms = now_ms;
             update_usb_ports_status();
         }
@@ -619,29 +709,68 @@ int main() {
             set_gpio_dir_pending = false;
         }
 #if ENABLE_BLE
-        bool ready_to_send = false;
-        if (ble_hid_is_connected()) {
-            ready_to_send = ble_hid_can_send();
-        } else if (tud_mounted()) {
-            ready_to_send = tud_hid_n_ready(0) || tud_suspended();
-        } else {
-            // BLE未接続かつUSB未接続（給電のみ、または未接続時）でも
-            // ホットキー判定および内部バッファ（OR_BUFSIZE=8）の溢れ（overflow!）防止のために
-            // send_report を呼び出してキューを安全に消化する
-            ready_to_send = true;
+        static bool prev_ble_connected = false;
+        bool curr_ble_connected = ble_hid_is_connected();
+        if (curr_ble_connected != prev_ble_connected) {
+            prev_ble_connected = curr_ble_connected;
+            printf("[BT] Active transport changed: %s\r\n", curr_ble_connected ? "BLE" : "USB");
+            if (curr_ble_connected) {
+                printf("[BT] Switched to BLE priority, clearing USB reports\r\n");
+                uint8_t zero_kbd[16] = {0};
+                if (tud_mounted() && !tud_suspended()) {
+                    tud_hid_n_report(0, 2, zero_kbd, sizeof(zero_kbd));
+                }
+            }
+            last_mouse_pace_us = 0;
+            last_mouse_buttons = 0;
         }
 
-        if (ready_to_send) {
-            send_report(do_send_report);
+        if (curr_ble_connected) {
+            // =========================================================
+            // BLE 伝送パス
+            // =========================================================
+            bool ready_to_send = ble_hid_can_send();
+            if (ready_to_send && or_items == 1) {
+                uint8_t next_id = outgoing_reports[or_head][0];
+                if (next_id == 1) { // Mouse report
+                    uint8_t cur_buttons = outgoing_reports[or_head][1];
+                    uint64_t now_us = time_us_64();
+                    if (cur_buttons == last_mouse_buttons) {
+                        uint16_t conn_interval = ble_hid_get_conn_interval();
+                        uint32_t interval_us = (conn_interval > 0) ? (conn_interval * 1250) : 15000;
+                        uint32_t min_pace_us = (interval_us > 1500) ? (interval_us - 1500) : 13500;
+                        if (min_pace_us < 10000) min_pace_us = 10000;
+                        if (now_us - last_mouse_pace_us < min_pace_us) {
+                            ready_to_send = false;
+                            mdiag_paced_count++;
+                        }
+                    }
+                }
+            }
+            if (ready_to_send) {
+                send_report(do_send_report_ble);
+            }
+        } else if (tud_mounted()) {
+            // =========================================================
+            // USB 伝送パス（有線 Remapper と 100% 同一の純粋な TinyUSB 処理）
+            // =========================================================
+            if (tud_hid_n_ready(0) || tud_suspended()) {
+                send_report(do_send_report_usb);
+            }
+        } else {
+            // =========================================================
+            // 未接続パス（給電のみ）：キュー溢れ防止とホットキー検出
+            // =========================================================
+            send_report(do_send_report_offline);
         }
         ble_hid_task();
 #else
         if (tud_hid_n_ready(0) || tud_suspended()) {
-            send_report(do_send_report);
+            send_report(do_send_report_usb);
         }
 #endif
         if (monitor_enabled && tud_hid_n_ready(1)) {
-            send_monitor_report(do_send_report);
+            send_monitor_report(do_send_report_usb);
         }
         if (our_descriptor->main_loop_task != nullptr) {
             our_descriptor->main_loop_task();
