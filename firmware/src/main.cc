@@ -77,18 +77,6 @@ extern uint8_t outgoing_reports[OR_BUFSIZE][MAX_REPORT_SIZE + 1];
 extern uint8_t or_head;
 extern uint8_t or_items;
 
-static uint64_t mdiag_last_tx_us = 0;
-static uint32_t mdiag_rx_during_stall = 0;
-static uint32_t mdiag_tx_count = 0;
-static uint32_t mdiag_rx_count = 0;
-static uint32_t mdiag_paced_count = 0;
-static int32_t  mdiag_tx_sum_dx = 0;
-static int32_t  mdiag_tx_sum_dy = 0;
-static uint32_t mdiag_min_dt_ms = 999999;
-static uint32_t mdiag_max_dt_ms = 0;
-static uint32_t mdiag_stalls_35ms = 0;
-static uint32_t mdiag_max_stall_ms = 0;
-
 static uint64_t last_mouse_pace_us = 0;
 static uint8_t last_mouse_buttons = 0;
 #endif
@@ -97,26 +85,6 @@ void print_stats_maybe() {
     uint64_t now = time_us_64();
     if (now > next_print) {
         print_stats();
-#if ENABLE_BLE
-        ble_hid_print_stats();
-        if (ble_hid_is_connected()) {
-            printf("[M-STAT step1] TX:%lu pkts (dx=%+ld dy=%+ld) | RX:%lu pkts | paced:%lu | dt=[min:%lu, max:%lu]ms | stalls(>=35ms):%lu (max=%lums)\r\n",
-                   mdiag_tx_count, mdiag_tx_sum_dx, mdiag_tx_sum_dy,
-                   mdiag_rx_count,
-                   mdiag_paced_count,
-                   (mdiag_min_dt_ms == 999999) ? 0 : mdiag_min_dt_ms, mdiag_max_dt_ms,
-                   mdiag_stalls_35ms, mdiag_max_stall_ms);
-        }
-        mdiag_tx_count = 0;
-        mdiag_rx_count = 0;
-        mdiag_paced_count = 0;
-        mdiag_tx_sum_dx = 0;
-        mdiag_tx_sum_dy = 0;
-        mdiag_min_dt_ms = 999999;
-        mdiag_max_dt_ms = 0;
-        mdiag_stalls_35ms = 0;
-        mdiag_max_stall_ms = 0;
-#endif
         while (next_print < now) {
             next_print += 1000000;
         }
@@ -370,38 +338,9 @@ static bool do_send_report_ble(uint8_t interface, const uint8_t* report_with_id,
     oled_notify_tx();
 #endif
 
-    // マウスレポート（ID 1）の統計・診断計測
     if (report_id == 1 && report_len >= 5) {
-        int16_t dx = (int16_t)(report_data[1] | (report_data[2] << 8));
-        int16_t dy = (int16_t)(report_data[3] | (report_data[4] << 8));
-        uint64_t now_us = time_us_64();
-        uint32_t dt_ms = (mdiag_last_tx_us > 0) ? (uint32_t)((now_us - mdiag_last_tx_us) / 1000) : 0;
-        uint32_t last_ack_ms = ble_hid_get_last_ack_ms();
-        uint32_t csn_idle_ms = ble_hid_get_csn_idle_ms();
-
-        last_mouse_pace_us = now_us;
+        last_mouse_pace_us = time_us_64();
         last_mouse_buttons = report_data[0];
-
-        if (dx != 0 || dy != 0) {
-            mdiag_tx_count++;
-            mdiag_tx_sum_dx += dx;
-            mdiag_tx_sum_dy += dy;
-
-            if (dt_ms > 0) {
-                if (dt_ms < mdiag_min_dt_ms) mdiag_min_dt_ms = dt_ms;
-                if (dt_ms > mdiag_max_dt_ms) mdiag_max_dt_ms = dt_ms;
-            }
-
-            if (dt_ms >= 35 && mdiag_rx_during_stall >= 2) {
-                mdiag_stalls_35ms++;
-                if (dt_ms > mdiag_max_stall_ms) mdiag_max_stall_ms = dt_ms;
-                printf("[M-STALL step1] dt=%lums (dx=%d dy=%d) | radio_ack=%lums queue_idle=%lums rx_in_gap=%lu | int=%.2fms lat=%d\r\n",
-                       dt_ms, dx, dy, last_ack_ms, csn_idle_ms, mdiag_rx_during_stall,
-                       ble_hid_get_conn_interval() * 1.25f, ble_hid_get_conn_latency());
-            }
-        }
-        mdiag_last_tx_us = now_us;
-        mdiag_rx_during_stall = 0;
     }
 
     ble_hid_send_report(report_id, report_data, report_len);
@@ -614,7 +553,7 @@ int main() {
     
     stdio_init_all();
     printf("\r\n\r\n========================================\r\n");
-    printf("   BLE-USB HID Bridge [step1-refactor]\r\n");
+    printf("   BLE-USB HID Bridge\r\n");
     printf("========================================\r\n");
     printf("=== REMAPPER BOOT ===\r\n");
     fflush(stdout);
@@ -655,12 +594,6 @@ int main() {
         bool tick;
         bool new_report;
         read_report(&new_report, &tick);
-#if ENABLE_BLE
-        if (new_report) {
-            mdiag_rx_during_stall++;
-            mdiag_rx_count++;
-        }
-#endif
 #if ENABLE_BLE && ENABLE_OLED
         static uint32_t last_usb_check_ms = 0;
         uint32_t now_ms = (uint32_t)(time_us_64() / 1000);
@@ -727,7 +660,7 @@ int main() {
 
         if (curr_ble_connected) {
             // =========================================================
-            // BLE 伝送パス
+            // BLE 伝送パス（無線インターバル完全同期）
             // =========================================================
             bool ready_to_send = ble_hid_can_send();
             if (ready_to_send && or_items == 1) {
@@ -738,11 +671,11 @@ int main() {
                     if (cur_buttons == last_mouse_buttons) {
                         uint16_t conn_interval = ble_hid_get_conn_interval();
                         uint32_t interval_us = (conn_interval > 0) ? (conn_interval * 1250) : 15000;
-                        uint32_t min_pace_us = (interval_us > 1500) ? (interval_us - 1500) : 13500;
-                        if (min_pace_us < 10000) min_pace_us = 10000;
-                        if (now_us - last_mouse_pace_us < min_pace_us) {
+                        // 1接続インターバルあたり厳密に最大1パケットへ整合（66.6pkts/s上限）
+                        // 14.5ms以上の間隔を保証し、1つの15msアンカー内に2パケット押し込まれるバースト衝突を完全に防止
+                        uint32_t pace_us = (interval_us > 500) ? (interval_us - 500) : 14500;
+                        if (now_us - last_mouse_pace_us < pace_us) {
                             ready_to_send = false;
-                            mdiag_paced_count++;
                         }
                     }
                 }

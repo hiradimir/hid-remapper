@@ -149,56 +149,10 @@ static bool slot_disconnect_after_zero = false;
 static bool zero_sent_waiting_ack = false;
 static char current_peer_addr[18] = "";
 
-static uint32_t ble_stat_tx_ok = 0;
-static uint32_t ble_stat_acl_full = 0;
-static uint32_t ble_stat_csn_count = 0;
-static uint32_t ble_stat_watchdog_resets = 0;
-static uint16_t ble_stat_interval = 0;
-static uint16_t ble_stat_latency = 0;
-static uint16_t ble_stat_timeout = 0;
-
-static uint64_t ble_tx_send_time_us = 0;
-static uint32_t ble_last_ack_ms = 0;
-static uint32_t ble_min_ack_ms = 999999;
-static uint32_t ble_max_ack_ms = 0;
-static uint32_t ble_long_ack_count = 0;
-static uint64_t ble_last_csn_time_us = 0;
-
-uint32_t ble_hid_get_last_ack_ms(void) {
-    return ble_last_ack_ms;
-}
-
-uint32_t ble_hid_get_csn_idle_ms(void) {
-    if (ble_last_csn_time_us == 0) return 0;
-    return (uint32_t)((time_us_64() - ble_last_csn_time_us) / 1000);
-}
+static uint16_t ble_conn_interval = 0;
 
 uint16_t ble_hid_get_conn_interval(void) {
-    return ble_stat_interval;
-}
-
-uint16_t ble_hid_get_conn_latency(void) {
-    return ble_stat_latency;
-}
-
-void ble_hid_print_stats(void) {
-    if (current_state == BLE_STATE_CONNECTED) {
-        printf("[BLE-STAT step1] tx_ok=%lu ack=[min:%lu, max:%lu, last:%lu]ms long_ack(>=35ms):%lu wd=%lu | int=%.2fms lat=%d to=%dms\r\n",
-               ble_stat_tx_ok,
-               (ble_min_ack_ms == 999999) ? 0 : ble_min_ack_ms,
-               ble_max_ack_ms,
-               ble_last_ack_ms,
-               ble_long_ack_count,
-               ble_stat_watchdog_resets,
-               ble_stat_interval * 1.25f, ble_stat_latency, ble_stat_timeout * 10);
-        ble_stat_tx_ok = 0;
-        ble_stat_acl_full = 0;
-        ble_stat_csn_count = 0;
-        ble_min_ack_ms = 999999;
-        ble_max_ack_ms = 0;
-        ble_long_ack_count = 0;
-        ble_stat_watchdog_resets = 0;
-    }
+    return ble_conn_interval;
 }
 
 
@@ -293,7 +247,6 @@ static void update_ui_for_state(ble_state_t state) {
 
 static void can_send_timeout_handler(btstack_timer_source_t *ts) {
     if (!ble_can_send && con_handle != HCI_CON_HANDLE_INVALID) {
-        ble_stat_watchdog_resets++;
         printf("[BT] WARNING: CAN_SEND_NOW watchdog timed out (2000ms). Resetting flow control.\r\n");
         ble_can_send = true;
         hids_device_request_can_send_now_event(con_handle);
@@ -832,19 +785,6 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     break;
                 }
                 case HIDS_SUBEVENT_CAN_SEND_NOW: {
-                    ble_stat_csn_count++;
-                    uint64_t now_us = time_us_64();
-                    if (ble_tx_send_time_us > 0) {
-                        uint32_t ack_ms = (uint32_t)((now_us - ble_tx_send_time_us) / 1000);
-                        ble_last_ack_ms = ack_ms;
-                        if (ack_ms < ble_min_ack_ms) ble_min_ack_ms = ack_ms;
-                        if (ack_ms > ble_max_ack_ms) ble_max_ack_ms = ack_ms;
-                        if (ack_ms >= 35) {
-                            ble_long_ack_count++;
-                        }
-                    }
-                    ble_last_csn_time_us = now_us;
-
                     ble_can_send = true;
                     btstack_run_loop_remove_timer(&can_send_timeout_timer);
                     if (slot_disconnect_after_zero) {
@@ -1087,7 +1027,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
 }
 
 void ble_hid_init(void) {
-    printf("[BT] BLE HID Stack [step1-refactor] init\r\n");
+    printf("[BT] BLE HID Stack init\r\n");
     if (cyw43_arch_init()) {
         return;
     }
@@ -1230,14 +1170,8 @@ void ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len) {
     }
 
     oled_notify_tx();
-    ble_tx_send_time_us = time_us_64();
     uint8_t status = hids_device_send_input_report_for_id(con_handle, report_id, (uint8_t*)data, len);
     if (status == ERROR_CODE_SUCCESS || status == 0x57) { // 0x57: BTSTACK_ACL_BUFFERS_FULL
-        if (status == ERROR_CODE_SUCCESS) {
-            ble_stat_tx_ok++;
-        } else {
-            ble_stat_acl_full++;
-        }
         ble_can_send = false;
         btstack_run_loop_remove_timer(&can_send_timeout_timer);
         btstack_run_loop_set_timer_handler(&can_send_timeout_timer, can_send_timeout_handler);

@@ -23,11 +23,7 @@ void ble_switch_slot(int slot);
 void ble_hid_switch_host(uint8_t slot);
 
 void ble_led(bool value);
-void ble_hid_print_stats(void);
-uint32_t ble_hid_get_last_ack_ms(void);
-uint32_t ble_hid_get_csn_idle_ms(void);
 uint16_t ble_hid_get_conn_interval(void);
-uint16_t ble_hid_get_conn_latency(void);
 
 #ifdef __cplusplus
 }
