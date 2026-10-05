@@ -118,7 +118,6 @@ static bool check_pairing_hotkey(uint8_t interface, const uint8_t* report_with_i
 
     uint8_t report_id = report_with_id[0];
     const uint8_t* report_data = report_with_id + 1;
-    uint8_t report_len = len - 1;
 
     // キーボードレポート（ID 2）のみ対象
     if (report_id != 2) return false;
@@ -132,6 +131,8 @@ static bool check_pairing_hotkey(uint8_t interface, const uint8_t* report_with_i
 
     // F1 〜 F4 のスロット判定（通常数字キーやテンキーの誤判定を完全に排除）
     int slot = -1;
+    // Backspace (Usage 0x2A: report_data[5] bit 6 / 0x40) または Forward Delete (Usage 0x4C: report_data[10] bit 0 / 0x01) でボンド全消去
+    bool backspace_pressed = ((report_data[5] & 0x40) != 0) || ((report_data[10] & 0x01) != 0);
     if      ((report_data[7] & 0x40) != 0) slot = 0; // F1 -> Slot 1
     else if ((report_data[7] & 0x80) != 0) slot = 1; // F2 -> Slot 2
     else if ((report_data[8] & 0x01) != 0) slot = 2; // F3 -> Slot 3
@@ -140,13 +141,13 @@ static bool check_pairing_hotkey(uint8_t interface, const uint8_t* report_with_i
     // デバッグ出力: Ctrl+Win と F1..F4 が押されたら UART に出力
     if (ctrl_pressed && gui_pressed && slot >= 0) {
         printf("[KBD-DEBUG] mod=0x%02X(count=%d) slot=%d\r\n", modifier, 2 + (alt_pressed ? 1 : 0), slot + 1);
+    } else if (ctrl_pressed && gui_pressed && alt_pressed && backspace_pressed) {
+        printf("[KBD-DEBUG] mod=0x%02X(count=3) Clear Bonds Hotkey\r\n", modifier);
     }
 
     static bool hotkey_was_pressed = false;
     bool hotkey_now = (ctrl_pressed && gui_pressed && (slot >= 0));
 
-    // Backspace (Usage 0x2A in NKRO bitmap: report_data[6] bit 2) でボンド全消去
-    bool backspace_pressed = (report_data[6] & 0x04) != 0;
     if (ctrl_pressed && gui_pressed && alt_pressed && backspace_pressed) {
         if (!hotkey_was_pressed) {
             hotkey_was_pressed = true;
@@ -552,6 +553,7 @@ int main() {
     gpio_pins_init();               
     
     stdio_init_all();
+    sleep_ms(300); // UART (Debug Probe) 回線の安定化待ち（RP2040リセット時のブレーク検出・フレーミングエラー回復時間）
     printf("\r\n\r\n========================================\r\n");
     printf("   BLE-USB HID Bridge\r\n");
     printf("========================================\r\n");
