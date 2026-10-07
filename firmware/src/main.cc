@@ -76,6 +76,7 @@ uint16_t prev_adc_state[NADCS] = { 0 };
 extern uint8_t outgoing_reports[OR_BUFSIZE][MAX_REPORT_SIZE + 1];
 extern uint8_t or_head;
 extern uint8_t or_items;
+extern uint16_t report_sizes[];
 
 static uint64_t last_mouse_pace_us = 0;
 static uint8_t last_mouse_buttons = 0;
@@ -658,6 +659,29 @@ int main() {
             }
             last_mouse_pace_us = 0;
             last_mouse_buttons = 0;
+        }
+
+        // =========================================================================
+        // ホットキー即時判定ルーチン（BLE 伝送パス・フロー制御から完全独立）
+        // =========================================================================
+        // BLE がバッファ満杯やスタール等で送信待ち（ble_can_send == false）になっていても、
+        // キュー内にキーボードレポート（Report ID 2）があれば即座にホットキーを検出して消費する。
+        if (or_items > 0) {
+            for (uint8_t i = 0; i < or_items; i++) {
+                uint8_t idx = (or_head + i) % OR_BUFSIZE;
+                if (outgoing_reports[idx][0] == 2) { // Keyboard report
+                    if (check_pairing_hotkey(0, outgoing_reports[idx], MAX_REPORT_SIZE + 1)) {
+                        // ホットキーが成立して消費された場合、キューから該当レポートを除去
+                        for (uint8_t j = i; j + 1 < or_items; j++) {
+                            uint8_t curr = (or_head + j) % OR_BUFSIZE;
+                            uint8_t next = (or_head + j + 1) % OR_BUFSIZE;
+                            memcpy(outgoing_reports[curr], outgoing_reports[next], sizeof(outgoing_reports[0]));
+                        }
+                        or_items--;
+                        break;
+                    }
+                }
+            }
         }
 
         if (curr_ble_connected) {

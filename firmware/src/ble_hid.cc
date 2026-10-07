@@ -5,6 +5,7 @@
 
 #include "pico/stdlib.h"
 #include "pico/cyw43_arch.h"
+#include "pico/async_context.h"
 #include "pico/unique_id.h"
 #include "btstack.h"
 #include "btstack_config.h"
@@ -155,6 +156,23 @@ uint16_t ble_hid_get_conn_interval(void) {
     return ble_conn_interval;
 }
 
+// BTstack / CYW43 非同期コンテキスト用排他ロック
+static inline void ble_lock(void) {
+    async_context_t *context = cyw43_arch_async_context();
+    if (context) {
+        async_context_acquire_lock_blocking(context);
+    }
+}
+
+static inline void ble_unlock(void) {
+    async_context_t *context = cyw43_arch_async_context();
+    if (context) {
+        async_context_release_lock(context);
+    }
+}
+
+static int consecutive_can_send_timeouts = 0;
+
 
 static int current_slot = 0;
 
@@ -241,7 +259,20 @@ static void update_ui_for_state(ble_state_t state) {
 
 static void can_send_timeout_handler(btstack_timer_source_t *ts) {
     if (!ble_can_send && con_handle != HCI_CON_HANDLE_INVALID) {
-        printf("[BT] WARNING: CAN_SEND_NOW watchdog timed out (2000ms). Resetting flow control.\r\n");
+        consecutive_can_send_timeouts++;
+        printf("[BT] WARNING: CAN_SEND_NOW watchdog timed out (2000ms, count=%d). Resetting flow control.\r\n",
+               consecutive_can_send_timeouts);
+
+        // 2回連続（4秒間）完了通知が途絶えた場合はBTstack/CYW43バッファの完全膠着と判定
+        // ゾンビ状態での永久停止を防ぎ、クリーンに切断して自動再接続シーケンスへ移行
+        if (consecutive_can_send_timeouts >= 2) {
+            printf("[BT] CRITICAL: BLE transmission deadlocked for 4000ms. Forcing link disconnect & clean recovery.\r\n");
+            consecutive_can_send_timeouts = 0;
+            ble_can_send = true;
+            gap_disconnect(con_handle);
+            return;
+        }
+
         ble_can_send = true;
         hids_device_request_can_send_now_event(con_handle);
     }
@@ -284,6 +315,9 @@ static void conn_stabilize_timer_handler(btstack_timer_source_t *ts) {
 
 static void check_and_start_connection_stabilize(void) {
     if (ble_kbd_ready && ble_encrypted && con_handle != HCI_CON_HANDLE_INVALID) {
+        if (current_state == BLE_STATE_CONNECTED) {
+            return;
+        }
         printf("[BT] Handshake complete (Encrypted + KBD Ready). Stabilizing for 100ms...\r\n");
         btstack_run_loop_remove_timer(&conn_stabilize_timer);
         btstack_run_loop_set_timer_handler(&conn_stabilize_timer, conn_stabilize_timer_handler);
@@ -730,6 +764,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     break;
                 }
                 case HIDS_SUBEVENT_CAN_SEND_NOW: {
+                    consecutive_can_send_timeouts = 0;
                     ble_can_send = true;
                     btstack_run_loop_remove_timer(&can_send_timeout_timer);
                     if (slot_disconnect_after_zero) {
@@ -821,8 +856,19 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                 uint16_t interval = hci_subevent_le_connection_update_complete_get_conn_interval(packet);
                 uint16_t latency = hci_subevent_le_connection_update_complete_get_conn_latency(packet);
                 uint16_t timeout = hci_subevent_le_connection_update_complete_get_supervision_timeout(packet);
+                ble_conn_interval = interval;
                 printf("[BT] Connection parameters updated: interval=%.2fms, latency=%d, timeout=%dms\r\n",
                        interval * 1.25f, latency, timeout * 10);
+
+                // ホスト側が省電力（スレーブラテンシ > 0）を適用してきた場合、
+                // マウス操作の追従性を保つために低遅延パラメータ (latency=0) の再適用を要求
+                static uint32_t last_param_reassert_ms = 0;
+                uint32_t now = to_ms_since_boot(get_absolute_time());
+                if (latency > 0 && (now - last_param_reassert_ms > 10000)) {
+                    last_param_reassert_ms = now;
+                    printf("[BT] Host set latency=%d. Re-requesting low-latency parameters (latency=0)...\r\n", latency);
+                    gap_request_connection_parameter_update(con_handle, 9, 12, 0, 400);
+                }
             }
             break;
         }
@@ -968,6 +1014,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                 // 重複イベント（hids_device と hci_event_callback の多重登録）を無視
                 break;
             }
+            consecutive_can_send_timeouts = 0;
             btstack_run_loop_remove_timer(&disconnect_timeout_timer);
             btstack_run_loop_remove_timer(&conn_stabilize_timer);
             btstack_run_loop_remove_timer(&conn_handshake_timeout_timer);
@@ -1192,6 +1239,8 @@ void ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len) {
         return;
     }
 
+    ble_lock();
+
     oled_notify_tx();
     uint8_t status = hids_device_send_input_report_for_id(con_handle, report_id, (uint8_t*)data, len);
     if (status == ERROR_CODE_SUCCESS || status == 0x57) { // 0x57: BTSTACK_ACL_BUFFERS_FULL
@@ -1200,11 +1249,17 @@ void ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len) {
         btstack_run_loop_set_timer_handler(&can_send_timeout_timer, can_send_timeout_handler);
         btstack_run_loop_set_timer(&can_send_timeout_timer, 2000); // 2秒の安全ウォッチドッグ
         btstack_run_loop_add_timer(&can_send_timeout_timer);
-        hids_device_request_can_send_now_event(con_handle);
+        uint8_t req_err = hids_device_request_can_send_now_event(con_handle);
+        if (req_err != ERROR_CODE_SUCCESS) {
+            ble_can_send = true;
+            btstack_run_loop_remove_timer(&can_send_timeout_timer);
+        }
     } else {
         printf("[BLE-ERR] send_report id=%d len=%d status=0x%02X\r\n", report_id, len, status);
         ble_can_send = true;
     }
+
+    ble_unlock();
 }
 
 
@@ -1262,7 +1317,6 @@ void ble_clear_bonds(void) {
 
 void ble_led(bool value) {
   cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, value);
-
 }
 
 #endif // ENABLE_BLE
