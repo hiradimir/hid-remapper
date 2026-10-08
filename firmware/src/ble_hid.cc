@@ -125,9 +125,31 @@ static const uint8_t hid_report_descriptor[] = {
     0x95, 0x01,                    //   Report Count (1)
     0x81, 0x03,                    //   Input (Const,Var,Abs)
     0xC0,                          // End Collection
+
+    // --- Consumer Control (Report ID 3: Media Keys) ---
+    0x05, 0x0C,                    // Usage Page (Consumer)
+    0x09, 0x01,                    // Usage (Consumer Control)
+    0xA1, 0x01,                    // Collection (Application)
+    0x85, 0x03,                    //   Report ID (3)
+    0x15, 0x00,                    //   Logical Minimum (0)
+    0x25, 0x01,                    //   Logical Maximum (1)
+    0x09, 0xB5,                    //   Usage (Scan Next Track)
+    0x09, 0xB6,                    //   Usage (Scan Previous Track)
+    0x09, 0xB7,                    //   Usage (Stop)
+    0x09, 0xCD,                    //   Usage (Play/Pause)
+    0x09, 0xE2,                    //   Usage (Mute)
+    0x09, 0xE9,                    //   Usage (Volume Increment)
+    0x09, 0xEA,                    //   Usage (Volume Decrement)
+    0x75, 0x01,                    //   Report Size (1)
+    0x95, 0x07,                    //   Report Count (7)
+    0x81, 0x02,                    //   Input (Data,Var,Abs)
+    0x75, 0x01,                    //   Report Size (1)
+    0x95, 0x01,                    //   Report Count (1)
+    0x81, 0x03,                    //   Input (Const,Var,Abs)
+    0xC0,                          // End Collection
 };
 
-static hids_device_report_t hid_reports[2];
+static hids_device_report_t hid_reports[3];
 
 // 【BL-14】統一ステートマシンの定義
 typedef enum {
@@ -144,6 +166,8 @@ static ble_state_t current_state = BLE_STATE_STANDBY_SILENT;
 // 【BL-15】暗号化および各レポート有効化の厳密な個別管理
 static bool ble_kbd_ready = false;      // Report ID 2 (Keyboard) subscribed
 static bool ble_mouse_ready = false;    // Report ID 1 (Mouse) subscribed
+static bool ble_consumer_ready = false; // Report ID 3 (Consumer Control) subscribed
+static bool conn_stabilize_active = false;
 static bool ble_encrypted = false;      // Link encrypted
 static bool ble_can_send = true;
 static bool slot_disconnect_after_zero = false;
@@ -296,6 +320,7 @@ static void conn_handshake_timeout_handler(btstack_timer_source_t *ts) {
 }
 
 static void conn_stabilize_timer_handler(btstack_timer_source_t *ts) {
+    conn_stabilize_active = false;
     if (con_handle != HCI_CON_HANDLE_INVALID && ble_kbd_ready && ble_encrypted) {
         printf("[BT] Connection stabilized -> CONNECTED (Ready to send)\r\n");
         btstack_run_loop_remove_timer(&conn_handshake_timeout_timer);
@@ -315,9 +340,10 @@ static void conn_stabilize_timer_handler(btstack_timer_source_t *ts) {
 
 static void check_and_start_connection_stabilize(void) {
     if (ble_kbd_ready && ble_encrypted && con_handle != HCI_CON_HANDLE_INVALID) {
-        if (current_state == BLE_STATE_CONNECTED) {
+        if (current_state == BLE_STATE_CONNECTED || conn_stabilize_active) {
             return;
         }
+        conn_stabilize_active = true;
         printf("[BT] Handshake complete (Encrypted + KBD Ready). Stabilizing for 100ms...\r\n");
         btstack_run_loop_remove_timer(&conn_stabilize_timer);
         btstack_run_loop_set_timer_handler(&conn_stabilize_timer, conn_stabilize_timer_handler);
@@ -508,6 +534,7 @@ static void disconnect_timeout_handler(btstack_timer_source_t *ts) {
         con_handle = HCI_CON_HANDLE_INVALID;
         ble_kbd_ready = false;
         ble_mouse_ready = false;
+        ble_consumer_ready = false;
         ble_encrypted = false;
         ble_can_send = true;
         slot_disconnect_after_zero = false;
@@ -749,17 +776,21 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     con_handle = hids_subevent_input_report_enable_get_con_handle(packet);
                     bool enabled = hids_subevent_input_report_enable_get_enable(packet) != 0;
                     uint8_t report_id = hids_subevent_input_report_enable_get_report_id(packet);
-                    printf("[BT] Input report enabled for ID %d: %d\r\n", report_id, enabled);
 
-                    // 【BL-15】レポートIDごとの購読状態を厳密に個別管理
+                    // 【BL-15】レポートIDごとの購読状態を厳密に個別管理（重複購読時の冗長ログを抑止）
+                    bool changed = false;
                     if (report_id == 2) { // Keyboard (Report ID 2)
-                        ble_kbd_ready = enabled;
+                        if (ble_kbd_ready != enabled) { ble_kbd_ready = enabled; changed = true; }
                     } else if (report_id == 1) { // Mouse (Report ID 1)
-                        ble_mouse_ready = enabled;
+                        if (ble_mouse_ready != enabled) { ble_mouse_ready = enabled; changed = true; }
+                    } else if (report_id == 3) { // Consumer Control (Report ID 3: Media Keys)
+                        if (ble_consumer_ready != enabled) { ble_consumer_ready = enabled; changed = true; }
                     }
 
+                    if (changed) {
+                        printf("[BT] Input report enabled for ID %d: %d\r\n", report_id, enabled);
+                    }
                     // 【BL-14/15】暗号化完了 かつ キーボード購読完了で安定化タイマ(100ms)開始後に CONNECTED 遷移
-                last_created_device_index = -1;
                     check_and_start_connection_stabilize();
                     break;
                 }
@@ -801,6 +832,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                 hci_con_handle_t new_handle = hci_subevent_le_connection_complete_get_connection_handle(packet);
                 if (con_handle == HCI_CON_HANDLE_INVALID) {
                     btstack_run_loop_remove_timer(&conn_stabilize_timer);
+                    conn_stabilize_active = false;
                     btstack_run_loop_remove_timer(&reconnect_timeout_timer);
                     con_handle = new_handle;
 
@@ -841,6 +873,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     // 【BL-15】物理リンク接続時点ではまだ送信禁止（CONNECTING）
                     ble_kbd_ready = false;
                     ble_mouse_ready = false;
+                    ble_consumer_ready = false;
                     ble_encrypted = false;
                     ble_can_send = true;
                     slot_disconnect_after_zero = false;
@@ -1017,10 +1050,12 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             consecutive_can_send_timeouts = 0;
             btstack_run_loop_remove_timer(&disconnect_timeout_timer);
             btstack_run_loop_remove_timer(&conn_stabilize_timer);
+                    conn_stabilize_active = false;
             btstack_run_loop_remove_timer(&conn_handshake_timeout_timer);
             con_handle = HCI_CON_HANDLE_INVALID;
             ble_kbd_ready = false;
             ble_mouse_ready = false;
+            ble_consumer_ready = false;
             ble_encrypted = false;
             btstack_run_loop_remove_timer(&can_send_timeout_timer);
             ble_can_send = true;
@@ -1127,7 +1162,7 @@ void ble_hid_init(void) {
 
     att_server_init(profile_data, NULL, NULL);
     battery_service_server_init(100);
-    hids_device_init_with_storage(0, hid_report_descriptor, sizeof(hid_report_descriptor), 2, hid_reports);
+    hids_device_init_with_storage(0, hid_report_descriptor, sizeof(hid_report_descriptor), 3, hid_reports);
     hids_device_register_packet_handler(packet_handler);
 
     sm_event_callback_registration.callback = &packet_handler;
@@ -1232,8 +1267,10 @@ void ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len) {
 
     // 【BL-15】暗号化完了 かつ 該当レポート購読完了を厳密にチェック
     if (!ble_encrypted) return;
-    if (report_id == 2 && !ble_kbd_ready) return;    // Report ID 2: Keyboard
-    if (report_id == 1 && !ble_mouse_ready) return;  // Report ID 1: Mouse
+    if (report_id == 2 && !ble_kbd_ready) return;      // Report ID 2: Keyboard
+    if (report_id == 1 && !ble_mouse_ready) return;    // Report ID 1: Mouse
+    if (report_id == 3 && !ble_consumer_ready) return; // Report ID 3: Consumer (BL-12)
+    if (report_id != 1 && report_id != 2 && report_id != 3) return;
 
     if (!ble_can_send) {
         return;
