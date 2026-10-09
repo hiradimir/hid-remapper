@@ -235,6 +235,17 @@ static void update_ui_for_state(ble_state_t state);
 static void save_slot_bonded_mask(uint8_t mask);
 static void save_slot_peers(void);
 
+static void update_connecting_status(void) {
+    if (current_state == BLE_STATE_CONNECTING) {
+        char stat_buf[20];
+        snprintf(stat_buf, sizeof(stat_buf), "C:E%d K%d M%d",
+                 ble_encrypted ? 1 : 0,
+                 ble_kbd_ready ? 1 : 0,
+                 ble_mouse_ready ? 1 : 0);
+        oled_set_status(stat_buf);
+    }
+}
+
 // 状態に応じた OLED / LED の一元更新
 static void update_ui_for_state(ble_state_t state) {
     oled_set_slot((uint8_t)current_slot);
@@ -263,7 +274,7 @@ static void update_ui_for_state(ble_state_t state) {
         case BLE_STATE_CONNECTING:
             oled_set_bt_state(OLED_BT_SWITCHING); // WAIT
             oled_set_mode(false);
-            oled_set_status("Connecting...");
+            update_connecting_status();
             oled_set_peer_addr("");
             ble_led(0);
             break;
@@ -841,6 +852,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
 
                     if (changed) {
                         printf("[BT] Input report enabled for ID %d: %d\r\n", report_id, enabled);
+                        update_connecting_status();
                     }
                     // 【BL-14/15】暗号化完了 かつ キーボード購読完了で安定化タイマ(100ms)開始後に CONNECTED 遷移
                     check_and_start_connection_stabilize();
@@ -1073,6 +1085,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             if (status == 0 && enabled) {
                 printf("[BT] Encryption enabled\r\n");
                 ble_encrypted = true;
+                update_connecting_status();
 
                 // 暗号化成功＝このスロットに有効なボンドが存在することを確定
                 if (!(slot_bonded_mask & (1 << current_slot))) {
