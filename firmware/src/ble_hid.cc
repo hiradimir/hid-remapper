@@ -208,6 +208,10 @@ static btstack_timer_source_t can_send_timeout_timer;
 static btstack_timer_source_t reconnect_timeout_timer;
 static btstack_timer_source_t conn_handshake_timeout_timer;
 static hci_con_handle_t con_handle = HCI_CON_HANDLE_INVALID;
+static btstack_timer_source_t slot_transition_timer;
+static int slot_transition_target = -1;
+static bool slot_transition_pairing = false;
+static uint64_t pairing_start_us = 0;
 static int last_created_device_index = -1;
 static bool bl17_reject_in_progress = false;
 static btstack_timer_source_t bl17_cooldown_timer;
@@ -488,15 +492,30 @@ static void load_current_slot(void) {
         oled_set_slot_bonded(i, (slot_bonded_mask & (1 << i)) != 0);
     }
 }
-static void save_current_slot(uint8_t slot) {
-    if (!tlv_impl) return;
+static btstack_timer_source_t save_slot_timer;
+static uint8_t pending_save_slot = 0xFF;
+
+static void save_slot_timer_handler(btstack_timer_source_t *ts) {
+    if (!tlv_impl || pending_save_slot >= MAX_SLOTS) return;
+    uint8_t slot_to_save = pending_save_slot;
+    pending_save_slot = 0xFF;
+
     uint8_t current_saved = 0xFF;
     int len = tlv_impl->get_tag(&tlv_context, TLV_TAG_CURRENT_SLOT, &current_saved, sizeof(current_saved));
-    if (len == sizeof(current_saved) && current_saved == slot) {
+    if (len == sizeof(current_saved) && current_saved == slot_to_save) {
         return;
     }
-    int res = tlv_impl->store_tag(&tlv_context, TLV_TAG_CURRENT_SLOT, &slot, sizeof(slot));
-    printf("[BT] Saved current_slot: %d to TLV (res=%d)\r\n", slot + 1, res);
+    int res = tlv_impl->store_tag(&tlv_context, TLV_TAG_CURRENT_SLOT, &slot_to_save, sizeof(slot_to_save));
+    printf("[BT] Saved current_slot: %d to TLV (res=%d)\r\n", slot_to_save + 1, res);
+}
+
+static void schedule_save_current_slot(uint8_t slot) {
+    if (!tlv_impl || slot >= MAX_SLOTS) return;
+    pending_save_slot = slot;
+    btstack_run_loop_remove_timer(&save_slot_timer);
+    btstack_run_loop_set_timer_handler(&save_slot_timer, save_slot_timer_handler);
+    btstack_run_loop_set_timer(&save_slot_timer, 2000); // 2秒安定後に安全にFlash保存
+    btstack_run_loop_add_timer(&save_slot_timer);
 }
 
 // タイムアウト時のハンドラ（ペアリングモード終了）
@@ -527,6 +546,38 @@ static void get_slot_random_address(int slot, bd_addr_t out_addr) {
     out_addr[5] = id.id[7] + (uint8_t)slot + slot_salts[slot];
 }
 
+// 【BL-32】切断完了後の CYW43 内部リソース解放猶予タイマ（150ms）
+// 切断直後に連続して HCI コマンド（アドレス変更・広告開始）を投げると
+// コントローラ側でドロップして電波不発となる問題を確実に防止する
+static void slot_transition_timer_handler(btstack_timer_source_t *ts) {
+    if (slot_transition_target >= 0 && slot_transition_target < MAX_SLOTS) {
+        int slot = slot_transition_target;
+        bool is_pairing = slot_transition_pairing;
+        slot_transition_target = -1;
+
+        is_pairing_mode = is_pairing;
+        btstack_run_loop_remove_timer(&pairing_timeout_timer);
+        if (is_pairing_mode) {
+            btstack_run_loop_set_timer_handler(&pairing_timeout_timer, pairing_mode_timeout_handler);
+            btstack_run_loop_set_timer(&pairing_timeout_timer, 60000);
+            btstack_run_loop_add_timer(&pairing_timeout_timer);
+        }
+        printf("[BT] Slot transition margin (150ms) complete -> apply_slot_identity(Slot %d, pairing=%d)\r\n",
+               slot + 1, is_pairing_mode);
+        apply_slot_identity(slot);
+    }
+}
+
+static void schedule_slot_transition(int slot, bool is_pairing) {
+    slot_transition_target = slot;
+    slot_transition_pairing = is_pairing;
+    printf("[BT] Starting 150ms slot transition margin: Slot %d (pairing=%d)\r\n", slot + 1, is_pairing);
+    btstack_run_loop_remove_timer(&slot_transition_timer);
+    btstack_run_loop_set_timer_handler(&slot_transition_timer, slot_transition_timer_handler);
+    btstack_run_loop_set_timer(&slot_transition_timer, 150);
+    btstack_run_loop_add_timer(&slot_transition_timer);
+}
+
 // ホストが休止・サスペンド等で切断シーケンスに応答しない場合の安全タイムアウト (300ms)
 static void disconnect_timeout_handler(btstack_timer_source_t *ts) {
     if (con_handle != HCI_CON_HANDLE_INVALID) {
@@ -552,15 +603,9 @@ static void disconnect_timeout_handler(btstack_timer_source_t *ts) {
                 printf("[BT] Slot %d Radio turned OFF (Standby Silent).\r\n", current_slot + 1);
             } else {
                 int slot = pending_slot;
-                is_pairing_mode = pending_is_pairing;
-                btstack_run_loop_remove_timer(&pairing_timeout_timer);
-                if (is_pairing_mode) {
-                    btstack_run_loop_set_timer_handler(&pairing_timeout_timer, pairing_mode_timeout_handler);
-                    btstack_run_loop_set_timer(&pairing_timeout_timer, 60000);
-                    btstack_run_loop_add_timer(&pairing_timeout_timer);
-                }
-                printf("[BT] Applying new slot identity after force disconnect: Slot %d (pairing=%d)\r\n", slot + 1, is_pairing_mode);
-                apply_slot_identity(slot);
+                bool is_pairing = pending_is_pairing;
+                printf("[BT] Force disconnect complete: Slot %d (pairing=%d)\r\n", slot + 1, is_pairing);
+                schedule_slot_transition(slot, is_pairing);
             }
         }
     }
@@ -577,7 +622,7 @@ static void bl17_cooldown_timer_handler(btstack_timer_source_t *ts) {
 // スロットごとの名前とアドレスを適用してアドバタイズを即時・確実に再設定する共通関数
 static void apply_slot_identity(int slot) {
     current_slot = slot;
-    save_current_slot((uint8_t)slot); // Flash に保存
+    schedule_save_current_slot((uint8_t)slot); // 2秒後にFlashへ遅延保存（連続切替時のFlash競合・摩耗防止）
 
     printf("[BT] -> apply_slot_identity(Slot %d, pairing=%d) start\r\n", slot + 1, is_pairing_mode);
 
@@ -669,6 +714,11 @@ void ble_switch_slot(int slot) {
             update_ui_for_state(current_state);
             return;
         } else if (current_state == BLE_STATE_RECONNECTING || current_state == BLE_STATE_PAIRING) {
+            // 【BL-32】ペアリングモード開始直後（1.5秒以内）は同一スロットのRadio OFFトグルを無視（Alt抜け誤爆防止）
+            if (current_state == BLE_STATE_PAIRING && (time_us_64() - pairing_start_us < 1500000)) {
+                printf("[BT] Ignored same-slot toggle OFF during pairing grace period (1.5s)\r\n");
+                return;
+            }
             printf("[BT] Slot %d active advertising -> Turning Radio OFF\r\n", slot + 1);
             is_pairing_mode = false;
             gap_advertisements_enable(0);
@@ -711,6 +761,8 @@ void ble_hid_switch_host(uint8_t slot) {
 
 void ble_enter_pairing_mode(int slot) {
     if (slot < 0 || slot >= MAX_SLOTS) return;
+    pairing_start_us = time_us_64();
+    btstack_run_loop_remove_timer(&slot_transition_timer);
     btstack_run_loop_remove_timer(&bl17_cooldown_timer);
     bl17_reject_in_progress = false;
     printf("[BT] Request Pairing Mode for Slot %d\r\n", slot + 1);
@@ -1078,15 +1130,8 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     printf("[BT] Slot %d Radio turned OFF (Standby Silent).\r\n", current_slot + 1);
                 } else {
                     int slot = pending_slot;
-                    is_pairing_mode = pending_is_pairing;
-                    btstack_run_loop_remove_timer(&pairing_timeout_timer);
-                    if (is_pairing_mode) {
-                        btstack_run_loop_set_timer_handler(&pairing_timeout_timer, pairing_mode_timeout_handler);
-                        btstack_run_loop_set_timer(&pairing_timeout_timer, 60000);
-                        btstack_run_loop_add_timer(&pairing_timeout_timer);
-                    }
-                    printf("[BT] Applying new slot identity after disconnect: Slot %d (pairing=%d)\r\n", slot + 1, is_pairing_mode);
-                    apply_slot_identity(slot);
+                    bool is_pairing = pending_is_pairing;
+                    schedule_slot_transition(slot, is_pairing);
                 }
             } else {
                 bool is_bonded = is_slot_bonded(current_slot);
@@ -1116,7 +1161,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     btstack_run_loop_set_timer(&bl17_cooldown_timer, 2500);
                     btstack_run_loop_add_timer(&bl17_cooldown_timer);
                 } else if (current_state != BLE_STATE_STANDBY_SILENT) {
-                    apply_slot_identity(current_slot);
+                    schedule_slot_transition(current_slot, is_pairing_mode);
                 } else {
                     gap_advertisements_enable(0);
                 }

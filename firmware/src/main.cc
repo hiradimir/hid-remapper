@@ -139,32 +139,29 @@ static bool check_pairing_hotkey(uint8_t interface, const uint8_t* report_with_i
     else if ((report_data[8] & 0x01) != 0) slot = 2; // F3 -> Slot 3
     else if ((report_data[8] & 0x02) != 0) slot = 3; // F4 -> Slot 4
 
-    // デバッグ出力: Ctrl+Win と F1..F4 が押されたら UART に出力
-    if (ctrl_pressed && gui_pressed && slot >= 0) {
-        printf("[KBD-DEBUG] mod=0x%02X(count=%d) slot=%d\r\n", modifier, 2 + (alt_pressed ? 1 : 0), slot + 1);
-    } else if (ctrl_pressed && gui_pressed && alt_pressed && backspace_pressed) {
-        printf("[KBD-DEBUG] mod=0x%02X(count=3) Clear Bonds Hotkey\r\n", modifier);
-    }
+    static int last_pressed_slot = -1;
+    static bool last_alt_pressed = false;
+    static bool clear_bonds_was_pressed = false;
 
-    static bool hotkey_was_pressed = false;
-    bool hotkey_now = (ctrl_pressed && gui_pressed && (slot >= 0));
-
+    // 全ボンド消去ホットキー: Ctrl + Win + Alt + Backspace / Delete
     if (ctrl_pressed && gui_pressed && alt_pressed && backspace_pressed) {
-        if (!hotkey_was_pressed) {
-            hotkey_was_pressed = true;
+        if (!clear_bonds_was_pressed) {
+            clear_bonds_was_pressed = true;
             send_all_release_reports();
             printf("[BT] *** HOTKEY: Clear All BLE Bonds ***\r\n");
             ble_clear_bonds();
         }
         return true;
     }
+    clear_bonds_was_pressed = false;
 
-    if (hotkey_now) {
-        if (!hotkey_was_pressed) {
-            hotkey_was_pressed = true;
-            // ホットキー成立直前に先行してホストに届いてしまった Ctrl/Cmd を打ち消すため全離下を送信
+    int current_slot_request = (ctrl_pressed && gui_pressed && slot >= 0) ? slot : -1;
+
+    if (current_slot_request >= 0) {
+        if (current_slot_request != last_pressed_slot || alt_pressed != last_alt_pressed) {
+            last_pressed_slot = current_slot_request;
+            last_alt_pressed = alt_pressed;
             send_all_release_reports();
-
             if (alt_pressed) {
                 printf("[BT] *** HOTKEY: Enter Pairing Mode for slot %d ***\r\n", slot + 1);
                 ble_enter_pairing_mode(slot);
@@ -173,10 +170,12 @@ static bool check_pairing_hotkey(uint8_t interface, const uint8_t* report_with_i
                 ble_switch_slot(slot);
             }
         }
-        return true; // ホットキーは消費して OS には送信しない
+        return true; // ホットキー成立中は常に消費
     }
 
-    hotkey_was_pressed = false;
+    // Fキーまたは修飾キーが離されたらリセット
+    last_pressed_slot = -1;
+    last_alt_pressed = false;
     return false;
 }
 #endif
@@ -298,7 +297,6 @@ static bool do_send_report_usb(uint8_t interface, const uint8_t* report_with_id,
     uint8_t report_id = report_with_id[0];
     const uint8_t* report_data = report_with_id + 1;
     uint8_t report_len = len - 1;
-
 #if ENABLE_BLE && ENABLE_OLED
     oled_set_mode(false); // USB mode
     oled_notify_tx();
@@ -323,10 +321,6 @@ static bool do_send_report_offline(uint8_t interface, const uint8_t* report_with
     ble_hid_kick_reconnect();
     return true;
 }
-
-// =========================================================================
-// BLE 出力専用関数（BLE 接続時：BLE HID スタックへ送出）
-// =========================================================================
 static bool do_send_report_ble(uint8_t interface, const uint8_t* report_with_id, uint8_t len) {
     if (check_pairing_hotkey(interface, report_with_id, len)) {
         return true;
@@ -661,28 +655,7 @@ int main() {
             last_mouse_buttons = 0;
         }
 
-        // =========================================================================
-        // ホットキー即時判定ルーチン（BLE 伝送パス・フロー制御から完全独立）
-        // =========================================================================
-        // BLE がバッファ満杯やスタール等で送信待ち（ble_can_send == false）になっていても、
-        // キュー内にキーボードレポート（Report ID 2）があれば即座にホットキーを検出して消費する。
-        if (or_items > 0) {
-            for (uint8_t i = 0; i < or_items; i++) {
-                uint8_t idx = (or_head + i) % OR_BUFSIZE;
-                if (outgoing_reports[idx][0] == 2) { // Keyboard report
-                    if (check_pairing_hotkey(0, outgoing_reports[idx], MAX_REPORT_SIZE + 1)) {
-                        // ホットキーが成立して消費された場合、キューから該当レポートを除去
-                        for (uint8_t j = i; j + 1 < or_items; j++) {
-                            uint8_t curr = (or_head + j) % OR_BUFSIZE;
-                            uint8_t next = (or_head + j + 1) % OR_BUFSIZE;
-                            memcpy(outgoing_reports[curr], outgoing_reports[next], sizeof(outgoing_reports[0]));
-                        }
-                        or_items--;
-                        break;
-                    }
-                }
-            }
-        }
+        // 送信直前の do_send_report_* にてホットキー判定・消費を実施
 
         if (curr_ble_connected) {
             // =========================================================
