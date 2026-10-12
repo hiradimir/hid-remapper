@@ -31,6 +31,9 @@ void oled_set_status(const char* status_msg);
 void oled_set_peer_addr(const char* peer_addr_str);
 void oled_notify_tx(void);
 
+// W-01/W-17: USBポートのデバイス種別を定期判定し表示更新
+void oled_update_usb_ports(void);
+
 #else
 
 // ENABLE_OLED=OFF 時のインラインスタブ（呼び出し側のオーバーヘッドを完全にゼロ化）
@@ -45,6 +48,7 @@ static inline void oled_set_usb_port(uint8_t port, const char* dev_str) { (void)
 static inline void oled_set_status(const char* status_msg) { (void)status_msg; }
 static inline void oled_set_peer_addr(const char* peer_addr_str) { (void)peer_addr_str; }
 static inline void oled_notify_tx(void) {}
+static inline void oled_update_usb_ports(void) {}
 
 #endif
 

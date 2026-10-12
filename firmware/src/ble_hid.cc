@@ -236,6 +236,7 @@ static void save_slot_bonded_mask(uint8_t mask);
 static void save_slot_peers(void);
 
 static void update_connecting_status(void) {
+#if ENABLE_OLED
     if (current_state == BLE_STATE_CONNECTING) {
         char stat_buf[20];
         snprintf(stat_buf, sizeof(stat_buf), "C:E%d K%d M%d",
@@ -244,6 +245,7 @@ static void update_connecting_status(void) {
                  ble_mouse_ready ? 1 : 0);
         oled_set_status(stat_buf);
     }
+#endif
 }
 
 // 状態に応じた OLED / LED の一元更新
@@ -1412,6 +1414,189 @@ void ble_clear_bonds(void) {
 
 void ble_led(bool value) {
   cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, value);
+}
+
+
+
+// =========================================================================
+// 送信・トランスポートディスパッチおよびスロット切替ホットキー処理
+// =========================================================================
+#ifndef OR_BUFSIZE
+#define OR_BUFSIZE 8
+#endif
+#ifndef MAX_REPORT_SIZE
+#define MAX_REPORT_SIZE 64
+#endif
+extern uint8_t outgoing_reports[OR_BUFSIZE][MAX_REPORT_SIZE + 1];
+extern uint8_t or_head;
+extern uint8_t or_items;
+
+static uint64_t last_mouse_pace_us = 0;
+static uint8_t last_mouse_buttons = 0;
+
+extern bool send_report(ble_send_report_fn_t do_send_report);
+
+static void send_all_release_reports(void) {
+    // USB 側にキーボード全離下を送信
+    usb_clear_kbd_report();
+
+    // BLE 側にもキーボード全離下を送信
+    if (ble_hid_is_connected()) {
+        uint8_t zero_kbd[16] = {0};
+        ble_hid_send_report(2, zero_kbd, sizeof(zero_kbd));
+    }
+}
+
+// キーボードのホットキー（Win/Cmd + Ctrl + F1..F4）をチェックする関数
+// ホットキーが押された場合は true を返し、OS へレポートを送信しない（消費する）
+bool ble_hid_check_hotkey(uint8_t interface, const uint8_t* report_with_id, uint8_t len) {
+    (void)interface;
+    if (len < 9) return false;
+
+    uint8_t report_id = report_with_id[0];
+    const uint8_t* report_data = report_with_id + 1;
+
+    // キーボードレポート（ID 2）のみ対象
+    if (report_id != 2) return false;
+
+    uint8_t modifier = report_data[0];
+
+    // Left/Right の Ctrl (0x01 / 0x10) と Win/GUI (0x08 / 0x80) の両方が含まれているか
+    bool ctrl_pressed = (modifier & 0x11) != 0; // Left/Right Ctrl
+    bool gui_pressed  = (modifier & 0x88) != 0; // Left/Right GUI (Win/Cmd)
+    bool alt_pressed  = (modifier & 0x44) != 0; // Left/Right Alt
+
+    // F1 〜 F4 のスロット判定（通常数字キーやテンキーの誤判定を完全に排除）
+    int slot = -1;
+    // Backspace (Usage 0x2A: report_data[5] bit 6 / 0x40) または Forward Delete (Usage 0x4C: report_data[10] bit 0 / 0x01) でボンド全消去
+    bool backspace_pressed = ((report_data[5] & 0x40) != 0) || ((report_data[10] & 0x01) != 0);
+    if      ((report_data[7] & 0x40) != 0) slot = 0; // F1 -> Slot 1
+    else if ((report_data[7] & 0x80) != 0) slot = 1; // F2 -> Slot 2
+    else if ((report_data[8] & 0x01) != 0) slot = 2; // F3 -> Slot 3
+    else if ((report_data[8] & 0x02) != 0) slot = 3; // F4 -> Slot 4
+
+    static int last_pressed_slot = -1;
+    static bool last_alt_pressed = false;
+    static bool clear_bonds_was_pressed = false;
+
+    // 全ボンド消去ホットキー: Ctrl + Win + Alt + Backspace / Delete
+    if (ctrl_pressed && gui_pressed && alt_pressed && backspace_pressed) {
+        if (!clear_bonds_was_pressed) {
+            clear_bonds_was_pressed = true;
+            send_all_release_reports();
+            printf("[BT] *** HOTKEY: Clear All BLE Bonds ***\r\n");
+            ble_clear_bonds();
+        }
+        return true;
+    }
+    clear_bonds_was_pressed = false;
+
+    int current_slot_request = (ctrl_pressed && gui_pressed && slot >= 0) ? slot : -1;
+
+    if (current_slot_request >= 0) {
+        if (current_slot_request != last_pressed_slot || alt_pressed != last_alt_pressed) {
+            last_pressed_slot = current_slot_request;
+            last_alt_pressed = alt_pressed;
+            send_all_release_reports();
+            if (alt_pressed) {
+                printf("[BT] *** HOTKEY: Enter Pairing Mode for slot %d ***\r\n", slot + 1);
+                ble_enter_pairing_mode(slot);
+            } else {
+                printf("[BT] *** HOTKEY: Switch to slot %d ***\r\n", slot + 1);
+                ble_switch_slot(slot);
+            }
+        }
+        return true; // ホットキー成立中は常に消費
+    }
+
+    // Fキーまたは修飾キーが離されたらリセット
+    last_pressed_slot = -1;
+    last_alt_pressed = false;
+    return false;
+}
+
+// 未接続（給電のみ）専用関数：スロット切替ホットキーの判定とキュー消化
+static bool do_send_report_offline(uint8_t interface, const uint8_t* report_with_id, uint8_t len) {
+    ble_hid_check_hotkey(interface, report_with_id, len);
+    ble_hid_kick_reconnect();
+    return true;
+}
+
+static bool do_send_report_ble(uint8_t interface, const uint8_t* report_with_id, uint8_t len) {
+    if (ble_hid_check_hotkey(interface, report_with_id, len)) {
+        return true;
+    }
+    uint8_t report_id = report_with_id[0];
+    const uint8_t* report_data = report_with_id + 1;
+    uint8_t report_len = len - 1;
+
+#if ENABLE_OLED
+    oled_set_mode(true); // BLE mode
+    oled_notify_tx();
+#endif
+
+    if (report_id == 1 && report_len >= 5) {
+        last_mouse_pace_us = time_us_64();
+        last_mouse_buttons = report_data[0];
+    }
+
+    ble_hid_send_report(report_id, report_data, report_len);
+    return true;
+}
+
+void ble_transport_task(ble_send_report_fn_t do_send_usb) {
+    static bool prev_ble_connected = false;
+    bool curr_ble_connected = ble_hid_is_connected();
+    if (curr_ble_connected != prev_ble_connected) {
+        prev_ble_connected = curr_ble_connected;
+        printf("[BT] Active transport changed: %s\r\n", curr_ble_connected ? "BLE" : "USB");
+        if (curr_ble_connected) {
+            printf("[BT] Switched to BLE priority, clearing USB reports\r\n");
+            usb_clear_kbd_report();
+        }
+        last_mouse_pace_us = 0;
+        last_mouse_buttons = 0;
+    }
+
+    if (curr_ble_connected) {
+        // =========================================================
+        // BLE 伝送パス（無線インターバル完全同期）
+        // =========================================================
+        bool ready_to_send = ble_hid_can_send();
+        if (ready_to_send && or_items == 1) {
+            uint8_t next_id = outgoing_reports[or_head][0];
+            if (next_id == 1) { // Mouse report
+                uint8_t cur_buttons = outgoing_reports[or_head][1];
+                uint64_t now_us = time_us_64();
+                if (cur_buttons == last_mouse_buttons) {
+                    uint16_t conn_interval = ble_hid_get_conn_interval();
+                    uint32_t interval_us = (conn_interval > 0) ? (conn_interval * 1250) : 15000;
+                    // 1接続インターバルあたり厳密に最大1パケットへ整合（66.6pkts/s上限）
+                    // 14.5ms以上の間隔を保証し、1つの15msアンカー内に2パケット押し込まれるバースト衝突を完全に防止
+                    uint32_t pace_us = (interval_us > 500) ? (interval_us - 500) : 14500;
+                    if (now_us - last_mouse_pace_us < pace_us) {
+                        ready_to_send = false;
+                    }
+                }
+            }
+        }
+        if (ready_to_send) {
+            send_report(do_send_report_ble);
+        }
+    } else if (usb_is_mounted()) {
+        // =========================================================
+        // USB 伝送パス（有線 Remapper と 100% 同一の純粋な TinyUSB 処理）
+        // =========================================================
+        if (usb_is_ready()) {
+            send_report(do_send_usb);
+        }
+    } else {
+        // =========================================================
+        // 未接続パス（給電のみ）：キュー溢れ防止とホットキー検出
+        // =========================================================
+        send_report(do_send_report_offline);
+    }
+    ble_hid_task();
 }
 
 #endif // ENABLE_BLE

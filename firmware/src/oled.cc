@@ -4,6 +4,10 @@
 #include <string.h>
 #include "pico/stdlib.h"
 #include "hardware/i2c.h"
+#include "hardware/gpio.h"
+#include <unordered_map>
+#include "tusb.h"
+#include "globals.h"
 
 #define I2C_PORT i2c0
 #define I2C_SDA_PIN 4
@@ -136,7 +140,6 @@ static bool need_redraw = true;
 // UI 状態
 static volatile uint8_t cur_slot = 0;
 static volatile oled_bt_state_t cur_bt_state = OLED_BT_DISCONNECTED;
-static char line1_text[32] = "";
 static volatile bool ui_ble_mode = true;
 static volatile oled_bt_state_t ui_bt_state = OLED_BT_DISCONNECTED;
 static volatile uint8_t ui_current_slot = 0;
@@ -372,7 +375,7 @@ void oled_task(void) {
     snprintf(line2, sizeof(line2), "USB: P1:%-3.3s  P2:%-3.3s  ", ui_p1_dev, ui_p2_dev);
 
     // Line 3 (W-02/W-14): ステータスメッセージ または BTアイコン左寄せ+MACアドレス右寄せ (21 chars)
-    char line3[24];
+    char line3[32];
     if (ui_bt_state == OLED_BT_CONNECTED && ui_peer_addr[0] != '\0') {
         int pad = 20 - (int)strlen(ui_peer_addr);
         if (pad < 0) pad = 0;
@@ -394,4 +397,120 @@ void oled_task(void) {
     ssd1306_cmd(0x21); ssd1306_cmd(0); ssd1306_cmd(SSD1306_WIDTH - 1);
     ssd1306_cmd(0x22); ssd1306_cmd(0); ssd1306_cmd((SSD1306_HEIGHT / 8) - 1);
     ssd1306_data(ssd1306_buffer, sizeof(ssd1306_buffer));
+}
+
+
+// =========================================================================
+// W-01/W-17: USB Host P1/P2 のデバイス種別（KBD/MS/DEV/---）を正確かつ安全に検出
+// =========================================================================
+
+// デバイスアドレスから HID 種別（KBD / MS / DEV）を判定
+static const char* classify_device_type(uint8_t dev_addr) {
+    bool is_kbd = false;
+    bool is_mouse = false;
+
+    // 1. their_usages (パース済みHIDディスクリプタ) から判定 (Report Protocol対応)
+    for (uint8_t inst = 0; inst < 4; inst++) {
+        uint16_t itf = ((uint16_t)dev_addr << 8) | inst;
+        auto it = their_usages.find(itf);
+        if (it != their_usages.end()) {
+            for (auto const& [rep_id, usage_map] : it->second) {
+                for (auto const& [usage, udef] : usage_map) {
+                    uint32_t page = usage & 0xFFFF0000;
+                    if (page == 0x00070000) {
+                        is_kbd = true;
+                    } else if (usage == 0x00010030 || usage == 0x00010031 || page == 0x00090000) {
+                        is_mouse = true;
+                    }
+                }
+            }
+        }
+    }
+    if (is_kbd) return "KBD";
+    if (is_mouse) return "MS ";
+
+    // 2. TinyUSB インターフェースプロトコル (Boot Protocol) から判定
+    for (uint8_t inst = 0; inst < 2; inst++) {
+        uint8_t proto = tuh_hid_interface_protocol(dev_addr, inst);
+        if (proto == HID_ITF_PROTOCOL_KEYBOARD) return "KBD";
+        if (proto == HID_ITF_PROTOCOL_MOUSE) return "MS ";
+
+        tuh_itf_info_t itf_info;
+        if (tuh_hid_itf_get_info(dev_addr, inst, &itf_info)) {
+            if (itf_info.desc.bInterfaceProtocol == HID_ITF_PROTOCOL_KEYBOARD) return "KBD";
+            if (itf_info.desc.bInterfaceProtocol == HID_ITF_PROTOCOL_MOUSE) return "MS ";
+        }
+    }
+
+    return "DEV";
+}
+
+static void update_usb_ports_status(void) {
+    const char* p1_dev = "---";
+    const char* p2_dev = "---";
+
+    // 物理ポートの結線レベル検知 (GP0/1: Host 1, GP2/3: Host 2)
+    bool port1_phys = (gpio_get(0) != 0) || (gpio_get(1) != 0);
+    bool port2_phys = (gpio_get(2) != 0) || (gpio_get(3) != 0);
+
+    uint8_t mounted_addrs[4];
+    int mounted_count = 0;
+    for (uint8_t dev_addr = 1; dev_addr <= 4; dev_addr++) {
+        if (tuh_mounted(dev_addr)) {
+            mounted_addrs[mounted_count++] = dev_addr;
+        }
+    }
+
+    if (mounted_count == 0) {
+        p1_dev = "---";
+        p2_dev = "---";
+    } else if (mounted_count == 1) {
+        const char* dtype = classify_device_type(mounted_addrs[0]);
+        if (port1_phys && !port2_phys) {
+            p1_dev = dtype;
+            p2_dev = "---";
+        } else if (!port1_phys && port2_phys) {
+            p1_dev = "---";
+            p2_dev = dtype;
+        } else {
+            // アドレスまたはハブポートによる割当
+            uint8_t hub_addr = 0, hub_port = 0;
+            tuh_get_hub_addr_port(mounted_addrs[0], &hub_addr, &hub_port);
+            if (hub_port == 1 || mounted_addrs[0] == 2) {
+                p2_dev = dtype;
+            } else {
+                p1_dev = dtype;
+            }
+        }
+    } else {
+        // 2台以上接続時
+        p1_dev = classify_device_type(mounted_addrs[0]);
+        p2_dev = classify_device_type(mounted_addrs[1]);
+        if (!port1_phys && port2_phys) {
+            const char* tmp = p1_dev;
+            p1_dev = "---";
+            p2_dev = tmp;
+        }
+    }
+
+    static char prev_p1[4] = "";
+    static char prev_p2[4] = "";
+    if (strncmp(prev_p1, p1_dev, 3) != 0 || strncmp(prev_p2, p2_dev, 3) != 0) {
+        strncpy(prev_p1, p1_dev, sizeof(prev_p1));
+        strncpy(prev_p2, p2_dev, sizeof(prev_p2));
+        printf("[USB] Ports updated -> P1:%s, P2:%s (count=%d, p1_pin=%d, p2_pin=%d)\r\n",
+               p1_dev, p2_dev, mounted_count, port1_phys, port2_phys);
+    }
+
+    oled_set_usb_port(0, p1_dev);
+    oled_set_usb_port(1, p2_dev);
+}
+
+void oled_update_usb_ports(void) {
+    static uint32_t last_usb_check_ms = 0;
+    uint32_t now_ms = (uint32_t)(time_us_64() / 1000);
+    if (now_ms - last_usb_check_ms >= 5000) {
+        last_usb_check_ms = now_ms;
+        update_usb_ports_status();
+    }
 }
