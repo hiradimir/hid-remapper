@@ -34,6 +34,10 @@
 #define TLV_TAG_SLOT_PEERS 0x53504532
 // スロットごとのMACアドレスソルト（世代番号）を保存する独自タグ ID ('S' 'A' 'L' 'T')
 #define TLV_TAG_SLOT_SALTS 0x53414C54
+// スロットごとのOS設定/自動判定結果を保存する独自タグ ID ('S' 'O' 'S' '1')
+#define TLV_TAG_SLOT_OS 0x534f5331
+// BT-OFF（完全沈黙/STANDBY_SILENT）状態を保存する独自タグ ID ('R' 'O' 'F' 'F')
+#define TLV_TAG_RADIO_OFF 0x524f4646
 
 #define MAX_SLOTS NVM_NUM_DEVICE_DB_ENTRIES
 
@@ -46,6 +50,11 @@ typedef struct {
 static uint8_t slot_bonded_mask = 0;
 static slot_peer_t slot_peers[MAX_SLOTS];
 static uint8_t slot_salts[MAX_SLOTS];
+static char slot_os[MAX_SLOTS] = {'-', '-', '-', '-'};
+static bool radio_off_saved = false;
+static uint16_t ble_conn_latency = 0;
+static uint16_t ble_conn_timeout = 0;
+static bool peer_has_android_timeout = false;
 
 
 static const uint8_t hid_report_descriptor[] = {
@@ -231,6 +240,10 @@ static volatile bool switch_pending = false;
 
 
 static void apply_slot_identity(int slot);
+static void update_detected_os(char os);
+static void save_slot_timer_handler(btstack_timer_source_t *ts);
+static void schedule_save_slot_os(void);
+static void schedule_save_radio_off(bool is_off);
 static void update_ui_for_state(ble_state_t state);
 static void save_slot_bonded_mask(uint8_t mask);
 static void save_slot_peers(void);
@@ -344,6 +357,18 @@ static void conn_stabilize_timer_handler(btstack_timer_source_t *ts) {
         current_state = BLE_STATE_CONNECTED;
         update_ui_for_state(current_state);
 
+        // 【BL-04】接続安定化時のフォールバックOS判定
+        uint16_t mtu = att_server_get_mtu(con_handle);
+        if (mtu >= 200) {
+            if (peer_has_android_timeout || ble_conn_timeout >= 450) {
+                update_detected_os('A');
+            } else {
+                update_detected_os('W');
+            }
+        } else if (ble_conn_latency > 0) {
+            update_detected_os('M');
+        }
+
         // 【極めて重要】接続安定化・暗号化完了直後に低遅延パラメータ（7.5ms〜11.25ms）を要求
         // これがないとホスト（macOS/Win/Android）は 30ms〜50ms の省電力低速インターバルで動作し、
         // 1秒間に20〜30パケットしか通らなくなるため、マウスが激しく飛び飛び（カクつき・遅延累積）になる。
@@ -401,6 +426,66 @@ static void load_slot_peers(void) {
     }
 }
 
+static void load_slot_os(void) {
+    if (!tlv_impl) return;
+    char saved_os[MAX_SLOTS];
+    int len = tlv_impl->get_tag(&tlv_context, TLV_TAG_SLOT_OS, (uint8_t*)saved_os, sizeof(saved_os));
+    if (len == sizeof(saved_os)) {
+        for (int i = 0; i < MAX_SLOTS; i++) {
+            char c = saved_os[i];
+            if (c == 'M' || c == 'W' || c == 'A' || c == 'I' || c == '-') {
+                slot_os[i] = c;
+            } else {
+                slot_os[i] = '-';
+            }
+            oled_set_slot_os(i, slot_os[i]);
+        }
+        printf("[BT] Restored slot_os: [%c, %c, %c, %c] from TLV\r\n",
+               slot_os[0], slot_os[1], slot_os[2], slot_os[3]);
+    } else {
+        printf("[BT] No saved slot_os found (len=%d), initializing defaults\r\n", len);
+        for (int i = 0; i < MAX_SLOTS; i++) {
+            slot_os[i] = '-';
+            oled_set_slot_os(i, '-');
+        }
+    }
+}
+
+static void load_radio_off(void) {
+    if (!tlv_impl) return;
+    uint8_t saved_val = 0;
+    int len = tlv_impl->get_tag(&tlv_context, TLV_TAG_RADIO_OFF, &saved_val, sizeof(saved_val));
+    if (len == sizeof(saved_val)) {
+        radio_off_saved = (saved_val != 0);
+        printf("[BT] Restored radio_off: %d from TLV\r\n", radio_off_saved);
+    } else {
+        radio_off_saved = false;
+    }
+}
+
+static void update_detected_os(char os) {
+    if (current_slot < 0 || current_slot >= MAX_SLOTS) return;
+    // ユーザーが手動で 'I' (iOS) を指定している場合、Apple系 ('M') 検出で上書きしない
+    if (slot_os[current_slot] == 'I' && os == 'M') {
+        return;
+    }
+    // 一度 Apple ('M' または 'I') と判定された場合、低遅延パラメータ(latency=0)再ネゴシエーション等で 'W' や 'A' に上書きしない
+    if ((slot_os[current_slot] == 'M' || slot_os[current_slot] == 'I') && (os == 'W' || os == 'A')) {
+        return;
+    }
+    // 一度 Android ('A') と判定された場合、本機側の低遅延パラメータ(timeout=400)再ネゴシエーション等で 'W' に上書きしない
+    if (slot_os[current_slot] == 'A' && os == 'W') {
+        return;
+    }
+    if (slot_os[current_slot] != os) {
+        printf("[BT] Slot %d OS detected/updated: '%c' -> '%c'\r\n",
+               current_slot + 1, slot_os[current_slot], os);
+        slot_os[current_slot] = os;
+        oled_set_slot_os(current_slot, os);
+        schedule_save_slot_os(); // 2秒安定後にFlashへ遅延保存（SPI通信中Flash競合防止）
+    }
+}
+
 // Flash (TLV) から最後に使っていたスロット番号とボンド情報を復元
 
 static bool is_slot_bonded(int slot) {
@@ -430,6 +515,8 @@ static void load_current_slot(void) {
 
     load_slot_peers();
     load_slot_salts();
+    load_slot_os();
+    load_radio_off();
 
     int num_bonded = le_device_db_count();
     int max_db_entries = le_device_db_max_count();
@@ -503,32 +590,77 @@ static void load_current_slot(void) {
     oled_set_bt_state(OLED_BT_DISCONNECTED);
     for (int i = 0; i < 4; i++) {
         oled_set_slot_bonded(i, (slot_bonded_mask & (1 << i)) != 0);
+        oled_set_slot_os(i, slot_os[i]);
     }
 }
 static btstack_timer_source_t save_slot_timer;
 static uint8_t pending_save_slot = 0xFF;
+static bool pending_save_os = false;
+static bool pending_save_radio_off = false;
 
-static void save_slot_timer_handler(btstack_timer_source_t *ts) {
-    if (!tlv_impl || pending_save_slot >= MAX_SLOTS) return;
-    uint8_t slot_to_save = pending_save_slot;
-    pending_save_slot = 0xFF;
-
-    uint8_t current_saved = 0xFF;
-    int len = tlv_impl->get_tag(&tlv_context, TLV_TAG_CURRENT_SLOT, &current_saved, sizeof(current_saved));
-    if (len == sizeof(current_saved) && current_saved == slot_to_save) {
-        return;
-    }
-    int res = tlv_impl->store_tag(&tlv_context, TLV_TAG_CURRENT_SLOT, &slot_to_save, sizeof(slot_to_save));
-    printf("[BT] Saved current_slot: %d to TLV (res=%d)\r\n", slot_to_save + 1, res);
+static void schedule_save_tlv_timer(void) {
+    if (!tlv_impl) return;
+    btstack_run_loop_remove_timer(&save_slot_timer);
+    btstack_run_loop_set_timer_handler(&save_slot_timer, save_slot_timer_handler);
+    btstack_run_loop_set_timer(&save_slot_timer, 2000); // 2秒安定後に安全にFlash保存
+    btstack_run_loop_add_timer(&save_slot_timer);
 }
 
 static void schedule_save_current_slot(uint8_t slot) {
     if (!tlv_impl || slot >= MAX_SLOTS) return;
     pending_save_slot = slot;
-    btstack_run_loop_remove_timer(&save_slot_timer);
-    btstack_run_loop_set_timer_handler(&save_slot_timer, save_slot_timer_handler);
-    btstack_run_loop_set_timer(&save_slot_timer, 2000); // 2秒安定後に安全にFlash保存
-    btstack_run_loop_add_timer(&save_slot_timer);
+    schedule_save_tlv_timer();
+}
+
+static void schedule_save_slot_os(void) {
+    if (!tlv_impl) return;
+    pending_save_os = true;
+    schedule_save_tlv_timer();
+}
+
+static void schedule_save_radio_off(bool is_off) {
+    if (!tlv_impl) return;
+    radio_off_saved = is_off;
+    pending_save_radio_off = true;
+    schedule_save_tlv_timer();
+}
+
+static void save_slot_timer_handler(btstack_timer_source_t *ts) {
+    if (!tlv_impl) return;
+
+    if (pending_save_slot < MAX_SLOTS) {
+        uint8_t slot_to_save = pending_save_slot;
+        pending_save_slot = 0xFF;
+
+        uint8_t current_saved = 0xFF;
+        int len = tlv_impl->get_tag(&tlv_context, TLV_TAG_CURRENT_SLOT, &current_saved, sizeof(current_saved));
+        if (len != sizeof(current_saved) || current_saved != slot_to_save) {
+            int res = tlv_impl->store_tag(&tlv_context, TLV_TAG_CURRENT_SLOT, &slot_to_save, sizeof(slot_to_save));
+            printf("[BT] Saved current_slot: %d to TLV (res=%d)\r\n", slot_to_save + 1, res);
+        }
+    }
+
+    if (pending_save_os) {
+        pending_save_os = false;
+        char saved_os[MAX_SLOTS];
+        int len = tlv_impl->get_tag(&tlv_context, TLV_TAG_SLOT_OS, (uint8_t*)saved_os, sizeof(saved_os));
+        if (len != sizeof(saved_os) || memcmp(saved_os, slot_os, sizeof(slot_os)) != 0) {
+            int res = tlv_impl->store_tag(&tlv_context, TLV_TAG_SLOT_OS, (const uint8_t*)slot_os, sizeof(slot_os));
+            printf("[BT] Saved slot_os: [%c, %c, %c, %c] to TLV (res=%d)\r\n",
+                   slot_os[0], slot_os[1], slot_os[2], slot_os[3], res);
+        }
+    }
+
+    if (pending_save_radio_off) {
+        pending_save_radio_off = false;
+        uint8_t val = radio_off_saved ? 1 : 0;
+        uint8_t current_val = 0xFF;
+        int len = tlv_impl->get_tag(&tlv_context, TLV_TAG_RADIO_OFF, &current_val, sizeof(current_val));
+        if (len != sizeof(current_val) || current_val != val) {
+            int res = tlv_impl->store_tag(&tlv_context, TLV_TAG_RADIO_OFF, &val, sizeof(val));
+            printf("[BT] Saved radio_off: %d to TLV (res=%d)\r\n", val, res);
+        }
+    }
 }
 
 // タイムアウト時のハンドラ（ペアリングモード終了）
@@ -613,6 +745,7 @@ static void disconnect_timeout_handler(btstack_timer_source_t *ts) {
                 gap_advertisements_enable(0);
                 current_state = BLE_STATE_STANDBY_SILENT;
                 update_ui_for_state(current_state);
+                schedule_save_radio_off(true); // BL-01: 2秒安定後にFlash保存
                 printf("[BT] Slot %d Radio turned OFF (Standby Silent).\r\n", current_slot + 1);
             } else {
                 int slot = pending_slot;
@@ -739,11 +872,13 @@ void ble_switch_slot(int slot) {
             btstack_run_loop_remove_timer(&pairing_timeout_timer);
             current_state = BLE_STATE_STANDBY_SILENT;
             update_ui_for_state(current_state);
+            schedule_save_radio_off(true); // BL-01: 2秒安定後にFlash保存
             return;
         } else {
             // 電波OFF（SILENT）状態から同一スロットを押下：ボンド情報があれば再接続（ON）
             if (is_slot_bonded(slot)) {
                 printf("[BT] Slot %d is OFF -> Turning Radio ON to reconnect\r\n", slot + 1);
+                schedule_save_radio_off(false); // BL-01: 2秒安定後にFlash保存
                 pending_slot = slot;
                 pending_is_pairing = false;
                 pending_toggle_off = false;
@@ -760,6 +895,7 @@ void ble_switch_slot(int slot) {
 
     // 別スロットへの切替
     printf("[BT] Request Switch to Slot %d\r\n", slot + 1);
+    schedule_save_radio_off(false); // BL-01: 新スロット切替時はRadio ON
     pending_slot = slot;
     pending_is_pairing = false;
     pending_toggle_off = false;
@@ -774,6 +910,10 @@ void ble_hid_switch_host(uint8_t slot) {
 
 void ble_enter_pairing_mode(int slot) {
     if (slot < 0 || slot >= MAX_SLOTS) return;
+    schedule_save_radio_off(false); // BL-01: ペアリング開始時はRadio ON
+    slot_os[slot] = '-';    // 新規ペアリング時はOS表示をリセット
+    oled_set_slot_os(slot, '-');
+    schedule_save_slot_os();
     pairing_start_us = time_us_64();
     btstack_run_loop_remove_timer(&slot_transition_timer);
     btstack_run_loop_remove_timer(&bl17_cooldown_timer);
@@ -828,7 +968,16 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             printf("[BT] BTSTACK_STATE: %d\r\n", state);
             if (state == HCI_STATE_WORKING) {
                 // チップが完全に起動したこの瞬間に初期スロットを適用する
-                apply_slot_identity(current_slot);
+                if (radio_off_saved) {
+                    printf("[BT] Boot with Radio OFF saved -> STANDBY_SILENT\r\n");
+                    current_state = BLE_STATE_STANDBY_SILENT;
+                    gap_advertisements_enable(0);
+                    update_ui_for_state(current_state);
+                    oled_set_status("Ready");
+                    ble_led(0);
+                } else {
+                    apply_slot_identity(current_slot);
+                }
             }
             break;
         }
@@ -956,8 +1105,20 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                 uint16_t latency = hci_subevent_le_connection_update_complete_get_conn_latency(packet);
                 uint16_t timeout = hci_subevent_le_connection_update_complete_get_supervision_timeout(packet);
                 ble_conn_interval = interval;
+                ble_conn_latency = latency;
+                ble_conn_timeout = timeout;
                 printf("[BT] Connection parameters updated: interval=%.2fms, latency=%d, timeout=%dms\r\n",
                        interval * 1.25f, latency, timeout * 10);
+
+                // 【BL-04】OS自動判別（接続パラメータ・レイテンシ・タイムアウト）
+                if (latency > 0) {
+                    // Apple (macOS / iOS) は省電力のため latency=4 等を要求
+                    update_detected_os('M');
+                } else if (timeout >= 450) {
+                    // Android のデフォルト supervision timeout は 5000ms (500)
+                    peer_has_android_timeout = true;
+                    update_detected_os('A');
+                }
 
                 // ホスト側が省電力（スレーブラテンシ > 0）を適用してきた場合、
                 // マウス操作の追従性を保つために低遅延パラメータ (latency=0) の再適用を要求
@@ -1109,7 +1270,25 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             break;
         }
 
+        case ATT_EVENT_MTU_EXCHANGE_COMPLETE: {
+            uint16_t mtu = att_event_mtu_exchange_complete_get_MTU(packet);
+            printf("[BT] ATT MTU exchanged: %d\r\n", mtu);
+            if (mtu >= 500) {
+                if (peer_has_android_timeout || ble_conn_timeout >= 450) {
+                    update_detected_os('A');
+                } else {
+                    update_detected_os('W');
+                }
+            } else if (mtu >= 200) {
+                update_detected_os('W');
+            }
+            break;
+        }
+
         case HCI_EVENT_DISCONNECTION_COMPLETE: {
+            ble_conn_latency = 0;
+            ble_conn_timeout = 0;
+            peer_has_android_timeout = false;
             if (con_handle == HCI_CON_HANDLE_INVALID) {
                 // 重複イベント（hids_device と hci_event_callback の多重登録）を無視
                 break;
@@ -1142,6 +1321,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     gap_advertisements_enable(0);
                     current_state = BLE_STATE_STANDBY_SILENT;
                     update_ui_for_state(current_state);
+                    schedule_save_radio_off(true); // BL-01: 2秒安定後にFlash保存
                     printf("[BT] Slot %d Radio turned OFF (Standby Silent).\r\n", current_slot + 1);
                 } else {
                     int slot = pending_slot;
@@ -1404,6 +1584,15 @@ void ble_clear_bonds(void) {
     printf("[BT] Cleared all bonds from DB and Resolving List (max_entries=%d)\r\n", max_entries);
     for (int i = 0; i < 4; i++) {
         oled_set_slot_bonded(i, false);
+        slot_os[i] = '-';
+        oled_set_slot_os(i, '-');
+    }
+    btstack_run_loop_remove_timer(&save_slot_timer);
+    pending_save_slot = 0xFF;
+    pending_save_os = false;
+    pending_save_radio_off = false;
+    if (tlv_impl) {
+        tlv_impl->store_tag(&tlv_context, TLV_TAG_SLOT_OS, (const uint8_t*)slot_os, sizeof(slot_os));
     }
     current_state = BLE_STATE_STANDBY_SILENT;
     update_ui_for_state(current_state);
@@ -1490,6 +1679,31 @@ bool ble_hid_check_hotkey(uint8_t interface, const uint8_t* report_with_id, uint
         return true;
     }
     clear_bonds_was_pressed = false;
+
+    // OS手動切替ホットキー: Ctrl + Win + Alt + 'O'
+    // 'O' は Usage 0x12 -> report_data[2] bit 6 (0x40)
+    bool o_pressed = (report_data[2] & 0x40) != 0;
+    static bool o_was_pressed = false;
+    if (ctrl_pressed && gui_pressed && alt_pressed && o_pressed) {
+        if (!o_was_pressed) {
+            o_was_pressed = true;
+            send_all_release_reports();
+            char cur = slot_os[current_slot];
+            char next_os = 'M';
+            if (cur == 'M') next_os = 'W';
+            else if (cur == 'W') next_os = 'A';
+            else if (cur == 'A') next_os = 'I';
+            else if (cur == 'I') next_os = '-';
+            else next_os = 'M';
+
+            slot_os[current_slot] = next_os;
+            oled_set_slot_os(current_slot, next_os);
+            schedule_save_slot_os(); // 2秒安定後にFlashへ遅延保存（連打時のFlash摩耗・競合防止）
+            printf("[BT] *** HOTKEY: Slot %d OS set to %c ***\r\n", current_slot + 1, next_os);
+        }
+        return true;
+    }
+    o_was_pressed = false;
 
     int current_slot_request = (ctrl_pressed && gui_pressed && slot >= 0) ? slot : -1;
 
