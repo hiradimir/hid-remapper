@@ -236,6 +236,9 @@ static volatile int pending_slot = -1;
 static volatile bool pending_is_pairing = false;
 static volatile bool pending_toggle_off = false;
 static volatile bool switch_pending = false;
+// スロット切替・ON/OFF トグルの受付禁止時間（3秒）
+#define SWITCH_LOCK_US (3000000ULL)
+static uint64_t switch_lock_until_us = 0;
 
 
 
@@ -849,6 +852,17 @@ static void apply_slot_identity(int slot) {
 // 同一スロット押下でスロットのON/OFF（電波OFF・切断 / 再接続）をトグルする
 void ble_switch_slot(int slot) {
     if (slot < 0 || slot >= MAX_SLOTS) return;
+
+    // 切替・ON/OFFトグル直後の連続操作を禁止（BT 状態の不整合防止）
+    // 受け付けた時点から SWITCH_LOCK_US の間は、切替系ホットキーを無視する
+    uint64_t now_us = time_us_64();
+    if (switch_lock_until_us != 0 && now_us < switch_lock_until_us) {
+        printf("[BT] Slot switch locked (%llu ms left)\r\n",
+               (unsigned long long)((switch_lock_until_us - now_us) / 1000));
+        return;
+    }
+    switch_lock_until_us = now_us + SWITCH_LOCK_US;
+
     btstack_run_loop_remove_timer(&bl17_cooldown_timer);
     bl17_reject_in_progress = false;
 
@@ -921,7 +935,7 @@ void ble_enter_pairing_mode(int slot) {
     oled_set_slot_os(slot, '-');
     schedule_save_slot_os();
 
-    pairing_start_us = 0;
+    btstack_run_loop_remove_timer(&slot_transition_timer);
     btstack_run_loop_remove_timer(&bl17_cooldown_timer);
     bl17_reject_in_progress = false;
     printf("[BT] Request Pairing Mode for Slot %d\r\n", slot + 1);
