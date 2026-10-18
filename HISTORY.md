@@ -11,6 +11,34 @@
 
 ## 2026-10-18 (後半・シルフィ並行作業)
 
+- **BL-43 根本原因調査を開始** (ルディ指摘: 旧メモは復旧手法のみで cause 掃討欠落。仰る通り):
+  - コード監査 + pico-sdk 2.1.1 / BTstack 1.6.2 (submodule 固定) の CYW43439 共有バス
+    (cybt_shared_bus) 実装を精読。**根本原因仮説 (有力度順)**:
+    1. **cyw43 共有バス オーバーラン設定欠落 (最有力)** — 上流 pico-examples の
+       btstack_config.h は `MAX_NR_CONTROLLER_ACL_BUFFERS 3` +
+       `ENABLE_HCI_CONTROLLER_TO_HOST_FLOW_CONTROL` (`HCI_HOST_ACL_PACKET_LEN 1024 /
+       NUM 3`) を「cyw43 shared bus overrun 回避」のために必須設定としており、本プロジェクトの
+       btstack_config.h はこれが**一つも無い**。HCI_ACL_PAYLOAD_SIZE 1691+4 のまま。
+       接続/切断サイクルと高頻度 NTF が積み重なるとコントローラ飛行バッファ破綻 →
+       HCI イベント evaporate →silent 化。既知の再現事例がまさに同症状
+       (pico-sdk #2181 / btstack #654: 「6〜8 回の切断/再接続でスタックが沈黙・電源投入のみ復旧」…
+       報告者は ACL パケットサイズ縮小で解消とコメント)。本件の「長時間運用で回数を重ねると発症」
+       と整合する
+    2. **ble_lock 適用が send 経路のみ (BL-33 ロックの穴)** — async_context
+       (threadsafe_background で低優先 IRQ 実行) に対し、main loop 側で btstack API を叩く
+       ble_switch_slot / ble_enter_pairing_mode / ble_clear_bonds / ble_hid_check_hotkey /
+       ble_hid_kick_reconnect / ble_hid_task / TLV 保存 (conn_stabilize 由来含む) は
+       **非ロック**。長時間でのレア競合がスタック状態破壊 → 電源再投入のみ復旧のパターン候補
+    3. **cybt_shared_bus の assert ハング** — `cybt_bus_request` は wake 失敗時に
+       `assert(err==0)`、読み出し失敗にも assert (NDEBUG 未定義)。発症時点でボード全体が
+       凍結するはず (OLED も停止)。ルディの観測で除外 or 確定させる
+    4. RF・電源 (PFM, 2.4GHz 干渉) — 旧メモの対処療法系。SDI とは別の外因として最後まで残す
+  - 補足: BL-17/BL-23 の保護 (2500ms クールダウン・30s 再接続タイムアウト) は pairing ストーム用で
+    RECONNECTING 連鎖に対する閉塞カウントは無く、R1 発症時に無限サイクルになる — 保護追加は
+    対処であって原因ではない (R1 直すまで凍結)
+  - **実施計画** (P1 はデバイス不要・build 検証可): テストブランチで (a) 上流準拠の
+    フロー制御設定投入 → (b) ble_lock 穴の全閉包 → (c) 切断 reason カウンタ (OLED 内・UART 不要)
+    の観測面追加。実機復帰後 (d) ハウジングソークテストで切り分け
 - ブランチ体制を整備し、実機検証できない間のビルド検証型タスクを並行処理した:
   - `wip/bl34-oled` (ec78a64): BL-34 パッチ+修正 4 ファイルを WIP コミットで退避。
     実機検証 OK 後に正式化 (stash は空・feature/pico-w-ble に戻す構成)
