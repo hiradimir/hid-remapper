@@ -469,7 +469,8 @@ void oled_task(void) {
         snprintf(line0, sizeof(line0), "%s\x86.USB-OUT          ", tx_icon);
     }
 
-    // Line 1: 各スロット状態 1:%c%c  2:%c%c  3:%c%c  4:%c%c (21 chars)
+    // Line 1: 各スロット状態 1:%c%c 2:%c%c 3:%c%c 4:%c%c
+    // (各 glyph は 6px 幅のため、最大 21 chars まで描画)
     char line1[24];
     char s_os[4];
     char s_sym[4];
@@ -495,7 +496,7 @@ void oled_task(void) {
             }
         }
     }
-    snprintf(line1, sizeof(line1), "1:%c%c  2:%c%c  3:%c%c  4:%c%c ",
+    snprintf(line1, sizeof(line1), "1:%c%c 2:%c%c 3:%c%c 4:%c%c",
              s_os[0], s_sym[0],
              s_os[1], s_sym[1],
              s_os[2], s_sym[2],
