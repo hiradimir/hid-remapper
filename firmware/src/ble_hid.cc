@@ -215,6 +215,7 @@ static btstack_timer_source_t disconnect_timeout_timer;
 static btstack_timer_source_t conn_stabilize_timer;
 static btstack_timer_source_t can_send_timeout_timer;
 static btstack_timer_source_t reconnect_timeout_timer;
+static uint64_t reconnect_start_us = 0;
 static btstack_timer_source_t conn_handshake_timeout_timer;
 static hci_con_handle_t con_handle = HCI_CON_HANDLE_INVALID;
 static btstack_timer_source_t slot_transition_timer;
@@ -247,6 +248,11 @@ static void schedule_save_radio_off(bool is_off);
 static void update_ui_for_state(ble_state_t state);
 static void save_slot_bonded_mask(uint8_t mask);
 static void save_slot_peers(void);
+static void ble_switch_slot_locked(int slot);
+static void ble_enter_pairing_mode_locked(int slot);
+static void ble_clear_bonds_locked(void);
+static void ble_hid_task_locked(void);
+static void ble_hid_kick_reconnect_locked(void);
 
 static void update_connecting_status(void) {
 #if ENABLE_OLED
@@ -517,6 +523,7 @@ static void load_current_slot(void) {
     load_slot_salts();
     load_slot_os();
     load_radio_off();
+    oled_set_radio_off(radio_off_saved);
 
     int num_bonded = le_device_db_count();
     int max_db_entries = le_device_db_max_count();
@@ -786,6 +793,7 @@ static void apply_slot_identity(int slot) {
             btstack_run_loop_set_timer_handler(&reconnect_timeout_timer, reconnect_timeout_handler);
             btstack_run_loop_set_timer(&reconnect_timeout_timer, 30000); // 30秒タイムアウト
             btstack_run_loop_add_timer(&reconnect_timeout_timer);
+            reconnect_start_us = time_us_64();
         }
     }
     update_ui_for_state(current_state);
@@ -845,6 +853,12 @@ static void apply_slot_identity(int slot) {
 // 同一スロット押下でスロットのON/OFF（電波OFF・切断 / 再接続）をトグルする
 void ble_switch_slot(int slot) {
     if (slot < 0 || slot >= MAX_SLOTS) return;
+    ble_lock();
+    ble_switch_slot_locked(slot);
+    ble_unlock();
+}
+
+static void ble_switch_slot_locked(int slot) {
     btstack_run_loop_remove_timer(&bl17_cooldown_timer);
     bl17_reject_in_progress = false;
 
@@ -872,12 +886,16 @@ void ble_switch_slot(int slot) {
             btstack_run_loop_remove_timer(&pairing_timeout_timer);
             current_state = BLE_STATE_STANDBY_SILENT;
             update_ui_for_state(current_state);
+            oled_set_radio_off(true);
+            oled_show_toast("BT Radio: OFF", 3000);
             schedule_save_radio_off(true); // BL-01: 2秒安定後にFlash保存
             return;
         } else {
             // 電波OFF（SILENT）状態から同一スロットを押下：ボンド情報があれば再接続（ON）
             if (is_slot_bonded(slot)) {
                 printf("[BT] Slot %d is OFF -> Turning Radio ON to reconnect\r\n", slot + 1);
+                oled_set_radio_off(false);
+                oled_show_toast("BT Radio: ON", 3000);
                 schedule_save_radio_off(false); // BL-01: 2秒安定後にFlash保存
                 pending_slot = slot;
                 pending_is_pairing = false;
@@ -895,6 +913,10 @@ void ble_switch_slot(int slot) {
 
     // 別スロットへの切替
     printf("[BT] Request Switch to Slot %d\r\n", slot + 1);
+    char sw_toast[32];
+    snprintf(sw_toast, sizeof(sw_toast), "Switched to Slot %d", slot + 1);
+    oled_show_toast(sw_toast, 2500);
+    oled_set_radio_off(false);
     schedule_save_radio_off(false); // BL-01: 新スロット切替時はRadio ON
     pending_slot = slot;
     pending_is_pairing = false;
@@ -910,11 +932,21 @@ void ble_hid_switch_host(uint8_t slot) {
 
 void ble_enter_pairing_mode(int slot) {
     if (slot < 0 || slot >= MAX_SLOTS) return;
+    ble_lock();
+    ble_enter_pairing_mode_locked(slot);
+    ble_unlock();
+}
+
+static void ble_enter_pairing_mode_locked(int slot) {
     schedule_save_radio_off(false); // BL-01: ペアリング開始時はRadio ON
     slot_os[slot] = '-';    // 新規ペアリング時はOS表示をリセット
     oled_set_slot_os(slot, '-');
     schedule_save_slot_os();
     pairing_start_us = time_us_64();
+    oled_set_radio_off(false);
+    char p_toast[32];
+    snprintf(p_toast, sizeof(p_toast), "Pairing Slot %d...", slot + 1);
+    oled_show_toast(p_toast, 3000);
     btstack_run_loop_remove_timer(&slot_transition_timer);
     btstack_run_loop_remove_timer(&bl17_cooldown_timer);
     bl17_reject_in_progress = false;
@@ -1321,6 +1353,8 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     gap_advertisements_enable(0);
                     current_state = BLE_STATE_STANDBY_SILENT;
                     update_ui_for_state(current_state);
+                    oled_set_radio_off(true);
+                    oled_show_toast("BT Radio: OFF", 3000);
                     schedule_save_radio_off(true); // BL-01: 2秒安定後にFlash保存
                     printf("[BT] Slot %d Radio turned OFF (Standby Silent).\r\n", current_slot + 1);
                 } else {
@@ -1436,6 +1470,32 @@ void ble_hid_init(void) {
 
 
 void ble_hid_task(void) {
+    ble_lock();
+    ble_hid_task_locked();
+    ble_unlock();
+}
+
+static void ble_hid_task_locked(void) {
+    static uint64_t last_countdown_check_us = 0;
+    uint64_t now_us = time_us_64();
+    if (now_us - last_countdown_check_us >= 500000) { // 500ms周期でカウントダウン更新
+        last_countdown_check_us = now_us;
+        if (current_state == BLE_STATE_PAIRING && pairing_start_us > 0) {
+            int rem = 60 - (int)((now_us - pairing_start_us) / 1000000);
+            if (rem < 0) rem = 0;
+            oled_set_pairing_remaining_sec(rem);
+        } else if (current_state == BLE_STATE_RECONNECTING) {
+            if (reconnect_start_us == 0) {
+                reconnect_start_us = now_us;
+            }
+            int rem = 30 - (int)((now_us - reconnect_start_us) / 1000000);
+            if (rem < 0) rem = 0;
+            oled_set_reconnect_remaining_sec(rem);
+        } else {
+            reconnect_start_us = 0;
+        }
+    }
+
     if (slot_change_requested) {
         slot_change_requested = false;
         btstack_run_loop_remove_timer(&bl17_cooldown_timer);
@@ -1541,6 +1601,12 @@ void ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len) {
 
 
 void ble_hid_kick_reconnect(void) {
+    ble_lock();
+    ble_hid_kick_reconnect_locked();
+    ble_unlock();
+}
+
+static void ble_hid_kick_reconnect_locked(void) {
     if (current_state == BLE_STATE_RECONNECTING && con_handle == HCI_CON_HANDLE_INVALID) {
         static uint32_t last_kick_ms = 0;
         uint32_t now = to_ms_since_boot(get_absolute_time());
@@ -1561,6 +1627,12 @@ void ble_pair_new_device(void) {
 }
 
 void ble_clear_bonds(void) {
+    ble_lock();
+    ble_clear_bonds_locked();
+    ble_unlock();
+}
+
+static void ble_clear_bonds_locked(void) {
     btstack_run_loop_remove_timer(&bl17_cooldown_timer);
     bl17_reject_in_progress = false;
     if (con_handle != HCI_CON_HANDLE_INVALID) {
@@ -1597,6 +1669,7 @@ void ble_clear_bonds(void) {
     current_state = BLE_STATE_STANDBY_SILENT;
     update_ui_for_state(current_state);
     oled_set_status("Bonds Cleared");
+    oled_show_toast("All Bonds Cleared!", 3000);
     gap_advertisements_enable(0);
     ble_led(0);
 }
@@ -1699,6 +1772,9 @@ bool ble_hid_check_hotkey(uint8_t interface, const uint8_t* report_with_id, uint
             slot_os[current_slot] = next_os;
             oled_set_slot_os(current_slot, next_os);
             schedule_save_slot_os(); // 2秒安定後にFlashへ遅延保存（連打時のFlash摩耗・競合防止）
+            char os_toast[32];
+            snprintf(os_toast, sizeof(os_toast), "Slot %d OS -> %c", current_slot + 1, next_os);
+            oled_show_toast(os_toast, 3000);
             printf("[BT] *** HOTKEY: Slot %d OS set to %c ***\r\n", current_slot + 1, next_os);
         }
         return true;

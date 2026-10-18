@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include "tusb.h"
 #include "globals.h"
+#include "ble_hid.h"
 
 #define I2C_PORT i2c0
 #define I2C_SDA_PIN 4
@@ -136,6 +137,7 @@ const uint8_t font_data[FONT_CHAR_COUNT][FONT_WIDTH] = {
 static uint8_t ssd1306_buffer[SSD1306_WIDTH * SSD1306_HEIGHT / 8];
 static bool oled_present = false;
 static bool need_redraw = true;
+static volatile bool oled_usb_refresh_requested = false;
 
 // UI 状態
 static volatile uint8_t cur_slot = 0;
@@ -151,10 +153,29 @@ static char ui_status_msg[32] = "Remapper [Slot 1]";
 static char ui_peer_addr[24] = "";
 static volatile int ui_tx_timer = 0;
 
+static uint32_t last_activity_ms = 0;
+static uint8_t current_contrast = 0x8F;
+static bool in_screensaver = false;
+static int16_t ss_x = 10;
+static int16_t ss_y = 10;
+static int8_t ss_dx = 1;
+static int8_t ss_dy = 1;
+
+static char ui_toast_msg[32] = "";
+static uint32_t ui_toast_until_ms = 0;
+static volatile bool ui_radio_off = false;
+static volatile int ui_rem_pairing_sec = 0;
+static volatile int ui_rem_reconnect_sec = 0;
+
 static bool ssd1306_cmd(uint8_t cmd) {
     uint8_t buf[2] = {0x00, cmd};
     int res = i2c_write_timeout_us(I2C_PORT, SSD1306_I2C_ADDR, buf, 2, false, I2C_TIMEOUT_US);
     return res == 2;
+}
+
+static void ssd1306_set_contrast(uint8_t contrast) {
+    ssd1306_cmd(0x81);
+    ssd1306_cmd(contrast);
 }
 
 static bool ssd1306_data(const uint8_t* data, size_t len) {
@@ -244,6 +265,7 @@ void oled_init(void) {
     ssd1306_cmd(0xAF);                   // Display ON
 
     printf("[OLED] SSD1306 %dx%d initialized on I2C0 (GP4/GP5)\r\n", SSD1306_WIDTH, SSD1306_HEIGHT);
+    last_activity_ms = (uint32_t)(time_us_64() / 1000);
     need_redraw = true;
 }
 
@@ -259,6 +281,7 @@ void oled_set_slot(uint8_t slot) {
         ui_current_slot = slot;
         need_redraw = true;
     }
+    oled_notify_activity();
 }
 
 void oled_set_bt_state(oled_bt_state_t state) {
@@ -314,9 +337,51 @@ void oled_set_peer_addr(const char* peer_addr_str) {
     }
 }
 
+void oled_notify_activity(void) {
+    last_activity_ms = (uint32_t)(time_us_64() / 1000);
+    if (current_contrast != 0x8F || in_screensaver) {
+        current_contrast = 0x8F;
+        ssd1306_set_contrast(current_contrast);
+        in_screensaver = false;
+        need_redraw = true;
+    }
+}
+
 void oled_notify_tx(void) {
     ui_tx_timer = 3;
     need_redraw = true;
+    oled_notify_activity();
+}
+
+void oled_show_toast(const char* toast_msg, uint32_t duration_ms) {
+    if (!toast_msg) return;
+    strncpy(ui_toast_msg, toast_msg, sizeof(ui_toast_msg) - 1);
+    ui_toast_msg[sizeof(ui_toast_msg) - 1] = '\0';
+    ui_toast_until_ms = (uint32_t)(time_us_64() / 1000) + duration_ms;
+    need_redraw = true;
+    oled_notify_activity();
+}
+
+void oled_set_radio_off(bool is_off) {
+    if (ui_radio_off != is_off) {
+        ui_radio_off = is_off;
+        need_redraw = true;
+    }
+    oled_notify_activity();
+}
+
+void oled_set_pairing_remaining_sec(int sec) {
+    if (ui_rem_pairing_sec != sec) {
+        ui_rem_pairing_sec = sec;
+        need_redraw = true;
+    }
+}
+
+void oled_set_reconnect_remaining_sec(int sec) {
+    if (ui_rem_reconnect_sec != sec) {
+        ui_rem_reconnect_sec = sec;
+        need_redraw = true;
+    }
 }
 
 void oled_task(void) {
@@ -335,51 +400,125 @@ void oled_task(void) {
     need_redraw = false;
     last_refresh_us = now_us;
 
-    // Line 0: Mode icon (BT: 0x7F / USB: 0x86) + Status + TX electric icon (0x85) (21 chars, no brackets)
+    uint32_t now_ms = (uint32_t)(now_us / 1000);
+    uint32_t idle_ms = now_ms - last_activity_ms;
+
+    // 【BL-34 スクリーンセーバー】
+    if (idle_ms >= 120000) {
+        // Stage 2: 2分以降は低輝度アニメーション（Contrast: 0x05）
+        if (current_contrast != 0x05) {
+            current_contrast = 0x05;
+            ssd1306_set_contrast(current_contrast);
+        }
+        in_screensaver = true;
+
+        // 10 FPS (100ms) でバウンシングロゴを描画
+        static uint64_t last_ss_step_us = 0;
+        if (now_us - last_ss_step_us >= 100000) {
+            last_ss_step_us = now_us;
+            memset(ssd1306_buffer, 0, sizeof(ssd1306_buffer));
+            draw_string_6x8((uint8_t)ss_x, (uint8_t)ss_y, "[Remapper-DP]");
+
+            ss_x += ss_dx;
+            ss_y += ss_dy;
+            if (ss_x <= 0) { ss_x = 0; ss_dx = 1; }
+            else if (ss_x >= SSD1306_WIDTH - 78) { ss_x = SSD1306_WIDTH - 78; ss_dx = -1; }
+            if (ss_y <= 0) { ss_y = 0; ss_dy = 1; }
+            else if (ss_y >= SSD1306_HEIGHT - 8) { ss_y = SSD1306_HEIGHT - 8; ss_dy = -1; }
+
+            ssd1306_cmd(0x21); ssd1306_cmd(0); ssd1306_cmd(SSD1306_WIDTH - 1);
+            ssd1306_cmd(0x22); ssd1306_cmd(0); ssd1306_cmd((SSD1306_HEIGHT / 8) - 1);
+            ssd1306_data(ssd1306_buffer, sizeof(ssd1306_buffer));
+        }
+        return;
+    } else if (idle_ms >= 60000) {
+        // Stage 1: 1分経過で段階的減光 (Contrast: 0x30)
+        if (current_contrast != 0x30) {
+            current_contrast = 0x30;
+            ssd1306_set_contrast(current_contrast);
+        }
+        in_screensaver = false;
+    } else {
+        // Stage 0: 通常輝度 (Contrast: 0x8F)
+        if (current_contrast != 0x8F) {
+            current_contrast = 0x8F;
+            ssd1306_set_contrast(current_contrast);
+        }
+        in_screensaver = false;
+    }
+
+    // Line 0: トランスポート & 通信ヘルス (21 chars)
     bool is_bt_mode = (ui_bt_state == OLED_BT_CONNECTED) ? true : ui_ble_mode;
     const char* mode_icon = is_bt_mode ? "\x7F" : "\x86";
-    const char* state_str = "DISC";
-    switch (ui_bt_state) {
-        case OLED_BT_CONNECTED: state_str = "CONN"; break;
-        case OLED_BT_PAIRING:   state_str = "PAIR"; break;
-        case OLED_BT_SWITCHING: state_str = "WAIT"; break;
-        default:                state_str = "DISC"; break;
-    }
+    char hb_char = (is_bt_mode && ui_bt_state == OLED_BT_CONNECTED) ? (((now_ms / 500) % 2) ? '.' : ' ') : ' ';
     const char* tx_icon = " ";
     if (ui_tx_timer > 0) {
         tx_icon = "\x85"; // 0x85: 稲妻/電気アイコン (TX点滅)
         ui_tx_timer--;
     }
     char line0[24];
-    snprintf(line0, sizeof(line0), "%s %-4s              %s", mode_icon, state_str, tx_icon);
+    if (is_bt_mode && ui_bt_state == OLED_BT_CONNECTED) {
+        uint16_t conn_int = ble_hid_get_conn_interval();
+        float int_ms = (conn_int > 0) ? (conn_int * 1.25f) : 11.25f;
+        const char* speed_str = (int_ms <= 15.0f) ? "BLE-FAST" : "BLE-SLOW";
+        snprintf(line0, sizeof(line0), "%s%s%c%-8s %6.2fms",
+                 tx_icon, mode_icon, hb_char, speed_str, int_ms);
+    } else if (is_bt_mode) {
+        snprintf(line0, sizeof(line0), "%s%s%cBLE-IDLE         ", tx_icon, mode_icon, hb_char);
+    } else {
+        snprintf(line0, sizeof(line0), "%s\x86.USB-OUT          ", tx_icon);
+    }
 
-    // Line 1: 各スロット状態 1:M* 2:W  3:A  4:I  (21 chars)
+    // Line 1: 各スロット状態 1:%c%c  2:%c%c  3:%c%c  4:%c%c (21 chars)
     char line1[24];
     char s_os[4];
-    char s_star[4];
+    char s_sym[4];
     for (int i = 0; i < 4; i++) {
-        s_os[i] = ui_slot_os[i];
-        if (!ui_slot_bonded[i] && (i != ui_current_slot)) {
-            s_os[i] = '-';
+        if (!ui_slot_bonded[i]) {
+            if (i == ui_current_slot && ui_bt_state == OLED_BT_PAIRING) {
+                s_os[i] = (ui_slot_os[i] != '-') ? ui_slot_os[i] : '?';
+                s_sym[i] = '+';
+            } else {
+                s_os[i] = '-';
+                s_sym[i] = '-';
+            }
+        } else {
+            s_os[i] = (ui_slot_os[i] != '-') ? ui_slot_os[i] : '?';
+            if (i == ui_current_slot) {
+                if (ui_bt_state == OLED_BT_CONNECTED) s_sym[i] = '*';
+                else if (ui_bt_state == OLED_BT_PAIRING) s_sym[i] = '+';
+                else if (ui_bt_state == OLED_BT_SWITCHING) s_sym[i] = '~';
+                else if (ui_radio_off) s_sym[i] = '-';
+                else s_sym[i] = '~';
+            } else {
+                s_sym[i] = ' ';
+            }
         }
-        s_star[i] = (i == ui_current_slot) ? '*' : ' ';
     }
-    snprintf(line1, sizeof(line1), "1:%c%c 2:%c%c 3:%c%c 4:%c%c ",
-             s_os[0], s_star[0],
-             s_os[1], s_star[1],
-             s_os[2], s_star[2],
-             s_os[3], s_star[3]);
+    snprintf(line1, sizeof(line1), "1:%c%c  2:%c%c  3:%c%c  4:%c%c ",
+             s_os[0], s_sym[0],
+             s_os[1], s_sym[1],
+             s_os[2], s_sym[2],
+             s_os[3], s_sym[3]);
 
-    // Line 2 (W-01): USB ポート情報 USB: P1:KBD  P2:MS   (21 chars)
+    // Line 2: USB 入力デバイス種別 \x86 1:MS    \x86 2:KBD  (21 chars)
     char line2[24];
-    snprintf(line2, sizeof(line2), "USB: P1:%-3.3s  P2:%-3.3s  ", ui_p1_dev, ui_p2_dev);
+    snprintf(line2, sizeof(line2), "\x86 1:%-3.3s    \x86 2:%-3.3s  ", ui_p1_dev, ui_p2_dev);
 
-    // Line 3 (W-02/W-14): ステータスメッセージ または BTアイコン左寄せ+MACアドレス右寄せ (21 chars)
+    // Line 3: リアルタイムイベント通知 または フルMACアドレス (21 chars)
     char line3[32];
-    if (ui_bt_state == OLED_BT_CONNECTED && ui_peer_addr[0] != '\0') {
-        int pad = 20 - (int)strlen(ui_peer_addr);
-        if (pad < 0) pad = 0;
-        snprintf(line3, sizeof(line3), "\x7F%*s%s", pad, "", ui_peer_addr);
+    if (ui_toast_until_ms > now_ms && ui_toast_msg[0] != '\0') {
+        snprintf(line3, sizeof(line3), "%-21.21s", ui_toast_msg);
+    } else if (ui_bt_state == OLED_BT_CONNECTED && ui_peer_addr[0] != '\0') {
+        snprintf(line3, sizeof(line3), "\x7F %-18.18s", ui_peer_addr);
+    } else if (ui_bt_state == OLED_BT_PAIRING) {
+        snprintf(line3, sizeof(line3), "Pairing Mode   (%2ds)", ui_rem_pairing_sec);
+    } else if (ui_bt_state == OLED_BT_SWITCHING || (ui_slot_bonded[ui_current_slot] && !ui_radio_off && ui_bt_state != OLED_BT_CONNECTED)) {
+        snprintf(line3, sizeof(line3), "Connecting...  (%2ds)", ui_rem_reconnect_sec);
+    } else if (ui_radio_off) {
+        snprintf(line3, sizeof(line3), "%-21.21s", "BT-OFF (Silent)");
+    } else if (!ui_slot_bonded[ui_current_slot]) {
+        snprintf(line3, sizeof(line3), "%-21.21s", "Unbonded (Alt+F:Pair)");
     } else {
         snprintf(line3, sizeof(line3), "%-21.21s", ui_status_msg);
     }
@@ -509,8 +648,14 @@ static void update_usb_ports_status(void) {
 void oled_update_usb_ports(void) {
     static uint32_t last_usb_check_ms = 0;
     uint32_t now_ms = (uint32_t)(time_us_64() / 1000);
-    if (now_ms - last_usb_check_ms >= 5000) {
+    bool requested = oled_usb_refresh_requested;
+    oled_usb_refresh_requested = false;
+    if (requested || (now_ms - last_usb_check_ms >= 500)) {
         last_usb_check_ms = now_ms;
         update_usb_ports_status();
     }
+}
+
+void oled_request_usb_ports_refresh(void) {
+    oled_usb_refresh_requested = true;
 }

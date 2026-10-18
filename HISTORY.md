@@ -9,6 +9,48 @@
 
 ---
 
+## 2026-10-18 (BL-31 Pico 2 W 移行計画草案)
+
+- **`BL31-PICO2W-PLAN.md` を新規作成** (ルディ指示: BL-31 方針確認を先倒し)。
+  実装は未着手。要点:
+  - submodule 実物調査の結果、**SDK 2.1.1 / TinyUSB (0.17.0 取り込み) / Pico-PIO-USB dev**
+    がいずれも rp2350 対応 or 修正済み。upstream master (fork 分岐点前) に
+    Waveshare RP2350-PiZero / USB-A / Flatbox rev8 の PIO-USB 動作実績コミットがあり、
+    実装は CMake gate 緩和 + ボード定義が中心になる見込み
+  - `remapper_single_rp2350.ld`, `src/main.cc` の `#if PICO_RP2350` (E10 errata 対応),
+    CMake の `pico2` 分岐など土台も部分的に既存
+  - **要検算**: RP2350 UF2 書込時の E10 末尾セクタ wipe と ble_hid.cc TLV
+    (`FLASH_SIZE - 3*4096`) の干渉。必要なら config と同じ 1 セクタ下げ
+  - 推奨方針: 同一 CMakeLists で pico_w / pico2_w 両対応 (方針 A)。ブランチ名 `bl31_pico2w`
+- **ルディの部分回答を反映**:
+  - **本命ターゲット = Waveshare Type-C 版** (入手難易度と Type-C のため)、
+    次点 = 公式 Pico 2 W の Type-C 化。pico_w 純正対応は本家追従のため継続
+  - ボード両対応のビルド仕分けで合意 (board header 分岐)
+  - 注文メール型番に RP2350B 情報の断片 → **RP2350B (48 GPIO) の可能性**が出ている。
+    公式 pico2_w.h (RP2350A 用) が直接使えず `src/boards/waveshare_*` 系専用 header
+    追加が必要になる可能性。帰宅後に写真・URL・GPIO 本数・CYW43 有無を確認予定
+  - soak test は用語説明済み (長時間連続稼働テストの意)
+
+## 2026-10-18 (BL-43 P1 対策コミット)
+
+- **BL-43 P1 対策を `bl43_bt_root_cause` ブランチにコミット (beeb02f)**:
+  - `firmware/src/btstack_config.h`: 上流 pico-examples 準拠の CYW43 共有バス
+    オーバーラン対策 — `MAX_NR_CONTROLLER_ACL_BUFFERS 3`,
+    `MAX_NR_CONTROLLER_SCO_PACKETS 3`, `ENABLE_HCI_CONTROLLER_TO_HOST_FLOW_CONTROL`
+    (`HCI_HOST_ACL_PACKET_LEN 1024` / `NUM 3` + SCO 必須ペア)。既知事例:
+    6-8 回の接続/切断周期でスタック沈黙 (pico-sdk #2181 / btstack #654) —
+    本現象の「切断ループ→電源再投入のみ復旧」と整合
+  - `firmware/src/ble_hid.cc`: メインループ側の BTstack API 入口
+    5 関数 (ble_switch_slot / ble_enter_pairing_mode / ble_clear_bonds /
+    ble_hid_task / ble_hid_kick_reconnect) を ble_lock/unlock で包装。
+    本体は `*_locked` ヘルパに分離。async context ロックは
+    recursive_mutex 実装でありネスト・コールバック内再取得は安全なことを確認。
+    TLV 遅延保存は save_slot_timer (非同期コンテキスト内) 実行なので追加ロック不要
+  - ビルド検証: ENABLE_BLE=ON/OLED=ON (DP_PIN=2) と BLE-OFF スタブ構成で
+    warning 0 / error 0
+- **STATUS: 実機 soak test 待ち**。ループ再発消失を確認後 feature へマージ。
+  再発する場合は P2 (reconnect チェーンへの 30s 降格 / RF・電源測定) に着手
+
 ## 2026-10-18 (後半・シルフィ並行作業)
 
 - **BL-43 根本原因調査を開始** (ルディ指摘: 旧メモは復旧手法のみで cause 掃討欠落。仰る通り):

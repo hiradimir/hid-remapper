@@ -377,6 +377,7 @@ int main() {
         oled_update_usb_ports();
         if (new_report) {
             activity_led_on();
+            oled_notify_activity();
         }
         if (their_descriptor_updated) {
             update_their_descriptor_derivates();
