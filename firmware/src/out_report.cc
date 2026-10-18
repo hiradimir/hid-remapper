@@ -29,7 +29,7 @@ void do_queue_out_report(const uint8_t* report, uint16_t len, uint8_t report_id,
         printf("out overflow!\n");
         return;
     }
-    if ((len + ((report_id != 0) ? 1 : 0)) > sizeof(outgoing_out_reports[oor_tail].report)) {
+    if ((size_t)len + ((report_id != 0) ? 1u : 0u) > sizeof(outgoing_out_reports[oor_tail].report)) {
         return;
     }
     outgoing_out_reports[oor_tail].dev_addr = dev_addr;
