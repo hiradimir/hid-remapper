@@ -9,6 +9,22 @@
 
 ---
 
+## 2026-10-18 (BL-31 Pico 2 W 移行計画草案)
+
+- **`BL31-PICO2W-PLAN.md` を新規作成** (ルディ指示: BL-31 方針確認を先倒し)。
+  実装は未着手。要点:
+  - submodule 実物調査の結果、**SDK 2.1.1 / TinyUSB (0.17.0 取り込み) / Pico-PIO-USB dev**
+    がいずれも rp2350 対応 or 修正済み。upstream master (fork 分岐点前) に
+    Waveshare RP2350-PiZero / USB-A / Flatbox rev8 の PIO-USB 動作実績コミットがあり、
+    実装は CMake gate 緩和 + ボード定義が中心になる見込み
+  - `remapper_single_rp2350.ld`, `src/main.cc` の `#if PICO_RP2350` (E10 errata 対応),
+    CMake の `pico2` 分岐など土台も部分的に既存
+  - **要検算**: RP2350 UF2 書込時の E10 末尾セクタ wipe と ble_hid.cc TLV
+    (`FLASH_SIZE - 3*4096`) の干渉。必要なら config と同じ 1 セクタ下げ
+  - 推奨方針: 同一 CMakeLists で pico_w / pico2_w 両対応 (方針 A)。ブランチ名 `bl31_pico2w`
+  - ルディ確認事項: ①ボード実物 (公式 Pico 2 W か Waveshare Type-C か)、
+    ②PICO_PLATFORM (arm-s で良いか)、③BL-36/BL-41 との優先順位、④BL-43 soak との絡み
+
 ## 2026-10-18 (BL-43 P1 対策コミット)
 
 - **BL-43 P1 対策を `bl43_bt_root_cause` ブランチにコミット (beeb02f)**:
