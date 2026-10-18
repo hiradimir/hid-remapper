@@ -247,6 +247,11 @@ static void schedule_save_radio_off(bool is_off);
 static void update_ui_for_state(ble_state_t state);
 static void save_slot_bonded_mask(uint8_t mask);
 static void save_slot_peers(void);
+static void ble_switch_slot_locked(int slot);
+static void ble_enter_pairing_mode_locked(int slot);
+static void ble_clear_bonds_locked(void);
+static void ble_hid_task_locked(void);
+static void ble_hid_kick_reconnect_locked(void);
 
 static void update_connecting_status(void) {
 #if ENABLE_OLED
@@ -845,6 +850,12 @@ static void apply_slot_identity(int slot) {
 // 同一スロット押下でスロットのON/OFF（電波OFF・切断 / 再接続）をトグルする
 void ble_switch_slot(int slot) {
     if (slot < 0 || slot >= MAX_SLOTS) return;
+    ble_lock();
+    ble_switch_slot_locked(slot);
+    ble_unlock();
+}
+
+static void ble_switch_slot_locked(int slot) {
     btstack_run_loop_remove_timer(&bl17_cooldown_timer);
     bl17_reject_in_progress = false;
 
@@ -910,6 +921,12 @@ void ble_hid_switch_host(uint8_t slot) {
 
 void ble_enter_pairing_mode(int slot) {
     if (slot < 0 || slot >= MAX_SLOTS) return;
+    ble_lock();
+    ble_enter_pairing_mode_locked(slot);
+    ble_unlock();
+}
+
+static void ble_enter_pairing_mode_locked(int slot) {
     schedule_save_radio_off(false); // BL-01: ペアリング開始時はRadio ON
     slot_os[slot] = '-';    // 新規ペアリング時はOS表示をリセット
     oled_set_slot_os(slot, '-');
@@ -1436,6 +1453,12 @@ void ble_hid_init(void) {
 
 
 void ble_hid_task(void) {
+    ble_lock();
+    ble_hid_task_locked();
+    ble_unlock();
+}
+
+static void ble_hid_task_locked(void) {
     if (slot_change_requested) {
         slot_change_requested = false;
         btstack_run_loop_remove_timer(&bl17_cooldown_timer);
@@ -1541,6 +1564,12 @@ void ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len) {
 
 
 void ble_hid_kick_reconnect(void) {
+    ble_lock();
+    ble_hid_kick_reconnect_locked();
+    ble_unlock();
+}
+
+static void ble_hid_kick_reconnect_locked(void) {
     if (current_state == BLE_STATE_RECONNECTING && con_handle == HCI_CON_HANDLE_INVALID) {
         static uint32_t last_kick_ms = 0;
         uint32_t now = to_ms_since_boot(get_absolute_time());
@@ -1561,6 +1590,12 @@ void ble_pair_new_device(void) {
 }
 
 void ble_clear_bonds(void) {
+    ble_lock();
+    ble_clear_bonds_locked();
+    ble_unlock();
+}
+
+static void ble_clear_bonds_locked(void) {
     btstack_run_loop_remove_timer(&bl17_cooldown_timer);
     bl17_reject_in_progress = false;
     if (con_handle != HCI_CON_HANDLE_INVALID) {
