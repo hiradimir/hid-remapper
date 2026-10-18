@@ -239,6 +239,7 @@ static volatile bool switch_pending = false;
 // スロット切替・ON/OFF トグルの受付禁止時間（3秒）
 #define SWITCH_LOCK_US (3000000ULL)
 static uint64_t switch_lock_until_us = 0;
+static bool switch_lock_msg_shown = false;
 
 
 
@@ -859,6 +860,8 @@ void ble_switch_slot(int slot) {
     if (switch_lock_until_us != 0 && now_us < switch_lock_until_us) {
         printf("[BT] Slot switch locked (%llu ms left)\r\n",
                (unsigned long long)((switch_lock_until_us - now_us) / 1000));
+        oled_set_status("Can't switch now");
+        switch_lock_msg_shown = true;
         return;
     }
     switch_lock_until_us = now_us + SWITCH_LOCK_US;
@@ -1472,6 +1475,13 @@ void ble_hid_task(void) {
         }
     } else {
         last_pairing_remain = -1;
+    }
+
+    // 切替禁止メッセージは、禁止が明けたら通常のステータス表示へ戻す
+    if (switch_lock_msg_shown && time_us_64() >= switch_lock_until_us) {
+        switch_lock_msg_shown = false;
+        last_pairing_remain = -1;
+        update_ui_for_state(current_state);
     }
 
     if (slot_change_requested) {
