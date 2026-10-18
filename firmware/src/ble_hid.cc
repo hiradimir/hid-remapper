@@ -989,24 +989,19 @@ static void ble_enter_pairing_mode_locked(int slot) {
     current_state = BLE_STATE_PAIRING;
     update_ui_for_state(current_state);
 
-    // 既存実装は slot_change_requested を ble_hid_task が処理してから
-    // apply_slot_identity()（=広告データ設定 + gap_advertisements_enable(1)）へ到達する。
-    // しかしホスト側のタイミング・状態によって処理が遅れ、
-    // 「ペアリングモードにしたのに発見されない」現象が起こり得るため、
-    // 既に接続が無い場合は即時に広告を張る。
-    if (con_handle == HCI_CON_HANDLE_INVALID) {
-        is_pairing_mode = true;
-        btstack_run_loop_remove_timer(&pairing_timeout_timer);
-        btstack_run_loop_set_timer_handler(&pairing_timeout_timer, pairing_mode_timeout_handler);
-        btstack_run_loop_set_timer(&pairing_timeout_timer, 60000);
-        btstack_run_loop_add_timer(&pairing_timeout_timer);
+    // slot_change_requested 経由の遅延適用に依存せず、
+    // ペアリングモード要求の瞬間に広告可能状態へ切り替える。
+    is_pairing_mode = true;
+    btstack_run_loop_remove_timer(&pairing_timeout_timer);
+    btstack_run_loop_set_timer_handler(&pairing_timeout_timer, pairing_mode_timeout_handler);
+    btstack_run_loop_set_timer(&pairing_timeout_timer, 60000);
+    btstack_run_loop_add_timer(&pairing_timeout_timer);
 
-        // これ以上 slot_transition を待たない
-        pending_slot = slot;
-        pending_is_pairing = false;
-        slot_change_requested = false;
-        apply_slot_identity(slot);
-    }
+    // これ以上 slot_transition を待たない
+    pending_slot = slot;
+    pending_is_pairing = false;
+    slot_change_requested = false;
+    apply_slot_identity(slot);
 }
 static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size) {
     if (packet_type != HCI_EVENT_PACKET) return;
