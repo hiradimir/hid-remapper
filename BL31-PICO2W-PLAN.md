@@ -94,4 +94,14 @@
 3. **優先順位確認**: BL-36 (切替遅延) / BL-41 (OS 連動 Modifiers) と BL-31 の手配順はどちらを先に?
    (ルディ発言からは BL-31 を本命にする意図と読むが確認したい)
 4. ~~BL-43 soak test との絡み~~ → 用語説明済み。実運用 Pico W を観測的主体として継続し、
-   Pico 2 W (Waveshare) で STEP1-5 を別枠進行でも問題ない認識 (確認してほしい)
+    Pico 2 W (Waveshare) で STEP1-5 を別枠進行でも問題ない認識 (確認してほしい)
+
+---
+
+## 補足: RP2350B-Plus-W (Waveshare Type-C) 前提が固まった
+
+- 実機が **RP2350B-Plus-W / Type-C** であることが判明した前提で、
+  `src/boards/waveshare_rp2350_plus_w.h` を追加する方針に切り替える。
+- 先行でこの board header を置き、`PICO_BOARD=waveshare_rp2350_plus_w, ENABLE_BLE=ON/OLED=ON`
+  のビルドは通ることまで確認済み（USB host の D+ 配線 GPIO は仮定：GPIO 28）。
+- 残課題: **USB host の D+ が本当に GPIO 28 か**の実機検証。

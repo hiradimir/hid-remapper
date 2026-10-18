@@ -34,8 +34,8 @@ endif()
 option(ENABLE_BLE "Enable Bluetooth Low Energy support (requires pico_w)")
 option(ENABLE_OLED "Enable SSD1306 OLED display" OFF)
 
-if(ENABLE_BLE AND NOT (PICO_BOARD STREQUAL "pico_w" OR PICO_BOARD STREQUAL "pico2_w"))
-    message(FATAL_ERROR "ENABLE_BLE requires PICO_BOARD=pico_w or pico2_w")
+if(ENABLE_BLE AND NOT (PICO_BOARD STREQUAL "pico_w" OR PICO_BOARD STREQUAL "pico2_w" OR PICO_PLATFORM STREQUAL "rp2350-arm-s"))
+    message(FATAL_ERROR "ENABLE_BLE requires PICO_BOARD=pico_w/pico2_w or an RP2350-based CYW43 board")
 endif()
 
 
