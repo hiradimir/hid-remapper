@@ -9,12 +9,32 @@
 
 ---
 
-## 2026-10-18
+## 2026-10-18 (後半・シルフィ並行作業)
+
+- ブランチ体制を整備し、実機検証できない間のビルド検証型タスクを並行処理した:
+  - `wip/bl34-oled` (ec78a64): BL-34 パッチ+修正 4 ファイルを WIP コミットで退避。
+    実機検証 OK 後に正式化 (stash は空・feature/pico-w-ble に戻す構成)
+  - `feature/pico-w-ble` (c5417d6): md 5 点 (AGENTS/PROJECT/TASKS/HISTORY/CHARACTER) を
+    docs コミット。sample-agents/ は untracked 保持 (参照のみルール)
+  - `bl20_compile_warnings` (c3c1525): **BL-20 完了** — 再現 5 件
+    (out_report.cc -Wsign-compare 1 + remapper.cc -Wnarrowing/-Wsign-compare 4) を潰し、
+    BLE-ON/OFF・OLED-ON/OFF・single-host・dual_b 各構成で warning 0 を確認。
+    BL-20 が挙げていた main.cc / oled.cc の警告は現行推しで再現せず (過去コミットで解消済み)
+  - `bl40_usb_detect_fast` (df59cd2 + bl20 マージ 978aba2): **BL-40 実装完了** —
+    oled_update_usb_ports() 周期 5s→500ms、`oled_request_usb_ports_refresh()` 追加、
+    device_connected/disconnected_callback から即時再判定要求。stub ビルド warning 0
+  - 注意: bl40 ブランチは bl20 を取り込んでいるため、**bl20 単独マージ時は
+    bl20_compile_warnings を feature/pico-w-ble にマージしてから bl40 を重ねるのが推奨**
+- 参考情報: ルディのホスト (Mac) に Arm GNU Toolchain 15.3 があり、devcontainer 無しでも
+  cmake ビルド可能と判明 (検証系の高速化に使う)
+- 待ち事項: BL-34 実機検証 / BL-40 表示遅延確認 / BL-20・BL-40 のマージ先決定 (ルディ)
+
+## 2026-10-18 (前半・初期化セッション)
 
 - **cli セッション 1 初 days (シルフィ・opencode)**: 運用を cli エージェント (シルフィ) セッションへ移行。
   旧管理シート xlsx「HID Remapper BLE - 開発管理シート」を sample-agents/ に置き、
   内容を **AGENTS.md / PROJECT.md / TASKS.md / HISTORY.md / CHARACTER.md** へ移植した
-  (全てルート直下・現状 **未コミット**)。以後のタスク台帳・履歴の主はこの *.md 群。
+  (→ 後半で docs コミット c5417d6 として固定)。以後のタスク台帳・履歴の主はこの *.md 群。
   sample-agents/ は参照のみ (原版 xlsx 含む)
 - ドキュメント体系を確定 (AGENTS.md「ドキュメント体系」):
   **本フォークの正は PROJECT/AGENTS/TASKS/HISTORY/CHARACTER.md**。
