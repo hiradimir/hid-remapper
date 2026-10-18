@@ -1444,6 +1444,22 @@ void ble_hid_init(void) {
 
 
 void ble_hid_task(void) {
+    // ペアリング待機中の残り秒数表示（秒が変わった時だけ更新）
+    static int last_pairing_remain = -1;
+    if (is_pairing_mode && current_state == BLE_STATE_PAIRING) {
+        int elapsed_s = (int)((time_us_64() - pairing_start_us) / 1000000);
+        int remain = 60 - elapsed_s;
+        if (remain < 0) remain = 0;
+        if (remain != last_pairing_remain) {
+            last_pairing_remain = remain;
+            char buf[24];
+            snprintf(buf, sizeof(buf), "Pairing (%ds)", remain);
+            oled_set_status(buf);
+        }
+    } else {
+        last_pairing_remain = -1;
+    }
+
     if (slot_change_requested) {
         slot_change_requested = false;
         btstack_run_loop_remove_timer(&bl17_cooldown_timer);
@@ -1589,6 +1605,9 @@ static void ble_clear_slot_bonds(int slot) {
     slot_bonded_mask &= ~(1 << slot);
     save_slot_bonded_mask(slot_bonded_mask);
     oled_set_slot_bonded(slot, false);
+    slot_os[slot] = '-';
+    oled_set_slot_os(slot, '-');
+    schedule_save_slot_os();
     printf("[BT] Slot %d bond cleared\r\n", slot + 1);
 
     if (con_handle != HCI_CON_HANDLE_INVALID) {
@@ -1753,13 +1772,13 @@ bool ble_hid_check_hotkey(uint8_t interface, const uint8_t* report_with_id, uint
     }
     clear_bonds_was_pressed = false;
 
-    // ペアリングホットキー（2段階・カレントスロット専用）: Ctrl + Win + Alt + Enter
+    // ペアリングホットキー（2段階・カレントスロット専用）: Ctrl + Win + Alt + Space
     // 1回目: カレントスロットのボンドを消去 / クリア済みなら: そのスロットでペアリング開始
-    bool enter_pressed = (report_data[5] & 0x10) != 0; // Usage 0x28 (Enter)
-    static bool enter_was_pressed = false;
-    if (ctrl_pressed && gui_pressed && alt_pressed && enter_pressed) {
-        if (!enter_was_pressed) {
-            enter_was_pressed = true;
+    bool space_pressed = (report_data[6] & 0x01) != 0; // Usage 0x2C (Space)
+    static bool space_was_pressed = false;
+    if (ctrl_pressed && gui_pressed && alt_pressed && space_pressed) {
+        if (!space_was_pressed) {
+            space_was_pressed = true;
             send_all_release_reports();
             if (is_slot_bonded(current_slot)) {
                 printf("[BT] *** HOTKEY: Clear bond of current slot %d ***\r\n", current_slot + 1);
@@ -1771,7 +1790,7 @@ bool ble_hid_check_hotkey(uint8_t interface, const uint8_t* report_with_id, uint
         }
         return true;
     }
-    enter_was_pressed = false;
+    space_was_pressed = false;
 
     // OS手動切替ホットキー: Ctrl + Win + Alt + 'O'
     // 'O' は Usage 0x12 -> report_data[2] bit 6 (0x40)
@@ -1798,7 +1817,8 @@ bool ble_hid_check_hotkey(uint8_t interface, const uint8_t* report_with_id, uint
     }
     o_was_pressed = false;
 
-    int current_slot_request = (ctrl_pressed && gui_pressed && slot >= 0) ? slot : -1;
+    // Alt 付きの F キーはスロット操作に使わない（OS 側のショートカットへそのまま通す）
+    int current_slot_request = (ctrl_pressed && gui_pressed && !alt_pressed && slot >= 0) ? slot : -1;
 
     if (current_slot_request >= 0) {
         if (current_slot_request != last_pressed_slot || alt_pressed != last_alt_pressed) {
