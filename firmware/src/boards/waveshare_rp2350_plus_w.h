@@ -21,7 +21,10 @@
 
 #define GPIO_VALID_PINS_BASE 0b00111111111111111111111111111111
 
+// Allow override from toolchain/CMake if needed while tuning USB host wiring.
+#ifndef PICO_DEFAULT_PIO_USB_DP_PIN
 #define PICO_DEFAULT_PIO_USB_DP_PIN 28
+#endif
 
 // --- CYW43 (WiFi/BLE) ---
 // These defaults mirror the upstream pico2_w board. If your exact module
