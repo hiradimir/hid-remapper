@@ -12,10 +12,10 @@
 #define WAVESHARE_RP2350_PLUS_W_BOARD
 
 // Waveshare RP2350B 48-pin variant ("Pico 2" / Plus-W class).
-// NOTE: D+ pin mapping is assumed to match the existing
-// waveshare_rp2350_pizero board header (GPIO 28). If USB host
-// D+ wiring differs on your exact module, adjust
-// PICO_DEFAULT_PIO_USB_DP_PIN accordingly.
+// NOTE: PIO-USB wiring is selected by the DP GPIO.
+// For this board variant we default to the same DP/D- mapping
+// as the existing pico-w/pico2-w build (GPIO 0/1).
+// If your PCB wiring differs, override PICO_DEFAULT_PIO_USB_DP_PIN.
 
 #define PICO_RP2350B 1
 
@@ -23,7 +23,7 @@
 
 // Allow override from toolchain/CMake if needed while tuning USB host wiring.
 #ifndef PICO_DEFAULT_PIO_USB_DP_PIN
-#define PICO_DEFAULT_PIO_USB_DP_PIN 28
+#define PICO_DEFAULT_PIO_USB_DP_PIN 0
 #endif
 
 // --- CYW43 (WiFi/BLE) ---

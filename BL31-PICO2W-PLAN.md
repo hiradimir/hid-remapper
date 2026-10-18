@@ -103,5 +103,5 @@
 - 実機が **RP2350B-Plus-W / Type-C** であることが判明した前提で、
   `src/boards/waveshare_rp2350_plus_w.h` を追加する方針に切り替える。
 - 先行でこの board header を置き、`PICO_BOARD=waveshare_rp2350_plus_w, ENABLE_BLE=ON/OLED=ON`
-  のビルドは通ることまで確認済み（USB host の D+ 配線 GPIO は仮定：GPIO 28）。
-- 残課題: **USB host の D+ が本当に GPIO 28 か**の実機検証。
+  のビルドは通ることまで確認済み（USB host はデフォルトで pico-w/pico2-w と同一 DP/D- マッピング (GPIO 0/1)）。
+- 残課題: **USB host の D+ が本当に GPIO 0（そして D- が 1）として配線されているか**の実機検証。
