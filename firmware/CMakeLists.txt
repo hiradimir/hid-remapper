@@ -26,7 +26,7 @@ add_compile_options(-Wall)
 
 add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-std=c++17>)
 
-if((PICO_BOARD STREQUAL "pico") OR (PICO_BOARD STREQUAL "pico2") OR (PICO_BOARD STREQUAL "pico_w"))
+if((PICO_BOARD STREQUAL "pico") OR (PICO_BOARD STREQUAL "pico2") OR (PICO_BOARD STREQUAL "pico_w") OR (PICO_BOARD STREQUAL "pico2_w"))
 add_compile_definitions(GPIO_VALID_PINS_BASE=0b00011100011111111111111111111111)
 endif()
 
@@ -34,8 +34,8 @@ endif()
 option(ENABLE_BLE "Enable Bluetooth Low Energy support (requires pico_w)")
 option(ENABLE_OLED "Enable SSD1306 OLED display" OFF)
 
-if(ENABLE_BLE AND NOT PICO_BOARD STREQUAL "pico_w")
-    message(FATAL_ERROR "ENABLE_BLE requires PICO_BOARD=pico_w")
+if(ENABLE_BLE AND NOT (PICO_BOARD STREQUAL "pico_w" OR PICO_BOARD STREQUAL "pico2_w"))
+    message(FATAL_ERROR "ENABLE_BLE requires PICO_BOARD=pico_w or pico2_w")
 endif()
 
 
@@ -59,7 +59,7 @@ add_executable(remapper
     src/xbox.cc
 )
 
-if((PICO_BOARD STREQUAL "pico") OR (PICO_BOARD STREQUAL "pico2") OR (PICO_BOARD STREQUAL "pico_w"))
+if((PICO_BOARD STREQUAL "pico") OR (PICO_BOARD STREQUAL "pico2") OR (PICO_BOARD STREQUAL "pico_w") OR (PICO_BOARD STREQUAL "pico2_w"))
 target_compile_definitions(remapper PUBLIC PICO_DEFAULT_UART_TX_PIN=16)
 target_compile_definitions(remapper PUBLIC PICO_DEFAULT_UART_RX_PIN=17)
 target_compile_definitions(remapper PUBLIC PICO_DEFAULT_PIO_USB_DP_PIN=0)
