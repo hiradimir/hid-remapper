@@ -237,9 +237,6 @@ static volatile bool pending_is_pairing = false;
 static volatile bool pending_toggle_off = false;
 static volatile bool switch_pending = false;
 
-// pairing 予約: "他スロットの pairing 指定" が来ても、スロット切替完了後にのみ pairing を開始する。
-static volatile bool pairing_deferred = false;
-static volatile int pairing_deferred_slot = -1;
 
 
 
@@ -717,24 +714,6 @@ static void slot_transition_timer_handler(btstack_timer_source_t *ts) {
         printf("[BT] Slot transition margin (150ms) complete -> apply_slot_identity(Slot %d, pairing=%d)\r\n",
                slot + 1, is_pairing_mode);
         apply_slot_identity(slot);
-
-        // 切替完了後に deferred pairing を起動
-        if (!is_pairing_mode && pairing_deferred && (pairing_deferred_slot == slot)) {
-            pairing_deferred = false;
-            pairing_deferred_slot = -1;
-
-            is_pairing_mode = true;
-            pairing_start_us = time_us_64();
-            current_state = BLE_STATE_PAIRING;
-            update_ui_for_state(current_state);
-
-            btstack_run_loop_remove_timer(&pairing_timeout_timer);
-            btstack_run_loop_set_timer_handler(&pairing_timeout_timer, pairing_mode_timeout_handler);
-            btstack_run_loop_set_timer(&pairing_timeout_timer, 60000);
-            btstack_run_loop_add_timer(&pairing_timeout_timer);
-
-            apply_slot_identity(slot);
-        }
     }
 }
 
@@ -934,9 +913,8 @@ void ble_hid_switch_host(uint8_t slot) {
 }
 
 void ble_enter_pairing_mode(int slot) {
-    if (slot < 0 || slot >= MAX_SLOTS) return;
-    // pairing 開始は「そのスロットがアクティブ（current_slot==slot）」の場合のみ。
-    // 別スロットが指定された場合は、まずスロット切替だけ行い、切替完了後に pairing を開始する。
+    // ペアリングはカレントスロットのみ対象（別スロットへの切替ではペアリングを開始しない）
+    if (slot < 0 || slot >= MAX_SLOTS || slot != current_slot) return;
 
     schedule_save_radio_off(false); // ペアリング/切替時はRadio ON
     slot_os[slot] = '-';    // 新規ペアリング時はOS表示をリセット
@@ -978,23 +956,6 @@ void ble_enter_pairing_mode(int slot) {
     save_slot_bonded_mask(slot_bonded_mask);
     oled_set_slot_bonded(slot, false);
 
-    if (slot != current_slot) {
-        // 切替だけ先に行う（pairing_deferred で切替完了後に起動）
-        pairing_deferred = true;
-        pairing_deferred_slot = slot;
-
-        pending_slot = slot;
-        pending_is_pairing = false;
-        pending_toggle_off = false;
-        slot_change_requested = true;
-        current_state = BLE_STATE_SWITCHING;
-        update_ui_for_state(current_state);
-        return;
-    }
-
-    // アクティブスロットなので即座に pairing
-    pairing_deferred = false;
-    pairing_deferred_slot = -1;
     is_pairing_mode = true;
     pairing_start_us = time_us_64();
     pending_slot = slot;
@@ -1532,24 +1493,6 @@ void ble_hid_task(void) {
                 btstack_run_loop_add_timer(&pairing_timeout_timer);
             }
             apply_slot_identity(slot);
-
-            // 切替完了後に、deferred pairing を起動する
-            if (!is_pairing && pairing_deferred && (pairing_deferred_slot == slot)) {
-                pairing_deferred = false;
-                pairing_deferred_slot = -1;
-
-                is_pairing_mode = true;
-                pairing_start_us = time_us_64();
-                current_state = BLE_STATE_PAIRING;
-                update_ui_for_state(current_state);
-
-                btstack_run_loop_remove_timer(&pairing_timeout_timer);
-                btstack_run_loop_set_timer_handler(&pairing_timeout_timer, pairing_mode_timeout_handler);
-                btstack_run_loop_set_timer(&pairing_timeout_timer, 60000);
-                btstack_run_loop_add_timer(&pairing_timeout_timer);
-
-                apply_slot_identity(slot);
-            }
         }
     }
 }
@@ -1625,6 +1568,40 @@ void ble_pair_new_device(void) {
     ble_enter_pairing_mode(current_slot);
 }
 
+// カレントスロットのボンドだけを消去する（ペアリングは開始しない）
+static void ble_clear_slot_bonds(int slot) {
+    if (slot_peers[slot].valid) {
+        int max_entries = le_device_db_max_count();
+        for (int i = 0; i < max_entries; i++) {
+            int a_type = BD_ADDR_TYPE_UNKNOWN;
+            bd_addr_t a_addr;
+            le_device_db_info(i, &a_type, a_addr, NULL);
+            if (a_type != BD_ADDR_TYPE_UNKNOWN && memcmp(a_addr, slot_peers[slot].addr, 6) == 0) {
+                gap_delete_bonding((bd_addr_type_t)a_type, a_addr);
+                le_device_db_remove(i);
+                break;
+            }
+        }
+        slot_peers[slot].valid = 0;
+        memset(slot_peers[slot].addr, 0, 6);
+        save_slot_peers();
+    }
+    slot_bonded_mask &= ~(1 << slot);
+    save_slot_bonded_mask(slot_bonded_mask);
+    oled_set_slot_bonded(slot, false);
+    printf("[BT] Slot %d bond cleared\r\n", slot + 1);
+
+    if (con_handle != HCI_CON_HANDLE_INVALID) {
+        gap_disconnect(con_handle); // 切断完了ハンドラが未ボンドとして待機状態へ遷移する
+    } else {
+        is_pairing_mode = false;
+        current_state = BLE_STATE_STANDBY_SILENT;
+        update_ui_for_state(current_state);
+        gap_advertisements_enable(0);
+    }
+    oled_set_status("Slot Cleared");
+}
+
 void ble_clear_bonds(void) {
     btstack_run_loop_remove_timer(&bl17_cooldown_timer);
     bl17_reject_in_progress = false;
@@ -1636,8 +1613,6 @@ void ble_clear_bonds(void) {
     pending_is_pairing = false;
     pending_toggle_off = false;
     switch_pending = false;
-    pairing_deferred = false;
-    pairing_deferred_slot = -1;
     is_pairing_mode = false;
     pairing_start_us = 0;
 
@@ -1778,6 +1753,26 @@ bool ble_hid_check_hotkey(uint8_t interface, const uint8_t* report_with_id, uint
     }
     clear_bonds_was_pressed = false;
 
+    // ペアリングホットキー（2段階・カレントスロット専用）: Ctrl + Win + Alt + Enter
+    // 1回目: カレントスロットのボンドを消去 / クリア済みなら: そのスロットでペアリング開始
+    bool enter_pressed = (report_data[5] & 0x10) != 0; // Usage 0x28 (Enter)
+    static bool enter_was_pressed = false;
+    if (ctrl_pressed && gui_pressed && alt_pressed && enter_pressed) {
+        if (!enter_was_pressed) {
+            enter_was_pressed = true;
+            send_all_release_reports();
+            if (is_slot_bonded(current_slot)) {
+                printf("[BT] *** HOTKEY: Clear bond of current slot %d ***\r\n", current_slot + 1);
+                ble_clear_slot_bonds(current_slot);
+            } else {
+                printf("[BT] *** HOTKEY: Start pairing for current slot %d ***\r\n", current_slot + 1);
+                ble_enter_pairing_mode(current_slot);
+            }
+        }
+        return true;
+    }
+    enter_was_pressed = false;
+
     // OS手動切替ホットキー: Ctrl + Win + Alt + 'O'
     // 'O' は Usage 0x12 -> report_data[2] bit 6 (0x40)
     bool o_pressed = (report_data[2] & 0x40) != 0;
@@ -1810,13 +1805,8 @@ bool ble_hid_check_hotkey(uint8_t interface, const uint8_t* report_with_id, uint
             last_pressed_slot = current_slot_request;
             last_alt_pressed = alt_pressed;
             send_all_release_reports();
-            if (alt_pressed) {
-                printf("[BT] *** HOTKEY: Enter Pairing Mode for slot %d ***\r\n", slot + 1);
-                ble_enter_pairing_mode(slot);
-            } else {
-                printf("[BT] *** HOTKEY: Switch to slot %d ***\r\n", slot + 1);
-                ble_switch_slot(slot);
-            }
+            printf("[BT] *** HOTKEY: Switch to slot %d ***\r\n", slot + 1);
+            ble_switch_slot(slot);
         }
         return true; // ホットキー成立中は常に消費
     }
