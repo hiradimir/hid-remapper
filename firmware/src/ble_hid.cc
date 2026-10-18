@@ -701,6 +701,9 @@ static void slot_transition_timer_handler(btstack_timer_source_t *ts) {
         slot_transition_target = -1;
 
         is_pairing_mode = is_pairing;
+        if (is_pairing_mode) {
+            pairing_start_us = time_us_64();
+        }
         btstack_run_loop_remove_timer(&pairing_timeout_timer);
         if (is_pairing_mode) {
             btstack_run_loop_set_timer_handler(&pairing_timeout_timer, pairing_mode_timeout_handler);
@@ -910,16 +913,15 @@ void ble_hid_switch_host(uint8_t slot) {
 
 void ble_enter_pairing_mode(int slot) {
     if (slot < 0 || slot >= MAX_SLOTS) return;
-    // pairing 開始は「そのスロットにいる場合」に限定する。
-    // 別スロットが指定された場合は、スロット切替完了後に pairing が開始されるよう
-    // is_pairing_mode は即時に更新せず pending 経由にする。
-    const bool start_pairing_now = (slot == current_slot);
-    is_pairing_mode = start_pairing_now;
+    // pairing 開始は「そのスロットがアクティブになった後」に限定する。
+    // ここで別スロットが指定されても、すぐ is_pairing_mode にしない（UX ガード）。
+    // 接続中なら existing な slot_change_requested 経由、それ以外は slot_transition を待つ。
+
     schedule_save_radio_off(false); // BL-01: ペアリング開始時はRadio ON
     slot_os[slot] = '-';    // 新規ペアリング時はOS表示をリセット
     oled_set_slot_os(slot, '-');
     schedule_save_slot_os();
-    pairing_start_us = time_us_64();
+    pairing_start_us = 0;
     btstack_run_loop_remove_timer(&slot_transition_timer);
     btstack_run_loop_remove_timer(&bl17_cooldown_timer);
     bl17_reject_in_progress = false;
@@ -955,12 +957,24 @@ void ble_enter_pairing_mode(int slot) {
     save_slot_bonded_mask(slot_bonded_mask);
     oled_set_slot_bonded(slot, false);
 
-    pending_slot = slot;
-    pending_is_pairing = true;
-    pending_toggle_off = false;
-    slot_change_requested = true;
-    current_state = start_pairing_now ? BLE_STATE_PAIRING : BLE_STATE_SWITCHING;
+    // 1) 接続中（con_handle 有効）: existing な切断/遷移キューに委ねる
+    if (con_handle != HCI_CON_HANDLE_INVALID || slot == current_slot) {
+        is_pairing_mode = true;
+        pairing_start_us = time_us_64();
+        pending_slot = slot;
+        pending_is_pairing = true;
+        pending_toggle_off = false;
+        slot_change_requested = true;
+        current_state = BLE_STATE_PAIRING;
+        update_ui_for_state(current_state);
+        return;
+    }
+
+    // 2) 未接続で別スロット指定: slot切替（150ms）後に pairing 開始
+    is_pairing_mode = false;
+    current_state = BLE_STATE_SWITCHING;
     update_ui_for_state(current_state);
+    schedule_slot_transition(slot, true);
 }
 static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size) {
     if (packet_type != HCI_EVENT_PACKET) return;
