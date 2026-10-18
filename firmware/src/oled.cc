@@ -350,8 +350,10 @@ void oled_task(void) {
         tx_icon = "\x85"; // 0x85: 稲妻/電気アイコン (TX点滅)
         ui_tx_timer--;
     }
+    // BT 接続中は 500ms ごとにモードアイコン横のドットを点滅（BL-34 heartbeat）
+    char hb_char = (is_bt_mode && ui_bt_state == OLED_BT_CONNECTED && ((now_us / 500000) % 2)) ? '.' : ' ';
     char line0[24];
-    snprintf(line0, sizeof(line0), "%s %-4s              %s", mode_icon, state_str, tx_icon);
+    snprintf(line0, sizeof(line0), "%s%c %-4s             %s", mode_icon, hb_char, state_str, tx_icon);
 
     // Line 1: 各スロット状態 1:M* 2:W  3:A  4:I  (21 chars)
     char line1[24];
