@@ -68,12 +68,30 @@
 - **方針 B**: rp2350 専用の分岐ブランチに切り離す (コード量が予想より膨らんだ場合のみ)
 - 開発ブランチ名: `bl31_pico2w`
 
-## 5. ルディに確認したいこと
+## 5. ルディに確認したいこと (2026-10-18 追記: 部分回答済み)
 
-1. **ボードの実物**: 公式 `Raspberry Pi Pico 2 W` (microUSB) か、それとも Waveshare 等
-   Type-C 搭載の 3rd-party RP2350-W ボードか (写真や型番の確認で `src/boards` 生成の要否が変わる)
-2. **PICO_PLATFORM**: `rp2350` (arm Cortex-M33 系、SDK pico2_w.h の default) で良いか。
+**既に分かったこと (ルディ情報)**:
+- 両方ある: 公式 Pico 2 W と Waveshare 互換品。**本命は Waveshare Type-C 版**
+  (理由: 今後の入手難易度 + Type-C の存在)。次点は公式 Pico 2 W を Type-C 化する想定
+- pico_w 純正対応を継続するのは upstream hid-remapper 本家への追従性のため
+- **注文メールの型番表記に「RP2350」… とあり、着弾した Waveshare 基板は青色だった模様。**
+  Blue Waveshare + Type-C + \*B\* チップ可能性 → **RP2350B (48 GPIO)** の可能性が出ている。
+  RP2350B なら公式 `pico2_w.h` (RP2350A 30 pin 用) は使えず、
+  `src/boards/waveshare_rp2350_pizero.h` (RP2350B=1, DP=28, GPIO 48 本) 系の
+  Waveshare 専用 board header 追加が必須になる
+
+**帰宅後の確認リスト (ルディ)**:
+- [ ] 天板写真 (シルク文字・チップ刻印が見えるもの)
+- [ ] Waveshare 製品ページ URL (または注文履歴リンク)
+- [ ] Type-C 有無 + USB Host 用ピン配置 (GPIO0/1 か)
+- [ ] WiFi/BLE (CYW43) 有無
+- [ ] GPIO 本数 (30 か 48 か)
+
+**未回答の質問**:
+1. ~~ボード実物~~ → 上記チェックリストで確認後確定
+2. **PICO_PLATFORM**: `rp2350` (arm Cortex-M33 系) で良いか (RP2350B なら DSP/M33 共通)。
    RISC-V (Hazard3) にする理由は無い認識
 3. **優先順位確認**: BL-36 (切替遅延) / BL-41 (OS 連動 Modifiers) と BL-31 の手配順はどちらを先に?
-4. **BL-43 検証との絡み**: 移行後の Pico 2 W でも soak test (切断ループ観測) をやるか、
-   Pico W を本機のまま稼働観測して Pico 2 W は横で動作確認するか
+   (ルディ発言からは BL-31 を本命にする意図と読むが確認したい)
+4. ~~BL-43 soak test との絡み~~ → 用語説明済み。実運用 Pico W を観測的主体として継続し、
+   Pico 2 W (Waveshare) で STEP1-5 を別枠進行でも問題ない認識 (確認してほしい)

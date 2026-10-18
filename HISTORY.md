@@ -22,8 +22,14 @@
   - **要検算**: RP2350 UF2 書込時の E10 末尾セクタ wipe と ble_hid.cc TLV
     (`FLASH_SIZE - 3*4096`) の干渉。必要なら config と同じ 1 セクタ下げ
   - 推奨方針: 同一 CMakeLists で pico_w / pico2_w 両対応 (方針 A)。ブランチ名 `bl31_pico2w`
-  - ルディ確認事項: ①ボード実物 (公式 Pico 2 W か Waveshare Type-C か)、
-    ②PICO_PLATFORM (arm-s で良いか)、③BL-36/BL-41 との優先順位、④BL-43 soak との絡み
+- **ルディの部分回答を反映**:
+  - **本命ターゲット = Waveshare Type-C 版** (入手難易度と Type-C のため)、
+    次点 = 公式 Pico 2 W の Type-C 化。pico_w 純正対応は本家追従のため継続
+  - ボード両対応のビルド仕分けで合意 (board header 分岐)
+  - 注文メール型番に RP2350B 情報の断片 → **RP2350B (48 GPIO) の可能性**が出ている。
+    公式 pico2_w.h (RP2350A 用) が直接使えず `src/boards/waveshare_*` 系専用 header
+    追加が必要になる可能性。帰宅後に写真・URL・GPIO 本数・CYW43 有無を確認予定
+  - soak test は用語説明済み (長時間連続稼働テストの意)
 
 ## 2026-10-18 (BL-43 P1 対策コミット)
 
