@@ -21,7 +21,6 @@
 |----|----------|------|------------|
 | BL-34 | OLED表示改善・低輝度スクリーンセーバー機能 | 実装完了・**実機検証待ち** (パッチ修正済) | 旧 agent パッチ (3段階減光 0x8F→0x30→0x05 + バウンスロゴ, Toast, ペアリング60s/再接続30s カウントダウン) を評価・修正済: Line3 の21文字超え欠け直し、extern "C" 宣言廃止→ble_hid.h include、reconnect_start_us 未適用経路補完。BLE-ON/OFF 両ビルド通過 (warning 0)。作業ツリーにあり未コミット・stash 空。実機でスクリーンセーバー遷移・ダウンだれ (BL-37 常在要素の切分け) を確認 → OK ならコミット |
 | BL-01 | 再起動時の BT-OFF (スタンバイ) 状態の Flash 保持 | 検証中 (286c1b3コミット済) | スロットトグルOFF状態で再起動した際、自動でアドバタイズ開始せず STANDBY_SILENT を維持 |
-| BL-04 | 接続時 OS 自動判定 (フィンガープリント) およびスロット保持 | 検証中 (286c1b3コミット済) | ATT MTU / Connection Update による自動判定、Stickyガード、Cmd+Ctrl+Alt+O 手動切替、2秒遅延デバウンスFlash保存。Mac/Android実機確認済、Win検証待ち |
 
 ---
 
@@ -42,3 +41,5 @@
 | BL-41 | OS 連動 Modifiers (Cmd ⇔ Ctrl) 自動スワップ | 中 | キーマップ / BLE | スロットの OS 判定結果 (W, A, M, I) に基づき、Windows/Android 接続時は Cmd(GUI) と Ctrl を自動スワップ |
 | BL-42 | モバイルバッテリー運用時の Keep-Alive パルス制御・Quiet Mode | 低 | HW / 電源 | キーボード抜去時のバッテリー自動給電停止・軽負荷バーストでのピエゾ鳴き対策。空き GPIO (GP6 等) FET+47Ω パルス疑似負荷、または CYW43 WL_GPIO1 (Quiet Mode) 検証 |
 | BL-43 | ハウジング版長時間稼働時の断続的 BT 切断ループ・CYW43 ストール調査と復旧ロジック **[根本原因調査中 2026-10-18]** | **高** | BLE安定性 / HW | 手動トグルでは改善せず電源再投入でのみ復旧 (切断ループ)。対処療法ではなく根本 cause 掃討に着手 (HISTORY 参照)。**有力コミット候補**。● ルディに確認: 現象発生時 OLED は表示更新を続けていたか? (凍結なら assert ハング系、継続なら共有バス/ロック系) |
+| BL-44 | Windows 接続時の OS 自動判定が "A" になる | 中 | BLE機能 | 2026-10-19 実機: Windows でペアリング・接続は可能だが OS 表示が A (macOS は M で正常)。ATT MTU / Connection Update の判定条件 (peer_has_android_timeout・ble_conn_timeout>=450・mtu>=500) を Windows の値で再確認 |
+| BL-45 | BL-43 系マージ区間の BT 検出不可の切り分け (bisect) | **高** | BLE安定性 | 実機 (ハウジング版) 確認: 6e4dc67 は検出OK / 1c69e5f は検出・接続OK / b089ac1 (OLED 修正直前) は検出されず。差分の bisect は未実施。現在の確認済みベースは 1c69e5f (ブランチ bl04_pairing_hotkey) |

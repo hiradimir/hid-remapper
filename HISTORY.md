@@ -9,6 +9,38 @@
 
 ---
 
+## 2026-10-19 BL-04 ペアリング・全消去の状態遷移を整理 (ブランチ `bl04_pairing_hotkey`)
+
+- **経緯**: BL-04 初期修正 (4e76652 / f751492: 広告の強制開始・all-clear で pairing 再開) を
+  実機で焼いたところ「ペアリングしても検出されない」「all-clear 後に検出不能」が悪化。
+  切り分けのため 313dcd4 / b089ac1 / 6e4dc67 / 1c69e5f を順に焼いて確認し、
+  **1c69e5f (ハウジング版で検出・接続 OK) を基準**に、必要な部分だけ再実装する方針に変更。
+- **確認に使った UF2 (firmware/build/ 配下に保管・削除しない)**:
+  - `remapper_before_bl43.uf2` (6e4dc67): Windows / macOS とも検出 OK
+  - `remapper_at_1c69e5f.uf2`: 検出・接続 OK (**現在の基準**)
+  - `remapper_before_oled_fix.uf2` (b089ac1): OLED は戻ったが BT 検出されず
+  - `remapper.uf2` / `remapper_before_syphi.uf2` (BL-04 初期修正入り): 検出されず
+- **最終コミット `b375cef`** (1c69e5f 派生 9 コミット、ブランチ `bl04_pairing_hotkey`):
+  1. **all-clear**: 接続・保留キュー・送信フラグ・遷移/再接続タイマを全リセット。
+     all-clear 後は自動で pairing を開始しない (ホットキー待ち)。
+  2. **ペアリングはカレントスロットのみ対象**。別スロット指定では pairing を開始しない
+     (遅延ペアリング方式は撤回し、関連コードは削除)。
+  3. **ペアリングホットキーを Ctrl+Win+Alt+Space に変更、2段階化**:
+     1回目 = カレントスロットのボンドを消去 (接続中なら切断) し、OS 表示を `-` に戻す /
+     2回目 (消去済み) = そのスロットでペアリング開始。
+     Space は Usage 0x2C → `report_data[6] & 0x01` (既存 Backspace/O と同じビット規則から算出)。
+  4. **Ctrl+Win+Alt+F1〜F4 はスロット切替判定から外す** (Alt 付きは OS 側へ通す)。
+     スロット切替は従来どおり Ctrl+Win+F1〜F4。
+  5. **ペアリング中のカウントダウン復活**: `Pairing (60s)` → 秒ごとに `Pairing (Ns)` (ble_hid_task で秒変化時のみ描画)。
+- **実機確認 (ルディ)**: all-clear 後に勝手に pairing しない / slot2 でのペアリング開始 OK /
+  Space の 2 段階 (消去 → `1:-*` 表示、再押下でペアリング) OK / カウントダウン OK / Windows でペアリング可。
+- **未解決・注意**:
+  - Windows 接続時に OS 判定が `A` になる (macOS は `M` で正常) → BL-44
+  - b089ac1 以降で検出されなくなった原因は未特定 (6e4dc67 は OK) → BL-45 (BL-43 系マージ区間)
+  - `feature/pico-w-ble` には初期修正の revert (1cee7c5, 2fb1e7e) が積まれており、本ブランチとは別線。
+    統合方針はルディ判断 (現時点では未マージ)
+  - 作業開始時に HEAD が `1c69e5f` の detached 状態だったため、コミットを `bl04_pairing_hotkey` ブランチに固定した
+
 ## 2026-10-18 (後半・シルフィ並行作業)
 
 - **BL-43 根本原因調査を開始** (ルディ指摘: 旧メモは復旧手法のみで cause 掃討欠落。仰る通り):
