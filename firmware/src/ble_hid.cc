@@ -236,6 +236,7 @@ static volatile int pending_slot = -1;
 static volatile bool pending_is_pairing = false;
 static volatile bool pending_toggle_off = false;
 static volatile bool switch_pending = false;
+static volatile bool allclear_pairing_pending = false;
 
 
 
@@ -1313,6 +1314,15 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             zero_sent_waiting_ack = false;
             current_peer_addr[0] = '\0';
 
+            // all-clear 後は、切断完了後にだけ pairing 広告へ戻す。
+            // ここで再入すると disconnection 完了後の状態遷移と衝突するため、
+            // switch_pending が無いときのみ処理する。
+            if (!switch_pending && allclear_pairing_pending) {
+                allclear_pairing_pending = false;
+                ble_enter_pairing_mode(current_slot);
+                break;
+            }
+
             uint8_t reason = hci_event_disconnection_complete_get_reason(packet);
             printf("[BT] Disconnected (reason=0x%02X)\r\n", reason);
 
@@ -1565,9 +1575,10 @@ void ble_pair_new_device(void) {
 }
 
 void ble_clear_bonds(void) {
+    bool had_connection = (con_handle != HCI_CON_HANDLE_INVALID);
     btstack_run_loop_remove_timer(&bl17_cooldown_timer);
     bl17_reject_in_progress = false;
-    if (con_handle != HCI_CON_HANDLE_INVALID) {
+    if (had_connection) {
         gap_disconnect(con_handle);
     }
     int max_entries = le_device_db_max_count();
@@ -1598,11 +1609,16 @@ void ble_clear_bonds(void) {
     if (tlv_impl) {
         tlv_impl->store_tag(&tlv_context, TLV_TAG_SLOT_OS, (const uint8_t*)slot_os, sizeof(slot_os));
     }
-    // 全ボンド削除後は、ユーザーが期待する「すぐに発見可能」状態へ戻す。
-    // ペアリングホットキーを押し直さずに、現在スロットのペアリング広告を再開する。
-    // （pairing 開始の確実性は ble_enter_pairing_mode() 側の既存スロット切替経路に委ねる）
     oled_set_status("Bonds Cleared");
-    ble_enter_pairing_mode(current_slot);
+
+    // 切断完了イベント（HCI_EVENT_DISCONNECTION_COMPLETE）まで待ってから
+    // pairing 広告を再開する。
+    // これにより、disconnection 完了ハンドラ内の状態遷移と衝突しない。
+    allclear_pairing_pending = true;
+    if (!had_connection) {
+        allclear_pairing_pending = false;
+        ble_enter_pairing_mode(current_slot);
+    }
 }
 
 void ble_led(bool value) {
