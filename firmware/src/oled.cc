@@ -137,6 +137,7 @@ const uint8_t font_data[FONT_CHAR_COUNT][FONT_WIDTH] = {
 static uint8_t ssd1306_buffer[SSD1306_WIDTH * SSD1306_HEIGHT / 8];
 static bool oled_present = false;
 static bool need_redraw = true;
+static volatile bool oled_usb_refresh_requested = false;
 
 // UI 状態
 static volatile uint8_t cur_slot = 0;
@@ -647,8 +648,14 @@ static void update_usb_ports_status(void) {
 void oled_update_usb_ports(void) {
     static uint32_t last_usb_check_ms = 0;
     uint32_t now_ms = (uint32_t)(time_us_64() / 1000);
-    if (now_ms - last_usb_check_ms >= 5000) {
+    bool requested = oled_usb_refresh_requested;
+    oled_usb_refresh_requested = false;
+    if (requested || (now_ms - last_usb_check_ms >= 500)) {
         last_usb_check_ms = now_ms;
         update_usb_ports_status();
     }
+}
+
+void oled_request_usb_ports_refresh(void) {
+    oled_usb_refresh_requested = true;
 }

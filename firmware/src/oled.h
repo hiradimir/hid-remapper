@@ -38,6 +38,8 @@ void oled_set_reconnect_remaining_sec(int sec);
 
 // W-01/W-17: USBポートのデバイス種別を定期判定し表示更新
 void oled_update_usb_ports(void);
+// BL-40: 接続・切断イベント直後の即時再判定要求
+void oled_request_usb_ports_refresh(void);
 
 #else
 
@@ -59,6 +61,7 @@ static inline void oled_set_radio_off(bool is_off) { (void)is_off; }
 static inline void oled_set_pairing_remaining_sec(int sec) { (void)sec; }
 static inline void oled_set_reconnect_remaining_sec(int sec) { (void)sec; }
 static inline void oled_update_usb_ports(void) {}
+static inline void oled_request_usb_ports_refresh(void) {}
 
 #endif
 
