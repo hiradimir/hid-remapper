@@ -652,7 +652,7 @@ void set_mapping_from_config() {
                 .data = &dpad_state,
                 .len = sizeof(dpad_state),
                 .size = 1,
-                .bitpos = (uint16_t) ((target & 0xFFFF) - 1) & 0x03,
+                .bitpos = (uint16_t) (((uint32_t)(target & 0xFFFF) - 1) & 0x03),
             });
         } else if ((target & 0xFFFF0000) == REGISTER_USAGE_PAGE) {
             rev_map.our_usages.push_back((out_usage_def_t){
@@ -670,7 +670,7 @@ void set_mapping_from_config() {
                         .len = report_sizes[array_usage.usage_def.report_id],
                         .size = array_usage.usage_def.size,
                         .bitpos = array_usage.usage_def.bitpos,
-                        .array_count = array_usage.usage_def.count,
+                        .array_count = (uint8_t) array_usage.usage_def.count,
                         .array_index = array_usage.usage_def.logical_minimum + target - array_usage.usage,
                     });
                     handled = true;
@@ -1301,8 +1301,8 @@ void process_mapping(bool auto_repeat) {
                 for (auto const& out_usage_def : rev_map.our_usages) {
                     if (out_usage_def.array_count == 0) {
                         uint32_t effective_value = value;
-                        if ((out_usage_def.size < 32) && (effective_value > ((1 << out_usage_def.size) - 1))) {
-                            effective_value = (1 << out_usage_def.size) - 1;
+                        if ((out_usage_def.size < 32) && (effective_value > (uint32_t)((1u << out_usage_def.size) - 1))) {
+                            effective_value = (1u << out_usage_def.size) - 1;
                         }
                         put_bits(out_usage_def.data, out_usage_def.len, out_usage_def.bitpos, out_usage_def.size, effective_value);
                     } else {  // array range
@@ -1537,8 +1537,8 @@ inline void read_input_range(const uint8_t* report, int len, uint32_t source_usa
     for (unsigned int i = 0; i < their_usage.count; i++) {
         uint32_t bits = get_bits(report, len, their_usage.bitpos + i * their_usage.size, their_usage.size);
         // XXX consider negative indexes
-        if ((bits >= their_usage.logical_minimum) &&
-            (bits <= their_usage.logical_minimum + their_usage.usage_maximum - source_usage)) {
+        if (((int64_t)bits >= their_usage.logical_minimum) &&
+            ((int64_t)bits <= (int64_t)their_usage.logical_minimum + their_usage.usage_maximum - source_usage)) {
             uint32_t actual_usage = source_usage + bits - their_usage.logical_minimum;
             int32_t* state_ptr_0 = get_state_ptr(actual_usage, 0);
             if (state_ptr_0 != NULL) {
@@ -1602,8 +1602,8 @@ inline void monitor_read_input_range(const uint8_t* report, int len, uint32_t so
     for (unsigned int i = 0; i < their_usage.count; i++) {
         uint32_t bits = get_bits(report, len, their_usage.bitpos + i * their_usage.size, their_usage.size);
         // XXX consider negative indexes
-        if ((bits >= their_usage.logical_minimum) &&
-            (bits <= their_usage.logical_minimum + their_usage.usage_maximum - source_usage)) {
+        if (((int64_t)bits >= their_usage.logical_minimum) &&
+            ((int64_t)bits <= (int64_t)their_usage.logical_minimum + their_usage.usage_maximum - source_usage)) {
             uint32_t actual_usage = source_usage + bits - their_usage.logical_minimum;
             // for array range inputs, "key-up" events (value=0) don't show up in the monitor
             if (monitor_enabled && ((actual_usage & 0xFFFF) != 0)) {
