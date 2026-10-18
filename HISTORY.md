@@ -32,8 +32,24 @@
   4. **Ctrl+Win+Alt+F1〜F4 はスロット切替判定から外す** (Alt 付きは OS 側へ通す)。
      スロット切替は従来どおり Ctrl+Win+F1〜F4。
   5. **ペアリング中のカウントダウン復活**: `Pairing (60s)` → 秒ごとに `Pairing (Ns)` (ble_hid_task で秒変化時のみ描画)。
+  6. **スロット切替・ON/OFF トグルの受付禁止 (3秒)** (`c821243`): `ble_switch_slot()` 入口で、受付から
+     `SWITCH_LOCK_US` (3秒) 以内の要求を無視。BT 状態の不整合防止の保険。全消去・ボンド消去・ペアリングは対象外。
+     禁止中は 4 行目に `Can't switch now` を表示し、明けたら通常表示へ戻す (`38c5666`)。
+  7. **ペアリング開始時に `slot_transition_timer` を停止**する処理を復元 (`c821243`)。
+     切替直後のペアリングで、保留中の切替タイマが状態を上書きするのを防ぐ。
+  8. **接続中ハートビート (BL-34 の一部)** (`7b8d609`): BT 接続中のみ、1 行目のモードアイコン横で
+     500ms ごとに `.` を点滅。USB フォールバック時は点滅しない（右上の電気アイコンで生存確認する運用）。
+     1 行は 21 文字に収めるため空白を 1 つ減らした。
+     出典は `wip/bl34-oled` (ec78a64) の `hb_char`。
 - **実機確認 (ルディ)**: all-clear 後に勝手に pairing しない / slot2 でのペアリング開始 OK /
-  Space の 2 段階 (消去 → `1:-*` 表示、再押下でペアリング) OK / カウントダウン OK / Windows でペアリング可。
+  Space の 2 段階 (消去 → `1:-*` 表示、再押下でペアリング) OK / カウントダウン OK / Windows でペアリング可 /
+  切替直後の切替禁止 OK・3秒後の切替 OK / 点滅ドット OK / 禁止中の `Can't switch now` 表示 OK。
+- **コミット一覧** (`bl04_pairing_hotkey`, 基準 1c69e5f): `708de74` `4daaf18` `ceb75a0` `84ee25d` `c4d5123`
+  `1e74763` `b3a7f13` `4d2cdee` `b375cef` `c4c6d9f` (docs) `c821243` `7b8d609` `38c5666`。
+  途中の `all-clear 再開` / `遅延ペアリング` は最終的に撤回・削除済み。
+- **検証用 UF2 (firmware/build/)**: `remapper_hotkey_space_candidate.uf2` (b375cef 相当),
+  `remapper_switchlock_heartbeat_candidate.uf2` (7b8d609 相当), `remapper_lockmsg_candidate.uf2` (38c5666)。
+- **BL-34 の残り**: スクリーンセーバー・Toast・バウンスロゴは `wip/bl34-oled` 側のまま。取り込みは別途判断。
 - **未解決・注意**:
   - Windows 接続時に OS 判定が `A` になる (macOS は `M` で正常) → BL-44
   - b089ac1 以降で検出されなくなった原因は未特定 (6e4dc67 は OK) → BL-45 (BL-43 系マージ区間)
