@@ -1594,11 +1594,11 @@ void ble_clear_bonds(void) {
     if (tlv_impl) {
         tlv_impl->store_tag(&tlv_context, TLV_TAG_SLOT_OS, (const uint8_t*)slot_os, sizeof(slot_os));
     }
-    current_state = BLE_STATE_STANDBY_SILENT;
-    update_ui_for_state(current_state);
+    // 全ボンド削除後は、ユーザーが期待する「すぐに発見可能」状態へ戻す。
+    // ペアリングホットキーを押し直さずに、現在スロットのペアリング広告を再開する。
+    // （pairing 開始の確実性は ble_enter_pairing_mode() 側の既存スロット切替経路に委ねる）
     oled_set_status("Bonds Cleared");
-    gap_advertisements_enable(0);
-    ble_led(0);
+    ble_enter_pairing_mode(current_slot);
 }
 
 void ble_led(bool value) {
