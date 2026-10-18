@@ -910,10 +910,11 @@ void ble_hid_switch_host(uint8_t slot) {
 
 void ble_enter_pairing_mode(int slot) {
     if (slot < 0 || slot >= MAX_SLOTS) return;
-    // DISCONNECTION_COMPLETE の slot_transition 判定は is_pairing_mode を参照する。
-    // ble_hid_task 側で pending 処理される前に is_pairing_mode が false のままだと
-    // ペアリング広告が止まることがあるため、ここで即 true にする。
-    is_pairing_mode = true;
+    // pairing 開始は「そのスロットにいる場合」に限定する。
+    // 別スロットが指定された場合は、スロット切替完了後に pairing が開始されるよう
+    // is_pairing_mode は即時に更新せず pending 経由にする。
+    const bool start_pairing_now = (slot == current_slot);
+    is_pairing_mode = start_pairing_now;
     schedule_save_radio_off(false); // BL-01: ペアリング開始時はRadio ON
     slot_os[slot] = '-';    // 新規ペアリング時はOS表示をリセット
     oled_set_slot_os(slot, '-');
@@ -958,7 +959,7 @@ void ble_enter_pairing_mode(int slot) {
     pending_is_pairing = true;
     pending_toggle_off = false;
     slot_change_requested = true;
-    current_state = BLE_STATE_PAIRING;
+    current_state = start_pairing_now ? BLE_STATE_PAIRING : BLE_STATE_SWITCHING;
     update_ui_for_state(current_state);
 }
 static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size) {
@@ -1567,6 +1568,37 @@ void ble_pair_new_device(void) {
 void ble_clear_bonds(void) {
     btstack_run_loop_remove_timer(&bl17_cooldown_timer);
     bl17_reject_in_progress = false;
+
+    // 以降の切断完了イベントや切替キューが、all-clear 前の状態を参照しないように
+    // pending / 状態を明示的にクリアする。
+    slot_change_requested = false;
+    pending_slot = -1;
+    pending_is_pairing = false;
+    pending_toggle_off = false;
+    switch_pending = false;
+    is_pairing_mode = false;
+    pairing_start_us = 0;
+
+    // 伝送/送信準備フラグも無効化して、残滓レポートを抑制する。
+    ble_kbd_ready = false;
+    ble_mouse_ready = false;
+    ble_consumer_ready = false;
+    ble_encrypted = false;
+    ble_can_send = true;
+    consecutive_can_send_timeouts = 0;
+    slot_disconnect_after_zero = false;
+    zero_sent_waiting_ack = false;
+    current_peer_addr[0] = '\0';
+
+    // 復帰用タイマ/遷移タイマを停止
+    btstack_run_loop_remove_timer(&slot_transition_timer);
+    btstack_run_loop_remove_timer(&pairing_timeout_timer);
+    btstack_run_loop_remove_timer(&reconnect_timeout_timer);
+    btstack_run_loop_remove_timer(&disconnect_timeout_timer);
+    btstack_run_loop_remove_timer(&conn_handshake_timeout_timer);
+    btstack_run_loop_remove_timer(&conn_stabilize_timer);
+    btstack_run_loop_remove_timer(&can_send_timeout_timer);
+
     if (con_handle != HCI_CON_HANDLE_INVALID) {
         gap_disconnect(con_handle);
     }
