@@ -9,6 +9,26 @@
 
 ---
 
+## 2026-10-18 (BL-43 P1 対策コミット)
+
+- **BL-43 P1 対策を `bl43_bt_root_cause` ブランチにコミット (beeb02f)**:
+  - `firmware/src/btstack_config.h`: 上流 pico-examples 準拠の CYW43 共有バス
+    オーバーラン対策 — `MAX_NR_CONTROLLER_ACL_BUFFERS 3`,
+    `MAX_NR_CONTROLLER_SCO_PACKETS 3`, `ENABLE_HCI_CONTROLLER_TO_HOST_FLOW_CONTROL`
+    (`HCI_HOST_ACL_PACKET_LEN 1024` / `NUM 3` + SCO 必須ペア)。既知事例:
+    6-8 回の接続/切断周期でスタック沈黙 (pico-sdk #2181 / btstack #654) —
+    本現象の「切断ループ→電源再投入のみ復旧」と整合
+  - `firmware/src/ble_hid.cc`: メインループ側の BTstack API 入口
+    5 関数 (ble_switch_slot / ble_enter_pairing_mode / ble_clear_bonds /
+    ble_hid_task / ble_hid_kick_reconnect) を ble_lock/unlock で包装。
+    本体は `*_locked` ヘルパに分離。async context ロックは
+    recursive_mutex 実装でありネスト・コールバック内再取得は安全なことを確認。
+    TLV 遅延保存は save_slot_timer (非同期コンテキスト内) 実行なので追加ロック不要
+  - ビルド検証: ENABLE_BLE=ON/OLED=ON (DP_PIN=2) と BLE-OFF スタブ構成で
+    warning 0 / error 0
+- **STATUS: 実機 soak test 待ち**。ループ再発消失を確認後 feature へマージ。
+  再発する場合は P2 (reconnect チェーンへの 30s 降格 / RF・電源測定) に着手
+
 ## 2026-10-18 (後半・シルフィ並行作業)
 
 - **BL-43 根本原因調査を開始** (ルディ指摘: 旧メモは復旧手法のみで cause 掃討欠落。仰る通り):
