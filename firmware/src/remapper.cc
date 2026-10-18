@@ -14,6 +14,7 @@
 #include "descriptor_parser.h"
 #include "globals.h"
 #include "our_descriptor.h"
+#include "oled.h"
 #include "platform.h"
 #include "remapper.h"
 
@@ -2048,6 +2049,7 @@ void device_connected_callback(uint16_t interface, uint16_t vid, uint16_t pid, u
     if (our_descriptor->device_connected != nullptr) {
         our_descriptor->device_connected(interface, vid, pid);
     }
+    oled_request_usb_ports_refresh();
 }
 
 void device_disconnected_callback(uint8_t dev_addr) {
@@ -2060,6 +2062,7 @@ void device_disconnected_callback(uint8_t dev_addr) {
         active_ports_mask &= ~(1 << hub_port);
     }
     hub_ports.erase(dev_addr);
+    oled_request_usb_ports_refresh();
 }
 
 uint16_t handle_get_report0(uint8_t report_id, uint8_t* buffer, uint16_t reqlen) {

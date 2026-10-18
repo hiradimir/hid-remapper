@@ -33,6 +33,8 @@ void oled_notify_tx(void);
 
 // W-01/W-17: USBポートのデバイス種別を定期判定し表示更新
 void oled_update_usb_ports(void);
+// BL-40: 接続・切断イベント直後の即時再判定要求
+void oled_request_usb_ports_refresh(void);
 
 #else
 
@@ -49,6 +51,7 @@ static inline void oled_set_status(const char* status_msg) { (void)status_msg; }
 static inline void oled_set_peer_addr(const char* peer_addr_str) { (void)peer_addr_str; }
 static inline void oled_notify_tx(void) {}
 static inline void oled_update_usb_ports(void) {}
+static inline void oled_request_usb_ports_refresh(void) {}
 
 #endif
 
