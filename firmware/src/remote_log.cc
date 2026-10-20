@@ -32,7 +32,6 @@ extern "C" {
 #include <lwip/inet.h>
 #include <lwip/netif.h>
 #include <lwip/dhcp.h>
-
 #if __has_include("remote_log_net.h")
 #include "remote_log_net.h"
 #else
@@ -59,6 +58,17 @@ extern "C" {
 
 #ifndef RLOG_DATAGRAM_MAX
 #define RLOG_DATAGRAM_MAX 512
+#endif
+
+// --- 静的 IP (任意; この 3 つが揃ったときだけ DHCP を停止して静的にする) ---
+#ifndef RLOG_STATIC_IP
+#define RLOG_STATIC_IP ""
+#endif
+#ifndef RLOG_STATIC_GATEWAY
+#define RLOG_STATIC_GATEWAY ""
+#endif
+#ifndef RLOG_STATIC_NETMASK
+#define RLOG_STATIC_NETMASK ""
 #endif
 
 // 1 でリングから排水した行を stdio (UART) にもミラーする (ベンチ bring-up 用)。
@@ -104,6 +114,11 @@ static int udp_state = UDP_CLOSED;
 static struct udp_pcb *rl_pcb = nullptr;
 static ip_addr_t rl_target_addr;
 static bool rl_target_valid = false;
+
+static bool rl_static_valid = false;
+static ip_addr_t rl_static_ip;
+static ip_addr_t rl_static_gw;
+static ip_addr_t rl_static_nm;
 
 static uint64_t next_task_us = 0;       // タスク内部スロットリング
 static uint64_t next_connect_attempt_us = 0;
@@ -282,6 +297,28 @@ static void udp_close_cleanup(void) {
     udp_state = UDP_CLOSED;
 }
 
+// 静的 IP の適用 (DHCP を止めて直接アドレスを置く)。再接続後の再適用は netif の
+// アドレスが未設定 (0.0.0.0) のときに行うので冪等
+static void apply_static_addr(void) {
+    struct netif *n = &cyw43_state.netif[CYW43_ITF_STA];
+    cyw43_arch_lwip_begin();
+    bool need = (ip_2_ip4(&n->ip_addr)->addr == 0);
+    if (need) {
+        struct dhcp *d = netif_dhcp_data(n);
+        if (d != nullptr) {
+            dhcp_stop(n);
+        }
+        netif_set_addr(n, &rl_static_ip, &rl_static_nm, &rl_static_gw);
+    }
+    cyw43_arch_lwip_end();
+    if (need) {
+        remote_log_eventf("STATIC IP %s gw=%s nm=%s",
+                          ip4addr_ntoa(ip_2_ip4(&rl_static_ip)),
+                          ip4addr_ntoa(ip_2_ip4(&rl_static_gw)),
+                          ip4addr_ntoa(ip_2_ip4(&rl_static_nm)));
+    }
+}
+
 static void wifi_task(uint64_t now_us) {
     if (RLOG_WIFI_SSID[0] == '\0') {
         return; // 設定なし → 完全惰性
@@ -318,6 +355,9 @@ static void wifi_task(uint64_t now_us) {
                 wifi_state = WIFI_IDLE;
                 next_connect_attempt_us = now_us + RLOG_CONNECT_RETRY_MS * 1000ULL;
                 udp_close_cleanup();
+            } else if (link == CYW43_LINK_NOIP && rl_static_valid) {
+                // DHCP を待たず静的アドレスを置く (再接続後も 0.0.0.0 になったら再適用)
+                apply_static_addr();
             } else if (connect_started_us != 0 &&
                        now_us > connect_started_us + RLOG_CONNECT_TIMEOUT_MS * 1000ULL) {
                 // イベント無しの滞留 (スキャン帰属なし等) を検知して再試行
@@ -421,6 +461,19 @@ void remote_log_init(void) {
     if (RLOG_TARGET_IP[0] != '\0') {
         rl_target_valid = ipaddr_aton(RLOG_TARGET_IP, &rl_target_addr);
     }
+
+    // 静的 IP (3 揃いで有効)
+    rl_static_valid =
+        RLOG_STATIC_IP[0] != '\0' && RLOG_STATIC_GATEWAY[0] != '\0' && RLOG_STATIC_NETMASK[0] != '\0' &&
+        ipaddr_aton(RLOG_STATIC_IP, &rl_static_ip) &&
+        ipaddr_aton(RLOG_STATIC_GATEWAY, &rl_static_gw) &&
+        ipaddr_aton(RLOG_STATIC_NETMASK, &rl_static_nm);
+    if (rl_static_valid) {
+        apply_static_addr();
+    }
+    remote_log_eventf("RLOG init target=%s:%d ssid=%s ip=%s",
+                      RLOG_TARGET_IP, RLOG_TARGET_PORT, RLOG_WIFI_SSID,
+                      rl_static_valid ? "static" : "dhcp");
 
     const uint64_t boot_grace_us = 3000000ULL; // BLE 起動を優先させる 3 秒猶予
     next_connect_attempt_us = time_us_64() + boot_grace_us;

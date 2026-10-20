@@ -12,4 +12,9 @@
 #define RLOG_TARGET_PORT 5140
 // 日本国内の AP (特に 12/13ch) を確実に見つけるため JAPAN を推奨
 #define RLOG_WIFI_COUNTRY CYW43_COUNTRY_JAPAN
+// 静的 IP 運用 (任意)。DHCP が完了しない (T2/T6 表示) 状態の回避策。
+// 3 行とも書いたときだけ有効。ルータの DHCP 配布範囲外のアドレスを選ぶこと
+// #define RLOG_STATIC_IP "192.168.0.240"
+// #define RLOG_STATIC_GATEWAY "192.168.0.1"
+// #define RLOG_STATIC_NETMASK "255.255.255.0"
 #endif
