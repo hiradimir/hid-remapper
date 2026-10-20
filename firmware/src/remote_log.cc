@@ -38,6 +38,8 @@ extern "C" {
 #error "ENABLE_REMOTE_LOG requires src/remote_log_net.h (copy remote_log_net.h.example)"
 #endif
 
+#include "oled.h"
+
 #ifndef RLOG_WIFI_COUNTRY
 #define RLOG_WIFI_COUNTRY 0
 #endif
@@ -292,6 +294,7 @@ static void wifi_task(uint64_t now_us) {
             wifi_state = WIFI_CONNECTING;
             connect_started_us = now_us;
             remote_log_eventf("WIFI connect start ssid=%s", RLOG_WIFI_SSID);
+            oled_set_wifi_state('.');
             cyw43_arch_wifi_connect_async(RLOG_WIFI_SSID, RLOG_WIFI_PASSWORD,
                                           RLOG_WIFI_PASSWORD[0] ? CYW43_AUTH_WPA2_MIXED_PSK : CYW43_AUTH_OPEN);
             return;
@@ -302,8 +305,10 @@ static void wifi_task(uint64_t now_us) {
                 udp_open_locked_helper();
                 const ip4_addr_t *ip = netif_ip4_addr(&cyw43_state.netif[CYW43_ITF_STA]);
                 remote_log_eventf("WIFI JOINED ip=%s", ip4addr_ntoa(ip));
+                oled_set_wifi_state('*');
             } else if (link < 0) {
                 remote_log_eventf("WIFI FAIL st=%d (retry in %ds)", link, RLOG_CONNECT_RETRY_MS / 1000);
+                oled_set_wifi_state('x');
                 wifi_state = WIFI_IDLE;
                 next_connect_attempt_us = now_us + RLOG_CONNECT_RETRY_MS * 1000ULL;
                 udp_close_cleanup();
@@ -311,6 +316,7 @@ static void wifi_task(uint64_t now_us) {
                        now_us > connect_started_us + RLOG_CONNECT_TIMEOUT_MS * 1000ULL) {
                 // イベント無しの滞留 (スキャン帰属なし等) を検知して再試行
                 remote_log_eventf("WIFI TO st=%d (retry in %ds)", link, RLOG_CONNECT_RETRY_MS / 1000);
+                oled_set_wifi_state('x');
                 wifi_state = WIFI_IDLE;
                 next_connect_attempt_us = now_us + RLOG_CONNECT_RETRY_MS * 1000ULL;
             }
@@ -319,6 +325,7 @@ static void wifi_task(uint64_t now_us) {
         case WIFI_JOINED:
             if (link != CYW43_LINK_UP) {
                 remote_log_eventf("WIFI LOST st=%d", link);
+                oled_set_wifi_state('?');
                 wifi_state = WIFI_IDLE;
                 udp_close_cleanup();
                 next_connect_attempt_us = now_us + 3000000ULL;
