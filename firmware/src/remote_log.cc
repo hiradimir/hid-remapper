@@ -328,6 +328,9 @@ static void wifi_task(uint64_t now_us) {
                 int dhcp_to = (d_to != nullptr) ? (int) d_to->state : -1;
                 remote_log_eventf("WIFI TO st=%d dhcp=%d (retry in %ds)", link, dhcp_to,
                                   RLOG_CONNECT_RETRY_MS / 1000);
+                // OLED は T<dhcp 状態> 表示 (2 はスキャン前/未起動に留まり, 6=SELECTING は
+                // DISCOVER 済み OFFER 待ち, 1=REQUESTING は ACK 待ちなどを判別するためのもの)
+                snprintf(code, sizeof(code), "T%d", dhcp_to);
                 oled_set_wifi_state(code);
                 wifi_state = WIFI_IDLE;
                 next_connect_attempt_us = now_us + RLOG_CONNECT_RETRY_MS * 1000ULL;
