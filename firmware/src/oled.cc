@@ -314,12 +314,18 @@ void oled_set_peer_addr(const char* peer_addr_str) {
     }
 }
 
-// BL-39: WiFi 接続状態の 1 文字表示 (' '=無効 / '.'=試行中 / '*'=接続済 / 'x'=失敗 / '?'=喪失)
-static volatile char ui_wifi_char = ' ';
+// BL-39: WiFi 接続状態の表示 ('.'=試行中 '*'=接続済) を Line0 col17 以降に最大 3 文字で出す
+// 失敗系は数字コード: "-1"=FAIL "-2"=SSID無し "-3"=認証失敗 "T??"=滞留タイムアウト "?"=喪失
+static char ui_wifi_str[4] = "";
 
-void oled_set_wifi_state(char c) {
-    if (ui_wifi_char != c) {
-        ui_wifi_char = c;
+void oled_set_wifi_state(const char* s) {
+    char next[4] = "";
+    if (s != nullptr) {
+        strncpy(next, s, sizeof(next) - 1);
+    }
+    if (strncmp(ui_wifi_str, next, sizeof(ui_wifi_str)) != 0) {
+        strncpy(ui_wifi_str, next, sizeof(ui_wifi_str) - 1);
+        ui_wifi_str[sizeof(ui_wifi_str) - 1] = '\0';
         need_redraw = true;
     }
 }
@@ -405,10 +411,9 @@ void oled_task(void) {
     draw_string_6x8(0, 16, line2);
     draw_string_6x8(0, 24, line3);
 
-    // BL-39: WiFi 状態 1 文字を Line0 の col17 (x=102) に重ね描き
+    // BL-39: WiFi 状態文字列を Line0 の col17 (x=102) 以降に最大 3 文字重ね描き
     // (Line0 の col7..19 は空き領域。tx_icon は col20 なので干渉しない)
-    char wifi_char[2] = { (char) ui_wifi_char, '\0' };
-    draw_string_6x8(17 * 6, 0, wifi_char);
+    draw_string_6x8(17 * 6, 0, ui_wifi_str);
 
     // 画面へ転送 (Horizontal addressing: Page 0..3)
     ssd1306_cmd(0x21); ssd1306_cmd(0); ssd1306_cmd(SSD1306_WIDTH - 1);

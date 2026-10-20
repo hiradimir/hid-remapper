@@ -30,7 +30,7 @@ void oled_set_usb_port(uint8_t port, const char* dev_str); // port: 0 (P1), 1 (P
 void oled_set_status(const char* status_msg);
 void oled_set_peer_addr(const char* peer_addr_str);
 void oled_notify_tx(void);
-void oled_set_wifi_state(char c); // BL-39: WiFi 残余文字 (' '=無効/'.'=試行中/'*'=接続済/'x'=失敗/'?'=喪失)
+void oled_set_wifi_state(const char* s); // BL-39: WiFi 状態 (Line0 右側 3 文字。"."=試行中 "*"=接続済 "-3"=BADAUTH "-2"=SSID無し "-1"=FAIL "?"=喪失 "T?"=タイムアウト)
 
 // W-01/W-17: USBポートのデバイス種別を定期判定し表示更新
 void oled_update_usb_ports(void);
@@ -49,7 +49,7 @@ static inline void oled_set_usb_port(uint8_t port, const char* dev_str) { (void)
 static inline void oled_set_status(const char* status_msg) { (void)status_msg; }
 static inline void oled_set_peer_addr(const char* peer_addr_str) { (void)peer_addr_str; }
 static inline void oled_notify_tx(void) {}
-static inline void oled_set_wifi_state(char c) { (void)c; }
+static inline void oled_set_wifi_state(const char* s) { (void)s; }
 static inline void oled_update_usb_ports(void) {}
 
 #endif
