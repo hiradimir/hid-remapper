@@ -20,6 +20,7 @@
 #include <string.h>
 
 #include <pico/cyw43_arch.h>
+#include <pico/stdio.h>
 #include <pico/time.h>
 extern "C" {
 #include <hardware/sync/spin_lock.h>
@@ -55,6 +56,12 @@ extern "C" {
 
 #ifndef RLOG_DATAGRAM_MAX
 #define RLOG_DATAGRAM_MAX 512
+#endif
+
+// 1 でリングから排水した行を stdio (UART) にもミラーする (ベンチ bring-up 用)。
+// メインループの排水時にのみ出すので、BLE リアルタイム経路に printf は発生しない
+#ifndef RLOG_STDIO_MIRROR
+#define RLOG_STDIO_MIRROR 1
 #endif
 
 #define RLOG_RING_SIZE 4096
@@ -97,7 +104,10 @@ static bool rl_target_valid = false;
 
 static uint64_t next_task_us = 0;       // タスク内部スロットリング
 static uint64_t next_connect_attempt_us = 0;
+static uint64_t connect_started_us = 0;
 static uint64_t next_ping_us = 0;
+
+#define RLOG_CONNECT_TIMEOUT_MS 45000 // 接続試行の滞留検知 (BADAUTH等のイベント無し滞留含む)
 
 // ---------------------------------------------------------------------------
 // リングバッファ (IRQ マスク付き spin lock 保護 — 任意コンテキストからの追記に対応)
@@ -171,8 +181,8 @@ void remote_log_count_forward(void) { count_forward++; }
 // ---------------------------------------------------------------------------
 
 // 未送信データを 1 データグラムにまとめて送る。失敗時は破棄せず次回再試行。
+// UDP 未接続でも排水は行い (stdio ミラーで UART に出る)、bring-up を観測可能にする。
 static void udp_flush_pending(uint64_t now_us) {
-    if (udp_state != UDP_OPENED || rl_pcb == nullptr) return;
     (void) now_us;
 
     // 先頭から行 ('\n' 単位) を束ねる。最大 RLOG_DATAGRAM_MAX バイト。
@@ -204,7 +214,14 @@ static void udp_flush_pending(uint64_t now_us) {
     rl_head = new_head;
     rl_exit(save);
 
+#if RLOG_STDIO_MIRROR
+    // ベンチ観測用: 排水した行をそのまま UART へ
+    printf("%.*s", (int) chunk_len, (const char *) chunk);
+    stdio_flush();
+#endif
+
     // UDP 送信 (lwIP 呼び出しは必ずメインループから cyw43_arch_lwip_begin で包む)
+    if (udp_state != UDP_OPENED || rl_pcb == nullptr) return;
     struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, (u16_t) chunk_len, PBUF_RAM);
     if (p == nullptr) {
         rl_send_errors++;
@@ -273,6 +290,7 @@ static void wifi_task(uint64_t now_us) {
         case WIFI_IDLE:
             if (now_us < next_connect_attempt_us) return;
             wifi_state = WIFI_CONNECTING;
+            connect_started_us = now_us;
             remote_log_eventf("WIFI connect start ssid=%s", RLOG_WIFI_SSID);
             cyw43_arch_wifi_connect_async(RLOG_WIFI_SSID, RLOG_WIFI_PASSWORD,
                                           RLOG_WIFI_PASSWORD[0] ? CYW43_AUTH_WPA2_MIXED_PSK : CYW43_AUTH_OPEN);
@@ -289,6 +307,12 @@ static void wifi_task(uint64_t now_us) {
                 wifi_state = WIFI_IDLE;
                 next_connect_attempt_us = now_us + RLOG_CONNECT_RETRY_MS * 1000ULL;
                 udp_close_cleanup();
+            } else if (connect_started_us != 0 &&
+                       now_us > connect_started_us + RLOG_CONNECT_TIMEOUT_MS * 1000ULL) {
+                // イベント無しの滞留 (スキャン帰属なし等) を検知して再試行
+                remote_log_eventf("WIFI TO st=%d (retry in %ds)", link, RLOG_CONNECT_RETRY_MS / 1000);
+                wifi_state = WIFI_IDLE;
+                next_connect_attempt_us = now_us + RLOG_CONNECT_RETRY_MS * 1000ULL;
             }
             return;
 
@@ -338,6 +362,16 @@ void remote_log_init(void) {
     rl_cs_ready = true;
     rl_head = 0;
     rl_tail = 0;
+
+    // STA モードの起動 (cyw43 自体は ble_hid_init() 内で cyw43_arch_init() 済み)。
+    // ※これを呼ばないと STA netif が立たず link は永遠に DOWN のまま何も起きない。
+    // カントリー指定がある場合はドライバ API に直接渡す (WORLDWIDE だと 12/13ch に
+    // 置かれた AP を見つけられない可能性があるため、日本では JAPAN 指定を推奨)
+#ifdef RLOG_WIFI_COUNTRY
+    cyw43_wifi_set_up(&cyw43_state, CYW43_ITF_STA, true, RLOG_WIFI_COUNTRY);
+#else
+    cyw43_arch_enable_sta_mode();
+#endif
 
     rl_target_valid = false;
     if (RLOG_TARGET_IP[0] != '\0') {

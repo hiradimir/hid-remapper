@@ -10,4 +10,6 @@
 #define RLOG_WIFI_PASSWORD "your-wifi-password"
 #define RLOG_TARGET_IP "192.168.0.100" // 収集先マシンのローカル IP
 #define RLOG_TARGET_PORT 5140
+// 日本国内の AP (特に 12/13ch) を確実に見つけるため JAPAN を推奨
+#define RLOG_WIFI_COUNTRY CYW43_COUNTRY_JAPAN
 #endif
