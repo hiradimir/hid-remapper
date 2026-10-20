@@ -98,6 +98,14 @@ Raspberry Pi Pico W (RP2040) による **BLE HID → USB HID リマッパー**
 構成: firmware/ ルートの CMakeLists 1 本。devcontainer (workspace=/workspace) で
 `PICO_BOARD=pico_w ENABLE_BLE=ON ENABLE_OLED=ON` の実ビルド実績あり。成果物は remapper.uf2。
 
+- **名前付き UF2 の保管は `firmware/artifacts/` へコピー** (gitignore 済 —
+  `git clean -df` の対象外)。build/ 直下は作業用とし、消してよい (2026-10-21 運用変更:
+  build/ 直下保管 UF2 が定石ビルドの rm -rf で消滅した事故の再発防止)
+- BL-39 検証ビルド (`-DENABLE_REMOTE_LOG=ON`) は `src/remote_log_net.h` が必要。
+  **このファイルはルディ管理 (SSID/パスをエージェント非接触とする)・gitignore 済**。
+  テンプレートは `src/remote_log_net.h.example`
+- 受信側: `python3 tools/udp_log_listener.py [port]` (既定 5140)
+
 - コンテナ内 (通常ビルド・ルディ実運用):
 
     cd /workspace/firmware

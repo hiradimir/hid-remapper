@@ -9,7 +9,36 @@
 
 ---
 
-## 2026-10-20 BL-43/BL-45 調査: A 版フロー制御で半日長時間検証 → 「処理ループ沈黙 (ウェッジ)」の実観察
+## 2026-10-21 BL-39 実装: Wi-Fi UDP リモートログ (opt-in) + 名前付き UF2 保管運用の変更
+
+- **BL-39 実装コミット `b50ad2e`** (ブランチ `bl39_remote_log`、`25a4bd7` から分岐):
+  - 新規 `firmware/src/remote_log.{h,cc}`: 行単位リングバッファ (IRQ マスク付き spin lock、
+    溢れ時 Drop-Oldest) → **メインループのみ**で Wi-Fi 非同期接続 + UDP フラッシュ +
+    5s ALIVE ピング (`up= wifi= in= fwd= q= dr= dg= se=`)。リアルタイム経路 (BLE コールバック)
+    からの追記は短いコピーのみ (不変条件 7 準拠)
+  - **診断の勘所**: 沈黙時に ALIVE ピング停止=メインループ全体の死 / `in>0 fwd=0`=転送経路の死 /
+    `fwd>0` で無応答=BLE 送信経路の死、と 3 分割できる
+  - lwIP (NO_SYS) は `pico_cyw43_arch_lwip_threadsafe_background` への差し替えで同居
+    (async_context 機構は none 版と共通のため BLE 伺服体制は不変)。`src/lwipopts.h` 追加
+    (MEM_LIBC_MALLOC は threadsafe_background と非互換のため既定プール確保)
+  - `ble_hid.cc` にフック約 20 点 (HCI 接続/切断 (reason)/暗号化/MTU/購読、切替・ペアリング・
+    ボンドクリア、全タイマハンドラ)。いずれも `remote_log_eventf` 1 行追加で printf は不変
+  - **opt-in 設計**: `-DENABLE_REMOTE_LOG=ON` かつ `src/remote_log_net.h` (gitignore・ルディ管理)
+    がないと CMake が停止。OFF 構成は lwIP もリンクせず既存動作完全不変 (OFF/ON 両ビルド通過確認)
+  - 受信ツール: `tools/udp_log_listener.py` (既定 udp/5140)
+- **事故**: 基線再ビルド時、定石コマンド (`rm -rf build`) で build/ 直下保管の名前付き UF2 資料群
+  (bl45 関連・基点版 11 本) を消失。**ルディ判断で roll-forward** (必要時はコミットから再ビルド。
+  なお GATT DB Hash が当該環境ではランダム値のため再ビルドは機能同等・バイナリ非一致)。
+  再発防止として**名前付き UF2 の保管先を `firmware/artifacts/` (gitignore・`git clean -df` 対象外) に変更**、
+  build/ は作業用として消してよい運用に変更 (AGENTS.md ビルド節に追記)。
+  現 HEAD の OFF 構成ビルドを `firmware/artifacts/remapper_bl39_off_b50ad2e.uf2` として保管
+  (= A 版相当 (フロー制御込み) + BL-39 コード無効化分)。
+- **進行中**: ルディが secret ファイル (`remote_log_net.h`) を自前作成 (エージェント非接触) →
+  実機焼き → Wi-Fi 共存時の BLE 安定性確認 → 履歴へ
+
+---
+
+## 2026-10-20 BL-43/BL-45 調査: A 版フロー制御で半日長時間検証 → 「処理ループ沈黙 (ウェッジ)」の実観測
 
 - **A 版** = `firmware/build/remapper_bl45_lockmsg_flow.uf2` (= HEAD `3933dba` (BL-04 完成品・スイッチロック・心拍ドット) + `btstack_config.h` BL-43 フロー制御ブロック)。**07:25 焼込み**。
 - **Mac 側 bluetoothd ログによる遠隔観測** (Pico 側 UART 無しの代用)。証跡: `~/Desktop/bt_log_0725-1308_6h.log` (07:25〜13:08, 33MB)。

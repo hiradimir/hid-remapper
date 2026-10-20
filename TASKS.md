@@ -21,6 +21,7 @@
 |----|----------|------|------------|
 | BL-34 | OLED表示改善・低輝度スクリーンセーバー機能 | **一部取り込み・実機OK** (bl04_pairing_hotkey: 点滅ドット / ペアリングカウントダウン / 切替禁止メッセージ, 2026-10-19 実機確認済)。**残り (スクリーンセーバー・Toast・バウンスロゴ) は `wip/bl34-oled` (ec78a64) 側のまま未取り込み・検証待ち** | 旧 agent パッチ (3段階減光 0x8F→0x30→0x05 + バウンスロゴ, Toast, ペアリング60s/再接続30s カウントダウン) を評価・修正済: Line3 の21文字超え欠け直し、extern "C" 宣言廃止→ble_hid.h include、reconnect_start_us 未適用経路補完。BLE-ON/OFF 両ビルド通過 (warning 0)。作業ツリーにあり未コミット・stash 空。実機でスクリーンセーバー遷移・ダウンだれ (BL-37 常在要素の切分け) を確認 → OK ならコミット |
 | BL-01 | 再起動時の BT-OFF (スタンバイ) 状態の Flash 保持 | 検証中 (286c1b3コミット済) | スロットトグルOFF状態で再起動した際、自動でアドバタイズ開始せず STANDBY_SILENT を維持 |
+| BL-39 | Wi-Fi (UDP) 経由のリモートログ送信 | **実装コミット済 (`b50ad2e`、ブランチ `bl39_remote_log`)・要実機検証** | リングバッファ (IRQ マスク spin lock・Drop-Oldest) → メインループのみで Wi-Fi 非同期接続 + UDP フラッシュ + 5s ALIVE ピング (in/fwd/q カウンタで沈黙の 3 分割診断可)。lwIP は `pico_cyw43_arch_lwip_threadsafe_background` 差し替え (async_context 共通で BLE 体制不変)。**opt-in**: `-DENABLE_REMOTE_LOG=ON` + `src/remote_log_net.h` (ルディ管理・gitignore)。OFF 構成は既存動作完全不変 (ビルド確認済)。受信は `tools/udp_log_listener.py`。**次**: ルディが secret ファイル自前作成 → 実機焼き → BLE 安定性 (共存) 確認 → 履歴へ |
 
 ---
 
@@ -36,7 +37,6 @@
 | BL-36 | スロット切替遷移中のマウス入力遅延 (1秒)・キーボード入力不全調査 | 中 | BLE通信安定性 | 切替中 (未接続〜再接続中) のマウス連続操作で切替後に約1秒遅延・キーボード入力不全 (UARTログなし)。レポートバッファ滞留、Drop-Oldest、接続直後の can_send_now スタールを調査 |
 | BL-37 | OLED 表示乱れ・更新ムラ解消 (I2C 100kHz化) および Flash書き込み時 Core 1 ハング防止 | 低 | HW / マルチコア安定性 | ハウジング組み込みで配線短縮済み。安定稼働中のため再現待ち |
 | BL-38 | Windows 環境の BLE 接続性・再接続性改善 | 低 | 改善 | 再現せず (Flash内旧ボンドゴミ起因の可能性大)。OLED 可視化 C:E_ K_ M_ を残して監視 |
-| BL-39 | Wi-Fi (UDP / Syslog) 経由のリモートログ送信 | 中 | デバッグ / 通信 | ハウジング運用 (UART未接続) 時のリアルタイムログ収集。BLE HID への影響最小化のため重要イベント送信・バッファリング等の共存制御を考慮 |
 | BL-40 | USB ホストのデバイス種別判定の即時化・周期短縮 **[実装完了・要実機確認]** | 低 | コード品質 / USB | oled_update_usb_ports() 周期 5s→500ms + `oled_request_usb_ports_refresh()` (接続/切断コールバックから即時再判定要求) → ブランチ `bl40_usb_detect_fast` (df59cd2, bl20 マージ込み)。実機の表示ラグ確認待ち |
 | BL-41 | OS 連動 Modifiers (Cmd ⇔ Ctrl) 自動スワップ | 中 | キーマップ / BLE | スロットの OS 判定結果 (W, A, M, I) に基づき、Windows/Android 接続時は Cmd(GUI) と Ctrl を自動スワップ |
 | BL-42 | モバイルバッテリー運用時の Keep-Alive パルス制御・Quiet Mode | 低 | HW / 電源 | キーボード抜去時のバッテリー自動給電停止・軽負荷バーストでのピエゾ鳴き対策。空き GPIO (GP6 等) FET+47Ω パルス疑似負荷、または CYW43 WL_GPIO1 (Quiet Mode) 検証 |
