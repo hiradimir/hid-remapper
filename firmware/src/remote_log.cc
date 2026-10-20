@@ -31,6 +31,7 @@ extern "C" {
 #include <lwip/ip4_addr.h>
 #include <lwip/inet.h>
 #include <lwip/netif.h>
+#include <lwip/dhcp.h>
 
 #if __has_include("remote_log_net.h")
 #include "remote_log_net.h"
@@ -322,7 +323,11 @@ static void wifi_task(uint64_t now_us) {
                 // イベント無しの滞留 (スキャン帰属なし等) を検知して再試行
                 char code[4];
                 snprintf(code, sizeof(code), "T%d", link);
-                remote_log_eventf("WIFI TO st=%s (retry in %ds)", code, RLOG_CONNECT_RETRY_MS / 1000);
+                struct netif *nif_to = &cyw43_state.netif[CYW43_ITF_STA];
+                struct dhcp *d_to = (nif_to != nullptr) ? netif_dhcp_data(nif_to) : nullptr;
+                int dhcp_to = (d_to != nullptr) ? (int) d_to->state : -1;
+                remote_log_eventf("WIFI TO st=%d dhcp=%d (retry in %ds)", link, dhcp_to,
+                                  RLOG_CONNECT_RETRY_MS / 1000);
                 oled_set_wifi_state(code);
                 wifi_state = WIFI_IDLE;
                 next_connect_attempt_us = now_us + RLOG_CONNECT_RETRY_MS * 1000ULL;
@@ -362,8 +367,30 @@ void remote_log_task(void) {
         next_ping_us = now_us + RLOG_PING_INTERVAL_MS * 1000ULL;
         size_t pending = (size_t) ((ssize_t) rl_tail - (ssize_t) rl_head);
         if ((ssize_t) pending < 0) pending += RLOG_RING_SIZE;
-        remote_log_eventf("ALIVE up=%ds wifi=%s in=%u fwd=%u q=%u dr=%u dg=%u se=%u",
+
+        //診断: DHCP 状態機の位置も添える (lwIP: 2=INIT 6=SELECTING 1=REQUESTING 10=BOUND)
+        struct netif *nif = &cyw43_state.netif[CYW43_ITF_STA];
+        int dhcp_state = -1;
+        int dhcp_tries = 0;
+        const char *ip_str = "0.0.0.0";
+        static char ip_buf[16];
+        cyw43_arch_lwip_begin();
+        if (nif != nullptr) {
+            struct dhcp *d = netif_dhcp_data(nif);
+            if (d != nullptr) {
+                dhcp_state = (int) d->state;
+                dhcp_tries = (int) d->tries;
+            }
+            strncpy(ip_buf, ip4addr_ntoa(netif_ip4_addr(nif)), sizeof(ip_buf) - 1);
+            ip_buf[sizeof(ip_buf) - 1] = '\0';
+            ip_str = ip_buf;
+        }
+        cyw43_arch_lwip_end();
+
+        remote_log_eventf("ALIVE up=%ds wifi=%s(%d) ip=%s dhcp=%d/%d in=%u fwd=%u q=%u dr=%u dg=%u se=%u",
                           (unsigned) (now_us / 1000000ULL), wifi_state_name(wifi_state),
+                          cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA),
+                          ip_str, dhcp_state, dhcp_tries,
                           (unsigned) count_ingest, (unsigned) count_forward,
                           (unsigned) pending, (unsigned) rl_drops,
                           (unsigned) rl_datagrams, (unsigned) rl_send_errors);
