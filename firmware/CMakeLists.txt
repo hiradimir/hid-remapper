@@ -33,6 +33,7 @@ endif()
 
 option(ENABLE_BLE "Enable Bluetooth Low Energy support (requires pico_w)")
 option(ENABLE_OLED "Enable SSD1306 OLED display" OFF)
+option(ENABLE_REMOTE_LOG "Enable Wi-Fi (UDP) remote logging (requires pico_w + src/remote_log_net.h)" OFF)
 
 if(ENABLE_BLE AND NOT PICO_BOARD STREQUAL "pico_w")
     message(FATAL_ERROR "ENABLE_BLE requires PICO_BOARD=pico_w")
@@ -98,11 +99,24 @@ if(ENABLE_BLE)
     target_link_libraries(remapper
         pico_btstack_ble
         pico_btstack_cyw43
-        pico_cyw43_arch_none
         hardware_flash
         pico_btstack_flash_bank
         pico_multicore
     )
+
+    if(ENABLE_REMOTE_LOG)
+        # BL-39: Wi-Fi (lwIP) を同居させる。cyw43 arch を none → lwip_threadsafe_background に差し替える
+        # (CHW43 の non-BLE 操作・async_context 機構は共通のため BLE 側の体制は変化しない)
+        if(NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/src/remote_log_net.h)
+            message(FATAL_ERROR "ENABLE_REMOTE_LOG requires src/remote_log_net.h (copy from src/remote_log_net.h.example)")
+        endif()
+        target_sources(remapper PRIVATE src/remote_log.cc)
+        target_compile_definitions(remapper PUBLIC ENABLE_REMOTE_LOG=1)
+        target_link_libraries(remapper pico_cyw43_arch_lwip_threadsafe_background)
+    else()
+        target_compile_definitions(remapper PUBLIC ENABLE_REMOTE_LOG=0)
+        target_link_libraries(remapper pico_cyw43_arch_none)
+    endif()
 endif()
 
 target_include_directories(remapper PRIVATE

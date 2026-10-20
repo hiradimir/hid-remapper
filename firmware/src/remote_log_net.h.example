@@ -1,0 +1,13 @@
+// BL-39: リモートログ設定テンプレート
+//
+// このファイルを remote_log_net.h としてコピーして値を書くこと。
+// (src/remote_log_net.h は gitignore 対象 — SSID/パスワードはコミットしない)
+//
+// 受信側コマンド例 (収集先のマシンで実行):
+//   nc -lu 5140          # ターゲットポートを合わせる
+#ifndef RLOG_WIFI_SSID
+#define RLOG_WIFI_SSID "your-wifi-ssid"
+#define RLOG_WIFI_PASSWORD "your-wifi-password"
+#define RLOG_TARGET_IP "192.168.0.100" // 収集先マシンのローカル IP
+#define RLOG_TARGET_PORT 5140
+#endif
