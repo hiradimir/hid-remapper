@@ -286,7 +286,10 @@ static void wifi_task(uint64_t now_us) {
         return; // 設定なし → 完全惰性
     }
 
-    int link = cyw43_wifi_link_status(&cyw43_state, CYW43_ITF_STA);
+    // 注意: ここは IP 取得まで見る cyw43_tcpip_link_status() を使うこと。
+    // cyw43_wifi_link_status() はドライバレベル (関連付けのみ) で、関連付け後は
+    // 永遠に CYW43_LINK_JOIN のまま返すため DHCP 完了 (LINK_UP) を検出できない
+    int link = cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA);
 
     switch (wifi_state) {
         case WIFI_IDLE:
