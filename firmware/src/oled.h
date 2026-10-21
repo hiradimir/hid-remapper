@@ -40,6 +40,8 @@ void oled_set_reconnect_remaining_sec(int sec);
 void oled_update_usb_ports(void);
 // BL-40: 接続・切断イベント直後の即時再判定要求
 void oled_request_usb_ports_refresh(void);
+// BL-39: WiFi 状態 (Line0 右端 3 文字。"."=試行中 "*"=接続済 "-3"=BADAUTH "?"=喪失 "T6"=タイムアウト "!07"=送信エラー数)
+void oled_set_wifi_state(const char* s);
 
 #else
 
@@ -62,6 +64,7 @@ static inline void oled_set_pairing_remaining_sec(int sec) { (void)sec; }
 static inline void oled_set_reconnect_remaining_sec(int sec) { (void)sec; }
 static inline void oled_update_usb_ports(void) {}
 static inline void oled_request_usb_ports_refresh(void) {}
+static inline void oled_set_wifi_state(const char* s) { (void)s; }
 
 #endif
 

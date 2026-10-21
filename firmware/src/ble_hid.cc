@@ -20,6 +20,7 @@
 #include "btstack_tlv_flash_bank.h"
 #include "ble/le_device_db_tlv.h"
 #include "oled.h"
+#include "remote_log.h"
 
 
 // Flash 末尾手前の 8KB（セクタ 2 個分）を TLV 領域に割り当て
@@ -209,6 +210,10 @@ static int consecutive_can_send_timeouts = 0;
 
 static int current_slot = 0;
 
+uint32_t ble_hid_get_connected_slot_mask(void) {
+    return (current_state == BLE_STATE_CONNECTED) ? (1u << current_slot) : 0;
+}
+
 static bool is_pairing_mode = false;
 static btstack_timer_source_t pairing_timeout_timer;
 static btstack_timer_source_t disconnect_timeout_timer;
@@ -322,11 +327,13 @@ static void can_send_timeout_handler(btstack_timer_source_t *ts) {
         consecutive_can_send_timeouts++;
         printf("[BT] WARNING: CAN_SEND_NOW watchdog timed out (2000ms, count=%d). Resetting flow control.\r\n",
                consecutive_can_send_timeouts);
+        remote_log_eventf("CANSEND-TO n=%d", consecutive_can_send_timeouts);
 
         // 2回連続（4秒間）完了通知が途絶えた場合はBTstack/CYW43バッファの完全膠着と判定
         // ゾンビ状態での永久停止を防ぎ、クリーンに切断して自動再接続シーケンスへ移行
         if (consecutive_can_send_timeouts >= 2) {
             printf("[BT] CRITICAL: BLE transmission deadlocked for 4000ms. Forcing link disconnect & clean recovery.\r\n");
+            remote_log_eventf("FLOWCTL-DEADLOCK force-disc");
             consecutive_can_send_timeouts = 0;
             ble_can_send = true;
             gap_disconnect(con_handle);
@@ -341,6 +348,7 @@ static void can_send_timeout_handler(btstack_timer_source_t *ts) {
 static void reconnect_timeout_handler(btstack_timer_source_t *ts) {
     if (con_handle == HCI_CON_HANDLE_INVALID && current_state == BLE_STATE_RECONNECTING) {
         printf("[BT] Reconnection timeout (30s expired). Radio OFF.\r\n");
+        remote_log_eventf("RECONN-TO radio-off");
         gap_advertisements_enable(0);
         current_state = BLE_STATE_STANDBY_SILENT;
         update_ui_for_state(current_state);
@@ -351,6 +359,7 @@ static void reconnect_timeout_handler(btstack_timer_source_t *ts) {
 static void conn_handshake_timeout_handler(btstack_timer_source_t *ts) {
     if (con_handle != HCI_CON_HANDLE_INVALID && current_state == BLE_STATE_CONNECTING) {
         printf("[BT] Handshake timeout (10s expired without encryption/subscription). Disconnecting stalled link.\r\n");
+        remote_log_eventf("HS-TO 10s force-disc");
         gap_disconnect(con_handle);
     }
 }
@@ -359,6 +368,7 @@ static void conn_stabilize_timer_handler(btstack_timer_source_t *ts) {
     conn_stabilize_active = false;
     if (con_handle != HCI_CON_HANDLE_INVALID && ble_kbd_ready && ble_encrypted) {
         printf("[BT] Connection stabilized -> CONNECTED (Ready to send)\r\n");
+        remote_log_eventf("CONNECTED slot=%d", current_slot + 1);
         btstack_run_loop_remove_timer(&conn_handshake_timeout_timer);
         current_state = BLE_STATE_CONNECTED;
         update_ui_for_state(current_state);
@@ -716,6 +726,7 @@ static void slot_transition_timer_handler(btstack_timer_source_t *ts) {
         }
         printf("[BT] Slot transition margin (150ms) complete -> apply_slot_identity(Slot %d, pairing=%d)\r\n",
                slot + 1, is_pairing_mode);
+        remote_log_eventf("SLOT-APPLY slot=%d pair=%d", slot + 1, is_pairing_mode);
         apply_slot_identity(slot);
     }
 }
@@ -724,6 +735,7 @@ static void schedule_slot_transition(int slot, bool is_pairing) {
     slot_transition_target = slot;
     slot_transition_pairing = is_pairing;
     printf("[BT] Starting 150ms slot transition margin: Slot %d (pairing=%d)\r\n", slot + 1, is_pairing);
+    remote_log_eventf("SLOT-MARGIN slot=%d pair=%d", slot + 1, is_pairing);
     btstack_run_loop_remove_timer(&slot_transition_timer);
     btstack_run_loop_set_timer_handler(&slot_transition_timer, slot_transition_timer_handler);
     btstack_run_loop_set_timer(&slot_transition_timer, 150);
@@ -734,6 +746,7 @@ static void schedule_slot_transition(int slot, bool is_pairing) {
 static void disconnect_timeout_handler(btstack_timer_source_t *ts) {
     if (con_handle != HCI_CON_HANDLE_INVALID) {
         printf("[BT] Disconnect timeout (host suspended/unresponsive). Force-closing handle 0x%04X\r\n", con_handle);
+        remote_log_eventf("DISC-TO force-close");
         con_handle = HCI_CON_HANDLE_INVALID;
         ble_kbd_ready = false;
         ble_mouse_ready = false;
@@ -768,6 +781,7 @@ static void disconnect_timeout_handler(btstack_timer_source_t *ts) {
 static void bl17_cooldown_timer_handler(btstack_timer_source_t *ts) {
     if (con_handle == HCI_CON_HANDLE_INVALID && is_pairing_mode) {
         printf("[BT] BL-17 Cooldown expired (2500ms). Resuming pairing advertisements for Slot %d\r\n", current_slot + 1);
+        remote_log_eventf("BL17-COOL resume-adv");
         apply_slot_identity(current_slot);
     }
 }
@@ -847,6 +861,7 @@ static void apply_slot_identity(int slot) {
 
     printf("[BT] <- apply_slot_identity done (state=%d, pairing=%d, bonded=%d). ADDR=%s\r\n",
            current_state, is_pairing_mode, is_bonded, bd_addr_to_str(slot_addr));
+    remote_log_eventf("APPLY-DONE st=%d pair=%d addr=%s", current_state, is_pairing_mode, bd_addr_to_str(slot_addr));
 }
 
 // ホットキーから呼ばれる関数
@@ -866,6 +881,7 @@ static void ble_switch_slot_locked(int slot) {
         // 同一スロットのトグル操作
         if (con_handle != HCI_CON_HANDLE_INVALID) {
             printf("[BT] Slot %d connected -> Disconnecting to turn Radio OFF\r\n", slot + 1);
+            remote_log_eventf("TOGGLE-OFF req (connected) slot=%d", slot + 1);
             pending_slot = slot;
             pending_is_pairing = false;
             pending_toggle_off = true;
@@ -880,6 +896,7 @@ static void ble_switch_slot_locked(int slot) {
                 return;
             }
             printf("[BT] Slot %d active advertising -> Turning Radio OFF\r\n", slot + 1);
+            remote_log_eventf("RADIO-OFF req (adv) slot=%d", slot + 1);
             is_pairing_mode = false;
             gap_advertisements_enable(0);
             btstack_run_loop_remove_timer(&reconnect_timeout_timer);
@@ -894,6 +911,7 @@ static void ble_switch_slot_locked(int slot) {
             // 電波OFF（SILENT）状態から同一スロットを押下：ボンド情報があれば再接続（ON）
             if (is_slot_bonded(slot)) {
                 printf("[BT] Slot %d is OFF -> Turning Radio ON to reconnect\r\n", slot + 1);
+                remote_log_eventf("RADIO-ON req slot=%d", slot + 1);
                 oled_set_radio_off(false);
                 oled_show_toast("BT Radio: ON", 3000);
                 schedule_save_radio_off(false); // BL-01: 2秒安定後にFlash保存
@@ -913,6 +931,7 @@ static void ble_switch_slot_locked(int slot) {
 
     // 別スロットへの切替
     printf("[BT] Request Switch to Slot %d\r\n", slot + 1);
+    remote_log_eventf("SWITCH-REQ cur=%d -> %d", current_slot + 1, slot + 1);
     char sw_toast[32];
     snprintf(sw_toast, sizeof(sw_toast), "Switched to Slot %d", slot + 1);
     oled_show_toast(sw_toast, 2500);
@@ -951,6 +970,7 @@ static void ble_enter_pairing_mode_locked(int slot) {
     btstack_run_loop_remove_timer(&bl17_cooldown_timer);
     bl17_reject_in_progress = false;
     printf("[BT] Request Pairing Mode for Slot %d\r\n", slot + 1);
+    remote_log_eventf("PAIRING-START slot=%d", slot + 1);
 
     // 【スロットMACアドレスのローテーション（ソルト加算）】
     // ペアリングモード突入時にスロットのMACアドレスを世代更新し、旧ホストの自動接続を遮断
@@ -998,6 +1018,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
         case BTSTACK_EVENT_STATE: {
             uint8_t state = btstack_event_state_get_state(packet);
             printf("[BT] BTSTACK_STATE: %d\r\n", state);
+            remote_log_eventf("STACK st=%d", state);
             if (state == HCI_STATE_WORKING) {
                 // チップが完全に起動したこの瞬間に初期スロットを適用する
                 if (radio_off_saved) {
@@ -1035,6 +1056,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
 
                     if (changed) {
                         printf("[BT] Input report enabled for ID %d: %d\r\n", report_id, enabled);
+                        remote_log_eventf("SUBS id=%d en=%d", report_id, enabled);
                         update_connecting_status();
                     }
                     // 【BL-14/15】暗号化完了 かつ キーボード購読完了で安定化タイマ(100ms)開始後に CONNECTED 遷移
@@ -1094,6 +1116,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
 
                     snprintf(current_peer_addr, sizeof(current_peer_addr), "%s", bd_addr_to_str(peer_addr));
                     printf("[BT] Physical link connected: Slot %d (peer=%s)\r\n", current_slot + 1, current_peer_addr);
+                    remote_log_eventf("LE-CONN slot=%d peer=%s pair=%d", current_slot + 1, current_peer_addr, is_pairing_mode);
 
                     if (is_pairing_mode || current_state == BLE_STATE_PAIRING) {
                         // Public / Static アドレス直結時の他スロット重複ガード (BL-17)
@@ -1110,6 +1133,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                             if (!bl17_reject_in_progress) {
                                 printf("[BT] BL-17 Guard: Direct peer %s already bonded to Slot %d. REJECTING pairing on Slot %d!\r\n",
                                        bd_addr_to_str(peer_addr), reg_slot + 1, current_slot + 1);
+                                remote_log_eventf("BL17-REJECT slot=%d reg=%d", current_slot + 1, reg_slot + 1);
                                 bl17_reject_in_progress = true;
                                 gap_disconnect(con_handle);
                             }
@@ -1279,6 +1303,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             uint8_t enabled = hci_event_encryption_change_get_encryption_enabled(packet);
             if (status == 0 && enabled) {
                 printf("[BT] Encryption enabled\r\n");
+                remote_log_eventf("ENCR ok slot=%d", current_slot + 1);
                 ble_encrypted = true;
                 update_connecting_status();
 
@@ -1294,6 +1319,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                 check_and_start_connection_stabilize();
             } else if (status != 0) {
                 printf("[BT] Encryption failed (status=0x%02X). Disconnecting.\r\n", status);
+                remote_log_eventf("ENCR FAIL st=0x%02X slot=%d", status, current_slot + 1);
                 ble_encrypted = false;
                 if (con_handle != HCI_CON_HANDLE_INVALID) {
                     gap_disconnect(con_handle);
@@ -1305,6 +1331,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
         case ATT_EVENT_MTU_EXCHANGE_COMPLETE: {
             uint16_t mtu = att_event_mtu_exchange_complete_get_MTU(packet);
             printf("[BT] ATT MTU exchanged: %d\r\n", mtu);
+            remote_log_eventf("MTU=%d", mtu);
             if (mtu >= 500) {
                 if (peer_has_android_timeout || ble_conn_timeout >= 450) {
                     update_detected_os('A');
@@ -1343,6 +1370,9 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
 
             uint8_t reason = hci_event_disconnection_complete_get_reason(packet);
             printf("[BT] Disconnected (reason=0x%02X)\r\n", reason);
+            remote_log_eventf("DISC rs=0x%02X sw=%d tg=%d pair=%d slot=%d",
+                              reason, switch_pending, pending_toggle_off,
+                              is_pairing_mode, current_slot + 1);
 
             // スロット切り替え待ちがある場合、切断完了後に安全に新スロットを適用して再開
             if (switch_pending) {
@@ -1633,6 +1663,7 @@ void ble_clear_bonds(void) {
 }
 
 static void ble_clear_bonds_locked(void) {
+    remote_log_eventf("ALLCLEAR bonding wipe");
     btstack_run_loop_remove_timer(&bl17_cooldown_timer);
     bl17_reject_in_progress = false;
     if (con_handle != HCI_CON_HANDLE_INVALID) {

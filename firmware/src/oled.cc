@@ -384,6 +384,22 @@ void oled_set_reconnect_remaining_sec(int sec) {
     }
 }
 
+// BL-39: WiFi 接続状態 / 送信エラーの表示 (Line0 右端 col18 以降に最大 3 文字)。
+// 正常時は "*" だが描画側で抑制する (下の draw 参照)
+static char ui_wifi_str[4] = "";
+
+void oled_set_wifi_state(const char* s) {
+    char next[4] = "";
+    if (s != nullptr) {
+        strncpy(next, s, sizeof(next) - 1);
+    }
+    if (strncmp(ui_wifi_str, next, sizeof(ui_wifi_str)) != 0) {
+        strncpy(ui_wifi_str, next, sizeof(ui_wifi_str) - 1);
+        ui_wifi_str[sizeof(ui_wifi_str) - 1] = '\0';
+        need_redraw = true;
+    }
+}
+
 void oled_task(void) {
     if (!oled_present) {
         return;
@@ -450,7 +466,10 @@ void oled_task(void) {
     // Line 0: トランスポート & 通信ヘルス (21 chars)
     bool is_bt_mode = (ui_bt_state == OLED_BT_CONNECTED) ? true : ui_ble_mode;
     const char* mode_icon = is_bt_mode ? "\x7F" : "\x86";
-    char hb_char = (is_bt_mode && ui_bt_state == OLED_BT_CONNECTED) ? (((now_ms / 500) % 2) ? '.' : ' ') : ' ';
+    // 500ms ごとに点滅するドット。BT 接続状態などの条件は付けない — この描画は
+    // main ループから呼ばれるので、点滅が続いていれば「生きている」ことが分かる
+    // (ウェッジ時に OLED が固まったかどうかで生死を判定できるようにする)
+    char hb_char = ((now_ms / 500) % 2) ? '.' : ' ';
     const char* tx_icon = " ";
     if (ui_tx_timer > 0) {
         tx_icon = "\x85"; // 0x85: 稲妻/電気アイコン (TX点滅)
@@ -532,6 +551,12 @@ void oled_task(void) {
     draw_string_6x8(0, 8, line1);
     draw_string_6x8(0, 16, line2);
     draw_string_6x8(0, 24, line3);
+
+    // BL-39: WiFi の異常時だけ Line0 右端 (col18) に 3 文字で重ね描きする。
+    // 正常時 ("*") と未設定は何も描かない — "BLE-FAST 11.25ms" の表示を隠さないため
+    if (ui_wifi_str[0] != '\0' && strcmp(ui_wifi_str, "*") != 0) {
+        draw_string_6x8(18 * 6, 0, ui_wifi_str);
+    }
 
     // 画面へ転送 (Horizontal addressing: Page 0..3)
     ssd1306_cmd(0x21); ssd1306_cmd(0); ssd1306_cmd(SSD1306_WIDTH - 1);

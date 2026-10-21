@@ -9,6 +9,146 @@
 
 ---
 
+## 2026-10-21 BL-39 完了: Wi-Fi UDP リモートログを `feature/pico-w-ble` へマージ
+
+- **実機で安定動作を確認して完了**。切り分け用にルディが Mac をインターネット共有 AP
+  (`bridge102` = 192.168.2.1) にして AiMesh から隔離した環境で、
+  `seq`/`ack` が 1:1、`rtx=0`、`rc=0` の連続ログを確認 (起動直後の行も欠けない)
+- **診断で嵌まった 2 点 (どちらも実装側で対処済み)**:
+  1. 宛先 `RLOG_TARGET_IP` を更新し忘れると、lwIP は ARP 未解決でも `udp_send` に
+     `ERR_OK` を返すため `se=0`・OLED `*` のまま無音になる → **ARP 解決状態を
+     イベントで出す** (`RLOG target resolved/unresolved`) ようにした
+  2. `ip4addr_ntoa()` は静的バッファを回すため、1 つの printf に複数回渡すと
+     全部が最後の値になる (`STATIC IP ... gw=255.255.255.0 nm=255.255.255.0` の正体)
+     → `ip4addr_ntoa_r()` に修正
+- **実機要望の反映**: SSID は先頭 6 文字 + `*****` でマスク (証跡に残るため) /
+  OLED の点滅ドットを状態条件なしに (main ループの生存確認を兼ねる) /
+  ACK giveup を 10 秒 → 60 秒 / `rc=` (再接続・接続失敗の回数) を ALIVE と
+  `WIFI LOST`/`WIFI FAIL` に / `se` を OLED に `!07` 形式で
+- **マージ方針**: `bl39_remote_log` は分岐点が古く、`feature/pico-w-ble` 側が
+  BLE 排他 (`ble_lock`)・BL-04 リファクタ・OLED (BL-34 スクリーンセーバー/Toast) で
+  先行していたため、**コードは `feature/pico-w-ble` を正とし、BL-39 の追加分
+  (remote_log 一式・イベント行・OLED Wi-Fi 欄・main フック) だけを載せた**。
+  `bl39` 側にあった BL-04 の切替ロック (3 秒)・Space ペアリングホットキー・
+  スロット別ボンド消去は、pico-w-ble 側で Revert 済みの系列のため**取り込まない**
+  (履歴としては `bl39_remote_log` に残る)
+- **残課題**: 本番 AP (AiMesh) では BADAUTH (`st=-3`) で切断されるため、
+  実環境でログを常用するにはルータ側の設定確認 (WPA2-Personal 固定 / PMF 無効 /
+  バンドステアリング無効 / ノード固定) が必要。`rc=` で前後比較する
+
+## 2026-10-21 BL-39 実装: Wi-Fi UDP リモートログ (opt-in) + 名前付き UF2 保管運用の変更
+
+- **BL-39 実装コミット `b50ad2e`** (ブランチ `bl39_remote_log`、`25a4bd7` から分岐):
+  - 新規 `firmware/src/remote_log.{h,cc}`: 行単位リングバッファ (IRQ マスク付き spin lock、
+    溢れ時 Drop-Oldest) → **メインループのみ**で Wi-Fi 非同期接続 + UDP フラッシュ +
+    5s ALIVE ピング (`up= wifi= in= fwd= q= dr= dg= se=`)。リアルタイム経路 (BLE コールバック)
+    からの追記は短いコピーのみ (不変条件 7 準拠)
+  - **診断の勘所**: 沈黙時に ALIVE ピング停止=メインループ全体の死 / `in>0 fwd=0`=転送経路の死 /
+    `fwd>0` で無応答=BLE 送信経路の死、と 3 分割できる
+  - lwIP (NO_SYS) は `pico_cyw43_arch_lwip_threadsafe_background` への差し替えで同居
+    (async_context 機構は none 版と共通のため BLE 伺服体制は不変)。`src/lwipopts.h` 追加
+    (MEM_LIBC_MALLOC は threadsafe_background と非互換のため既定プール確保)
+  - `ble_hid.cc` にフック約 20 点 (HCI 接続/切断 (reason)/暗号化/MTU/購読、切替・ペアリング・
+    ボンドクリア、全タイマハンドラ)。いずれも `remote_log_eventf` 1 行追加で printf は不変
+  - **opt-in 設計**: `-DENABLE_REMOTE_LOG=ON` かつ `src/remote_log_net.h` (gitignore・ルディ管理)
+    がないと CMake が停止。OFF 構成は lwIP もリンクせず既存動作完全不変 (OFF/ON 両ビルド通過確認)
+  - 受信ツール: `tools/udp_log_listener.py` (既定 udp/5140)
+- **事故**: 基線再ビルド時、定石コマンド (`rm -rf build`) で build/ 直下保管の名前付き UF2 資料群
+  (bl45 関連・基点版 11 本) を消失。**ルディ判断で roll-forward** (必要時はコミットから再ビルド。
+  なお GATT DB Hash が当該環境ではランダム値のため再ビルドは機能同等・バイナリ非一致)。
+  再発防止として**名前付き UF2 の保管先を `firmware/artifacts/` (gitignore・`git clean -df` 対象外) に変更**、
+  build/ は作業用として消してよい運用に変更 (AGENTS.md ビルド節に追記)。
+  現 HEAD の OFF 構成ビルドを `firmware/artifacts/remapper_bl39_off_b50ad2e.uf2` として保管
+  (= A 版相当 (フロー制御込み) + BL-39 コード無効化分)。
+- **進行中**: ルディが secret ファイル (`remote_log_net.h`) を自前作成 (エージェント非接触) →
+  実機焼き → Wi-Fi 共存時の BLE 安定性確認 → 履歴へ
+- **bring-up 修正群 (実機症状からの積み上げ)**:
+  - `75cca84` STA モード起動漏れ — `cyw43_wifi_set_up`/`cyw43_arch_enable_sta_mode` を
+    呼んでおらず link が DOWN のまま無音
+  - `6720335` OLED WiFi インジケータ / `3caf43c` 失敗コード数字化 (`.` `*` `-1` `-3` `T<n>`)
+  - `f8083f3` link 判定を `cyw43_wifi_link_status` → `cyw43_tcpip_link_status` へ
+    (前者は関連付け後に JOIN 固定で DHCP 完了を検出できない罠)
+  - `5f6138a` `dd7f2cb` ALIVE/WIFI TO と OLED の T コードに lwIP DHCP 状態を追加
+    (state/tries: 2=INIT 6=SELECTING 1=REQUESTING 10=BOUND)。DHCP 無音時でも停止箇所が判る
+  - `210afd7` 静的 IP opt-in (`RLOG_STATIC_IP/_GATEWAY/_NETMASK` の 3 点揃いで DHCP 停止)
+  - **本コミット**: pbuf 確保を `cyw43_arch_lwip_begin/end` 内へ (RX 側 IRQ との mem ヒープ
+    競合回避)、country 既定 0 罠の修正 (`#ifdef` が常に真 → 実行時判定に変更)、
+    ALIVE/WIFI TO に `js` (wifi_join_state 生値) と `nf` (netif->flags) を追加、
+    タイムアウト時に `cyw43_wifi_leave` で join を畳んでから再試行、
+    lwipopts を pico-examples 既知良好構成へ (`LWIP_NETIF_TX_SINGLE_PBUF`, ACD/ARP check OFF)
+- **現状**: 実機は「関連付け成功・DHCP 未完了 (旧 `T2` = `CYW43_LINK_NOIP`)」で停止。
+  NOIP は `NETIF_FLAG_LINK_UP` が立っている証拠のため鍵交換は完了済み (KEYED 未完説は否定)。
+  次手は静的 IP での経路確認と、`js`/`nf` 付き診断での DHCP 停止箇所の特定
+
+---
+
+## 2026-10-20 BL-43/BL-45 調査: A 版フロー制御で半日長時間検証 → 「処理ループ沈黙 (ウェッジ)」の実観測
+
+- **A 版** = `firmware/build/remapper_bl45_lockmsg_flow.uf2` (= HEAD `3933dba` (BL-04 完成品・スイッチロック・心拍ドット) + `btstack_config.h` BL-43 フロー制御ブロック)。**07:25 焼込み**。
+- **Mac 側 bluetoothd ログによる遠隔観測** (Pico 側 UART 無しの代用)。証跡: `~/Desktop/bt_log_0725-1308_6h.log` (07:25〜13:08, 33MB)。
+  - 07:25:22 接続 → **13時間44分 無切断**。この間 Mac ログの切断 45 回はすべて別デバイス **YutakaMBPR** (別 Mac のユニバーサルコントロール/Continuity 雷, F5:E8..., Mac=Peripheral role) のノイズで、**Remapper (E4:08:43:8B:24:34, cbuuid 1A59D2EC) の切断は 0 回**。朝の 4.44 秒切断パターンは消えた。
+- **21:09 のスロット切替 (slot2) を境に悪化系列が始まった**:
+  | 時刻 | 事象 | 解釈 |
+  |---|---|---|
+  | 21:09:01 | 719 (Pico発) 切断 | slot 切替による (= 正常動作) |
+  | 21:26:03→43 | 再接続 → 暗号化開始で **734** | LL Response Timeout = Pico が暗号化手続きに 40 秒無応答 |
+  | 21:45:57→21:46:05 | 再接続 → **暗号化成功・HID 完了 → 7.5 秒で 708** | Pico 側リンク層沈黙 (supervision timeout) |
+  | 21:46 以降 | BLE 待機のまま、**USB 列挙・分類は生存** (VBUS 供給 / 入力デバイスの LED / 3 行目デバイス表示は更新される) のに **転送パイプライン・ホットキー・再広告が死んだまま** 15 分以上 Mac に繋がらない | 処理ループ品質のウェッジ |
+  | 22:04 (電源再投入) | 接続 → 暗号化 → HID 完了 → **通電再投入で回復** | BL-43 既知の「電源再投入のみで復旧」と同型 |
+  | 22:05:27 | 719 (Pico発) 切断 | **ルディの手動 slot 切替によるもの (= 正常)**。切替後 Windows (slot2) で正常動作を確認（転送・ホットキー復帰も含む） |
+- **HCI reason コードの解釈** (Apple ログは 0x700 を加算した表記): 708=0x08 supervision timeout / 719=0x13 remote (Pico) terminated / 722=0x16 local host terminated / **734=0x22 LL Response Timeout (暗号化手続き未完了)** / 762=0x3E
+- **BL-43 の問いへの回答**: 「現象発生時 OLED は表示更新を続けていたか?」→ **継続していた** (スロット状態・デバイス分類・`Switching...` 表示とも更新)。assert ハング系を否定し、**ロック/共有バス/ループ停滞系のウェッジ**であることを裏付け。
+- **ボンド不一致は否定的**: 21:45 の接続は暗号化成功・HID まで OK (鍵は合っている)。Mac 側のペアリング削除・全消去・再ペアリングは不要と判断。
+- **A 版フロー制御の評価**: 良かった点は「13h44m 連続稼働」まで伸びた (前の lockmsg 版は 30 分で 12 回の切断ループ)。ただし**スロット切替を起点とするウェッジ系列は残る** → 次の切り分け候補は **B (beeb02f: ble_lock カバレッジ拡大)** (x2 同梱: `remapper_bl45_x2_lock.uf2`) と **BL-39 (Wi-Fi UDP リモートログ: Pico 内部観測の手引き)**。
+- **復帰後 (22:05 以降)**: 手動スロット切替 → Windows (slot2) ペアリング/転送とも正常。**22:04 の電源再投入でウェッジは完全回復**。ウェッジ状態中に見えた「Windows に繋がない」も同族現象だった可能性が高い。**注意 (BL-45 への含意)**: A 版 (x1 相当, フロー制御込み) でペアリング検出・接続が成立している → **フロー制御が「検出不可」を引き起こしていない**ことが実証され、BL-45 の残る原因は B か BL-31 系に絞られた。
+
+
+
+- **経緯**: BL-04 初期修正 (4e76652 / f751492: 広告の強制開始・all-clear で pairing 再開) を
+  実機で焼いたところ「ペアリングしても検出されない」「all-clear 後に検出不能」が悪化。
+  切り分けのため 313dcd4 / b089ac1 / 6e4dc67 / 1c69e5f を順に焼いて確認し、
+  **1c69e5f (ハウジング版で検出・接続 OK) を基準**に、必要な部分だけ再実装する方針に変更。
+- **確認に使った UF2 (firmware/build/ 配下に保管・削除しない)**:
+  - `remapper_before_bl43.uf2` (6e4dc67): Windows / macOS とも検出 OK
+  - `remapper_at_1c69e5f.uf2`: 検出・接続 OK (**現在の基準**)
+  - `remapper_before_oled_fix.uf2` (b089ac1): OLED は戻ったが BT 検出されず
+  - `remapper.uf2` / `remapper_before_syphi.uf2` (BL-04 初期修正入り): 検出されず
+- **最終コミット `b375cef`** (1c69e5f 派生 9 コミット、ブランチ `bl04_pairing_hotkey`):
+  1. **all-clear**: 接続・保留キュー・送信フラグ・遷移/再接続タイマを全リセット。
+     all-clear 後は自動で pairing を開始しない (ホットキー待ち)。
+  2. **ペアリングはカレントスロットのみ対象**。別スロット指定では pairing を開始しない
+     (遅延ペアリング方式は撤回し、関連コードは削除)。
+  3. **ペアリングホットキーを Ctrl+Win+Alt+Space に変更、2段階化**:
+     1回目 = カレントスロットのボンドを消去 (接続中なら切断) し、OS 表示を `-` に戻す /
+     2回目 (消去済み) = そのスロットでペアリング開始。
+     Space は Usage 0x2C → `report_data[6] & 0x01` (既存 Backspace/O と同じビット規則から算出)。
+  4. **Ctrl+Win+Alt+F1〜F4 はスロット切替判定から外す** (Alt 付きは OS 側へ通す)。
+     スロット切替は従来どおり Ctrl+Win+F1〜F4。
+  5. **ペアリング中のカウントダウン復活**: `Pairing (60s)` → 秒ごとに `Pairing (Ns)` (ble_hid_task で秒変化時のみ描画)。
+  6. **スロット切替・ON/OFF トグルの受付禁止 (3秒)** (`c821243`): `ble_switch_slot()` 入口で、受付から
+     `SWITCH_LOCK_US` (3秒) 以内の要求を無視。BT 状態の不整合防止の保険。全消去・ボンド消去・ペアリングは対象外。
+     禁止中は 4 行目に `Can't switch now` を表示し、明けたら通常表示へ戻す (`38c5666`)。
+  7. **ペアリング開始時に `slot_transition_timer` を停止**する処理を復元 (`c821243`)。
+     切替直後のペアリングで、保留中の切替タイマが状態を上書きするのを防ぐ。
+  8. **接続中ハートビート (BL-34 の一部)** (`7b8d609`): BT 接続中のみ、1 行目のモードアイコン横で
+     500ms ごとに `.` を点滅。USB フォールバック時は点滅しない（右上の電気アイコンで生存確認する運用）。
+     1 行は 21 文字に収めるため空白を 1 つ減らした。
+     出典は `wip/bl34-oled` (ec78a64) の `hb_char`。
+- **実機確認 (ルディ)**: all-clear 後に勝手に pairing しない / slot2 でのペアリング開始 OK /
+  Space の 2 段階 (消去 → `1:-*` 表示、再押下でペアリング) OK / カウントダウン OK / Windows でペアリング可 /
+  切替直後の切替禁止 OK・3秒後の切替 OK / 点滅ドット OK / 禁止中の `Can't switch now` 表示 OK。
+- **コミット一覧** (`bl04_pairing_hotkey`, 基準 1c69e5f): `708de74` `4daaf18` `ceb75a0` `84ee25d` `c4d5123`
+  `1e74763` `b3a7f13` `4d2cdee` `b375cef` `c4c6d9f` (docs) `c821243` `7b8d609` `38c5666`。
+  途中の `all-clear 再開` / `遅延ペアリング` は最終的に撤回・削除済み。
+- **検証用 UF2 (firmware/build/)**: `remapper_hotkey_space_candidate.uf2` (b375cef 相当),
+  `remapper_switchlock_heartbeat_candidate.uf2` (7b8d609 相当), `remapper_lockmsg_candidate.uf2` (38c5666)。
+- **BL-34 の残り**: スクリーンセーバー・Toast・バウンスロゴは `wip/bl34-oled` 側のまま。取り込みは別途判断。
+- **未解決・注意**:
+  - Windows 接続時に OS 判定が `A` になる (macOS は `M` で正常) → BL-44
+  - b089ac1 以降で検出されなくなった原因は未特定 (6e4dc67 は OK) → BL-45 (BL-43 系マージ区間)
+  - `feature/pico-w-ble` には初期修正の revert (1cee7c5, 2fb1e7e) が積まれており、本ブランチとは別線。
+    統合方針はルディ判断 (現時点では未マージ)
+  - 作業開始時に HEAD が `1c69e5f` の detached 状態だったため、コミットを `bl04_pairing_hotkey` ブランチに固定した
 ## 2026-10-18 (BL-31 Pico 2 W 移行計画草案)
 
 - **`BL31-PICO2W-PLAN.md` を新規作成** (ルディ指示: BL-31 方針確認を先倒し)。

@@ -1,0 +1,29 @@
+// BL-39: リモートログ設定テンプレート
+//
+// このファイルを remote_log_net.h としてコピーして値を書くこと。
+// (src/remote_log_net.h は gitignore 対象 — SSID/パスワードはコミットしない)
+//
+// 受信側コマンド例 (収集先のマシンで実行):
+//   nc -lu 5140          # ターゲットポートを合わせる
+#ifndef RLOG_WIFI_SSID
+#define RLOG_WIFI_SSID "your-wifi-ssid"
+#define RLOG_WIFI_PASSWORD "your-wifi-password"
+#define RLOG_TARGET_IP "192.168.0.100" // 収集先マシンのローカル IP
+#define RLOG_TARGET_PORT 5140
+// 日本国内の AP (特に 12/13ch) を確実に見つけるため JAPAN を推奨
+#define RLOG_WIFI_COUNTRY CYW43_COUNTRY_JAPAN
+// 静的 IP 運用 (任意)。DHCP が完了しない (T2/T6 表示) 状態の回避策。
+// 3 行とも書いたときだけ有効。ルータの DHCP 配布範囲外のアドレスを選ぶこと
+// #define RLOG_STATIC_IP "192.168.0.240"
+// #define RLOG_STATIC_GATEWAY "192.168.0.1"
+// #define RLOG_STATIC_NETMASK "255.255.255.0"
+//
+// UART ミラー (任意, 既定 OFF)。UDP が主経路のため既定格下。UART (STDIO_USB) で
+// bring-up を観察するときだけ 1 にする (printf がメインループを最大 ~5.5ms/20ms
+// 押さえる点に注意)
+// #define RLOG_STDIO_MIRROR 1
+//
+// リングサイズ (任意, 既定 16KB)。RAM が足りないときに下げる。静的配列 (.bss) として
+// 消費する。1 行 (~200B) × 数十行以上を残したいなら既定のまま推奨
+// #define RLOG_RING_SIZE 16384
+#endif

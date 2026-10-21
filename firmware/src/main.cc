@@ -32,6 +32,7 @@
 #include "our_descriptor.h"
 #include "platform.h"
 #include "remapper.h"
+#include "remote_log.h"
 #include "tick.h"
 
 
@@ -107,6 +108,7 @@ static bool do_send_report_usb(uint8_t interface, const uint8_t* report_with_id,
     uint8_t report_id = report_with_id[0];
     const uint8_t* report_data = report_with_id + 1;
     uint8_t report_len = len - 1;
+    remote_log_count_forward(); // BL-39: 転送実行カウンタ
 
     oled_set_mode(false); // USB mode
     oled_notify_tx();
@@ -353,7 +355,8 @@ int main() {
 
 #if ENABLE_BLE
     ble_hid_init();
-#endif    
+#endif
+    remote_log_init(); // BL-39 (ENABLE_REMOTE_LOG=0 では惰性スタブ)
     tud_sof_isr_set(sof_handler);
 
     printf("\r\n========================================\r\n");
@@ -378,6 +381,7 @@ int main() {
         if (new_report) {
             activity_led_on();
             oled_notify_activity();
+            remote_log_count_ingest(); // BL-39: 入力拾いカウンタ
         }
         if (their_descriptor_updated) {
             update_their_descriptor_derivates();
@@ -435,6 +439,8 @@ int main() {
         }
 
         print_stats_maybe();
+
+        remote_log_task(); // BL-39: Wi-Fi 接続管理・UDP フラッシュ・ALIVE ピング (内部スロットリング)
 
         activity_led_off_maybe();
 

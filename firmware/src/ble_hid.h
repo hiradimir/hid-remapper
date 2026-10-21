@@ -28,6 +28,7 @@ void ble_hid_switch_host(uint8_t slot);
 
 void ble_led(bool value);
 uint16_t ble_hid_get_conn_interval(void);
+uint32_t ble_hid_get_connected_slot_mask(void);
 
 // ホットキー判定（スロット切替・ペアリングモード・ボンド消去）
 bool ble_hid_check_hotkey(uint8_t interface, const uint8_t* report_with_id, uint8_t len);
@@ -58,6 +59,7 @@ static inline void ble_switch_slot(int slot) { (void)slot; }
 static inline void ble_hid_switch_host(uint8_t slot) { (void)slot; }
 static inline void ble_led(bool value) { (void)value; }
 static inline uint16_t ble_hid_get_conn_interval(void) { return 0; }
+static inline uint32_t ble_hid_get_connected_slot_mask(void) { return 0; }
 static inline bool ble_hid_check_hotkey(uint8_t interface, const uint8_t* report_with_id, uint8_t len) {
     (void)interface; (void)report_with_id; (void)len;
     return false;

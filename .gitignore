@@ -1,5 +1,11 @@
 config-tool/__pycache__
 firmware-bluetooth/build
 firmware/build
+firmware/build-*
+firmware/src/remote_log_net.h
+firmware/artifacts/
 _build
+bl39_*.log
+tools/__pycache__/
+
 .tmp/

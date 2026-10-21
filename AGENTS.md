@@ -71,6 +71,22 @@ Raspberry Pi Pico W (RP2040) による **BLE HID → USB HID リマッパー**
   成果リンクがあれば HISTORY.md に記録して残す
 - ルール・運用はユーザーと相談しながら随時このファイルを更新してよい
 
+### サブエージェント運用 (2026-10-21〜 ルディ指示)
+
+- **役割分担**: 会話組み立て・要件整理・指示作成・レビュー判断 = コックピット (シルフィ)。
+  実装・監査・ビルド検証 = サブエージェント。コックピットは原則として実作業に手を出さない
+- **BL ごとに 1 ワーカー**を立てる。モデルは既定 `opencode/glm-5.3-flash-free` (agent: general)。
+  返ってきた sessionID を保持し、追加指示は同セッションを resume して続ける
+- **指示書に必ず含める項目**:
+  1. 目的と完了条件 (何を報告すれば終わりか)
+  2. AGENTS.md 読了の指示 + 関係する不変条件の明示
+  3. secret 境界: `firmware/src/remote_log_net.h` は読まない・出力に含めない
+  4. ディレクトリ境界: `firmware/build/` はユーザー専用 (触らない)。ワーカーの検証は
+     `firmware/build-mac` を使う
+  5. 禁止操作: ファイル削除・git commit/checkout/reset (報告のみ、コミットはコックピット判断)
+  6. 実機 (焼き・OLED観察・ルータ設定) は常にルディの担当
+- ワーカーはバックグラウンド起動 (background=true) を基本とし、コックピットは会話を止めない
+
 ## ドキュメント体系 (hid-remapper-ble 正 と 上流資料)
 
 - **hid-remapper-ble 用の正のドキュメントはこれ (フォークオリジナル)**:
@@ -97,6 +113,14 @@ Raspberry Pi Pico W (RP2040) による **BLE HID → USB HID リマッパー**
 
 構成: firmware/ ルートの CMakeLists 1 本。devcontainer (workspace=/workspace) で
 `PICO_BOARD=pico_w ENABLE_BLE=ON ENABLE_OLED=ON` の実ビルド実績あり。成果物は remapper.uf2。
+
+- **名前付き UF2 の保管は `firmware/artifacts/` へコピー** (gitignore 済 —
+  `git clean -df` の対象外)。build/ 直下は作業用とし、消してよい (2026-10-21 運用変更:
+  build/ 直下保管 UF2 が定石ビルドの rm -rf で消滅した事故の再発防止)
+- BL-39 検証ビルド (`-DENABLE_REMOTE_LOG=ON`) は `src/remote_log_net.h` が必要。
+  **このファイルはルディ管理 (SSID/パスをエージェント非接触とする)・gitignore 済**。
+  テンプレートは `src/remote_log_net.h.example`
+- 受信側: `python3 tools/udp_log_listener.py [port]` (既定 5140)
 
 - コンテナ内 (通常ビルド・ルディ実運用):
 
