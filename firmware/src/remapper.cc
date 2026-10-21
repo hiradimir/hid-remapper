@@ -17,6 +17,7 @@
 #include "oled.h"
 #include "platform.h"
 #include "remapper.h"
+#include "remote_log.h"
 
 #define MAX_REPORT_SIZE 64
 
@@ -2045,6 +2046,8 @@ void set_monitor_enabled(bool enabled) {
 }
 
 void device_connected_callback(uint16_t interface, uint16_t vid, uint16_t pid, uint8_t hub_port) {
+    // 入力が途切れたときに「USB 機器が抜き差しされた」のかをログで切り分けるため
+    remote_log_eventf("USB MNT dev=%u host=%u vid=%04X pid=%04X", interface >> 8, hub_port, vid, pid);
     hub_ports[interface >> 8] = (hub_port != 0) ? hub_port : HUB_PORT_NONE;
     if (our_descriptor->device_connected != nullptr) {
         our_descriptor->device_connected(interface, vid, pid);
@@ -2053,6 +2056,7 @@ void device_connected_callback(uint16_t interface, uint16_t vid, uint16_t pid, u
 }
 
 void device_disconnected_callback(uint8_t dev_addr) {
+    remote_log_eventf("USB UMT dev=%u", dev_addr);
     if (our_descriptor->device_disconnected != nullptr) {
         our_descriptor->device_disconnected(dev_addr);
     }
