@@ -238,18 +238,21 @@ static void udp_flush_pending(uint64_t now_us) {
     stdio_flush();
 #endif
 
-    // UDP 送信 (lwIP 呼び出しは必ずメインループから cyw43_arch_lwip_begin で包む)
+    // UDP 送信 (lwIP 呼び出しは必ずメインループから cyw43_arch_lwip_begin で包む)。
+    // pbuf_alloc/free も mem ヒープを触るためロック内に置く (RX 側は async helper の
+    // IRQ 文脈で同じ mem プールを使うためロック外確保はヒープ競合になる)
     if (udp_state != UDP_OPENED || rl_pcb == nullptr) return;
+    cyw43_arch_lwip_begin();
     struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, (u16_t) chunk_len, PBUF_RAM);
     if (p == nullptr) {
+        cyw43_arch_lwip_end();
         rl_send_errors++;
         return;
     }
     memcpy(p->payload, chunk, chunk_len);
-    cyw43_arch_lwip_begin();
     err_t err = udp_send(rl_pcb, p);
-    cyw43_arch_lwip_end();
     pbuf_free(p);
+    cyw43_arch_lwip_end();
 
     if (err == ERR_OK) {
         rl_datagrams++;
@@ -360,18 +363,33 @@ static void wifi_task(uint64_t now_us) {
                 apply_static_addr();
             } else if (connect_started_us != 0 &&
                        now_us > connect_started_us + RLOG_CONNECT_TIMEOUT_MS * 1000ULL) {
-                // イベント無しの滞留 (スキャン帰属なし等) を検知して再試行
+                // イベント無しの滞留 (スキャン帰属なし等) を検知して再試行。
+                // 診断値の読み取りは lwIP 構造体なので async_context ロック内で行う
+                int dhcp_to = -1;
+                unsigned js_to = 0;
+                unsigned nf_to = 0;
+                cyw43_arch_lwip_begin();
+                {
+                    struct netif *nif_to = &cyw43_state.netif[CYW43_ITF_STA];
+                    struct dhcp *d_to = (nif_to != nullptr) ? netif_dhcp_data(nif_to) : nullptr;
+                    if (d_to != nullptr) dhcp_to = (int) d_to->state;
+                    js_to = (unsigned) cyw43_state.wifi_join_state;
+                    nf_to = (unsigned) nif_to->flags;
+                }
+                cyw43_arch_lwip_end();
                 char code[4];
-                snprintf(code, sizeof(code), "T%d", link);
-                struct netif *nif_to = &cyw43_state.netif[CYW43_ITF_STA];
-                struct dhcp *d_to = (nif_to != nullptr) ? netif_dhcp_data(nif_to) : nullptr;
-                int dhcp_to = (d_to != nullptr) ? (int) d_to->state : -1;
-                remote_log_eventf("WIFI TO st=%d dhcp=%d (retry in %ds)", link, dhcp_to,
-                                  RLOG_CONNECT_RETRY_MS / 1000);
-                // OLED は T<dhcp 状態> 表示 (2 はスキャン前/未起動に留まり, 6=SELECTING は
+                remote_log_eventf("WIFI TO st=%d dhcp=%d js=0x%x nf=0x%x (retry in %ds)", link, dhcp_to,
+                                  js_to, nf_to, RLOG_CONNECT_RETRY_MS / 1000);
+                // OLED は T<dhcp 状態> 表示 (2=INIT は DISCOVER 未発火, 6=SELECTING は
                 // DISCOVER 済み OFFER 待ち, 1=REQUESTING は ACK 待ちなどを判別するためのもの)
                 snprintf(code, sizeof(code), "T%d", dhcp_to);
                 oled_set_wifi_state(code);
+                // 進行中の join を明示的に畳む (disassociate) してから 30s 後の再試行に
+                // 備える。再試行の connect_async は前試行を abort しないため、
+                // 滞留した join 状態が次試行のイベント流に混線するのを防ぐ。
+                // (メインループ経由の呼び出しに限定・BLE 体制には触れない)
+                cyw43_wifi_leave(&cyw43_state, CYW43_ITF_STA);
+                udp_close_cleanup();
                 wifi_state = WIFI_IDLE;
                 next_connect_attempt_us = now_us + RLOG_CONNECT_RETRY_MS * 1000ULL;
             }
@@ -411,10 +429,14 @@ void remote_log_task(void) {
         size_t pending = (size_t) ((ssize_t) rl_tail - (ssize_t) rl_head);
         if ((ssize_t) pending < 0) pending += RLOG_RING_SIZE;
 
-        //診断: DHCP 状態機の位置も添える (lwIP: 2=INIT 6=SELECTING 1=REQUESTING 10=BOUND)
+        //診断: DHCP 状態機の位置も添える (lwIP: 2=INIT 6=SELECTING 1=REQUESTING 10=BOUND)。
+        // js=cyw43 wifi_join_state 生値 (0x0e01 で全フラグ到達=join 完了) と
+        // nf=netif->flags 16進 (0x9=UP|LINK_UP|ETHARP 相当) も添える
         struct netif *nif = &cyw43_state.netif[CYW43_ITF_STA];
         int dhcp_state = -1;
         int dhcp_tries = 0;
+        unsigned js = 0;
+        unsigned nf = 0;
         const char *ip_str = "0.0.0.0";
         static char ip_buf[16];
         cyw43_arch_lwip_begin();
@@ -424,16 +446,18 @@ void remote_log_task(void) {
                 dhcp_state = (int) d->state;
                 dhcp_tries = (int) d->tries;
             }
+            js = (unsigned) cyw43_state.wifi_join_state;
+            nf = (unsigned) nif->flags;
             strncpy(ip_buf, ip4addr_ntoa(netif_ip4_addr(nif)), sizeof(ip_buf) - 1);
             ip_buf[sizeof(ip_buf) - 1] = '\0';
             ip_str = ip_buf;
         }
         cyw43_arch_lwip_end();
 
-        remote_log_eventf("ALIVE up=%ds wifi=%s(%d) ip=%s dhcp=%d/%d in=%u fwd=%u q=%u dr=%u dg=%u se=%u",
+        remote_log_eventf("ALIVE up=%ds wifi=%s(%d) ip=%s dhcp=%d/%d js=0x%x nf=0x%x in=%u fwd=%u q=%u dr=%u dg=%u se=%u",
                           (unsigned) (now_us / 1000000ULL), wifi_state_name(wifi_state),
                           cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA),
-                          ip_str, dhcp_state, dhcp_tries,
+                          ip_str, dhcp_state, dhcp_tries, js, nf,
                           (unsigned) count_ingest, (unsigned) count_forward,
                           (unsigned) pending, (unsigned) rl_drops,
                           (unsigned) rl_datagrams, (unsigned) rl_send_errors);
@@ -449,13 +473,19 @@ void remote_log_init(void) {
 
     // STA モードの起動 (cyw43 自体は ble_hid_init() 内で cyw43_arch_init() 済み)。
     // ※これを呼ばないと STA netif が立たず link は永遠に DOWN のまま何も起きない。
-    // カントリー指定がある場合はドライバ API に直接渡す (WORLDWIDE だと 12/13ch に
-    // 置かれた AP を見つけられない可能性があるため、日本では JAPAN 指定を推奨)
-#ifdef RLOG_WIFI_COUNTRY
-    cyw43_wifi_set_up(&cyw43_state, CYW43_ITF_STA, true, RLOG_WIFI_COUNTRY);
-#else
-    cyw43_arch_enable_sta_mode();
-#endif
+    // カントリー指定 (0 以外) はドライバ API に直接渡す。既定値 0 は無効値
+    // (CyW43_COUNTRY_WORLDWIDE 'W''W' ではない) のため enable_sta_mode 経由
+    // (WORLDWIDE 既定) に落とす。
+    // 注意: country 値は #if で評価できない (CYW43_COUNTRY() マクロに cast を含む
+    // ためプリプロセッサ演算エラーになる) → 実行時判定に移した
+    {
+        uint32_t rlog_country = RLOG_WIFI_COUNTRY;
+        if (rlog_country != 0) {
+            cyw43_wifi_set_up(&cyw43_state, CYW43_ITF_STA, true, rlog_country);
+        } else {
+            cyw43_arch_enable_sta_mode();
+        }
+    }
 
     rl_target_valid = false;
     if (RLOG_TARGET_IP[0] != '\0') {

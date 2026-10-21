@@ -35,6 +35,23 @@
   (= A 版相当 (フロー制御込み) + BL-39 コード無効化分)。
 - **進行中**: ルディが secret ファイル (`remote_log_net.h`) を自前作成 (エージェント非接触) →
   実機焼き → Wi-Fi 共存時の BLE 安定性確認 → 履歴へ
+- **bring-up 修正群 (実機症状からの積み上げ)**:
+  - `75cca84` STA モード起動漏れ — `cyw43_wifi_set_up`/`cyw43_arch_enable_sta_mode` を
+    呼んでおらず link が DOWN のまま無音
+  - `6720335` OLED WiFi インジケータ / `3caf43c` 失敗コード数字化 (`.` `*` `-1` `-3` `T<n>`)
+  - `f8083f3` link 判定を `cyw43_wifi_link_status` → `cyw43_tcpip_link_status` へ
+    (前者は関連付け後に JOIN 固定で DHCP 完了を検出できない罠)
+  - `5f6138a` `dd7f2cb` ALIVE/WIFI TO と OLED の T コードに lwIP DHCP 状態を追加
+    (state/tries: 2=INIT 6=SELECTING 1=REQUESTING 10=BOUND)。DHCP 無音時でも停止箇所が判る
+  - `210afd7` 静的 IP opt-in (`RLOG_STATIC_IP/_GATEWAY/_NETMASK` の 3 点揃いで DHCP 停止)
+  - **本コミット**: pbuf 確保を `cyw43_arch_lwip_begin/end` 内へ (RX 側 IRQ との mem ヒープ
+    競合回避)、country 既定 0 罠の修正 (`#ifdef` が常に真 → 実行時判定に変更)、
+    ALIVE/WIFI TO に `js` (wifi_join_state 生値) と `nf` (netif->flags) を追加、
+    タイムアウト時に `cyw43_wifi_leave` で join を畳んでから再試行、
+    lwipopts を pico-examples 既知良好構成へ (`LWIP_NETIF_TX_SINGLE_PBUF`, ACD/ARP check OFF)
+- **現状**: 実機は「関連付け成功・DHCP 未完了 (旧 `T2` = `CYW43_LINK_NOIP`)」で停止。
+  NOIP は `NETIF_FLAG_LINK_UP` が立っている証拠のため鍵交換は完了済み (KEYED 未完説は否定)。
+  次手は静的 IP での経路確認と、`js`/`nf` 付き診断での DHCP 停止箇所の特定
 
 ---
 

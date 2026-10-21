@@ -33,4 +33,11 @@
 // CYW43 ドライバ側の要求 (pico_cyw43_driver / lwip 実装参照用)
 #define ETH_PAD_SIZE                    0
 
+// 既知良好構成 (pico-examples pico_w/wifi) に合わせた明示設定:
+// TX は必ず単一 pbuf (チェーン禁止) / lwIP 2.2 では既定 ON の DHCP アドレス競合
+// 検出 (ACD) を OFF にして状態遷移を短縮 (DHCP bring-up の変数を減らす)
+#define LWIP_NETIF_TX_SINGLE_PBUF       1
+#define LWIP_DHCP_DOES_ACD_CHECK        0
+#define DHCP_DOES_ARP_CHECK             0
+
 #endif // _LWIPOPTS_H
