@@ -372,7 +372,7 @@ int main() {
     next_print = time_us_64() + 1000000;
 
     while (true) {
-
+        remote_log_count_loop(); // BL-39: ループ速度の観測 (スタック検出用)
 
         bool tick;
         bool new_report;

@@ -14,6 +14,8 @@
 #ifndef REMOTE_LOG_H
 #define REMOTE_LOG_H
 
+#include <stdint.h>
+
 #ifndef ENABLE_REMOTE_LOG
 #define ENABLE_REMOTE_LOG 0
 #endif
@@ -29,6 +31,11 @@ void remote_log_eventf(const char *fmt, ...) __attribute__((format(printf, 1, 2)
 void remote_log_count_ingest(void);
 // メインループの転送実行カウンタ (ALIVE ピングに含める)
 void remote_log_count_forward(void);
+// メインループ 1 周ごとに呼ぶ (ループ速度の観測用。ENABLE_REMOTE_LOG=0 では空)
+extern volatile uint32_t remote_log_loop_count;
+static inline void remote_log_count_loop(void) {
+    remote_log_loop_count++;
+}
 
 #else
 // インラインスタブ (ENABLE_REMOTE_LOG=0 でもビルドが通る形を維持)
@@ -37,6 +44,7 @@ static inline void remote_log_task(void) {}
 static inline void remote_log_eventf(const char *fmt, ...) { (void)fmt; }
 static inline void remote_log_count_ingest(void) {}
 static inline void remote_log_count_forward(void) {}
+static inline void remote_log_count_loop(void) {}
 #endif
 
 #endif // REMOTE_LOG_H

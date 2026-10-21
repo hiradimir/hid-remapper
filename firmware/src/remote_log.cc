@@ -153,8 +153,11 @@ static uint64_t first_send_us = 0;             // ACK 検証の起点 (最初の
 static volatile uint32_t rtx_count = 0;        // 再送回数 (ALIVE の rtx=)
 static volatile bool ack_mode_off = false;     // ACK が返らない環境の fire&forget フォールバック
 
-static uint32_t count_ingest = 0; // main ループ: read_report で拾ったレポート数
+static uint32_t count_ingest = 0;  // main ループ: read_report で拾ったレポート数
 static uint32_t count_forward = 0; // main ループ: 転送 (kyouhan) 実行数
+volatile uint32_t remote_log_loop_count = 0; // main ループの周回数 (ループ速度の観測用)
+static uint64_t last_ingest_us = 0;          // 直近の入力時刻
+static uint32_t ingest_gap_max_us = 0;       // 入力レポート間隔の最大値 (途切れ検出)
 
 static int wifi_state = WIFI_IDLE;
 static int udp_state = UDP_CLOSED;
@@ -264,7 +267,19 @@ void remote_log_eventf(const char *fmt, ...) {
     rl_exit(save);
 }
 
-void remote_log_count_ingest(void) { count_ingest++; }
+void remote_log_count_ingest(void) {
+    // 入力レポートの「間隔の最大値」を取る。5 秒平均の in= では見えない
+    // 数百 ms の飛び (マウスのかくつき) を拾うため。main ループからのみ呼ばれる
+    uint64_t now = time_us_64();
+    if (last_ingest_us != 0) {
+        uint32_t gap = (uint32_t) (now - last_ingest_us);
+        if (gap > ingest_gap_max_us) {
+            ingest_gap_max_us = gap;
+        }
+    }
+    last_ingest_us = now;
+    count_ingest++;
+}
 void remote_log_count_forward(void) { count_forward++; }
 
 // ---------------------------------------------------------------------------
@@ -724,14 +739,13 @@ static void wifi_task(uint64_t now_us) {
 static uint64_t next_ble_chk_us = 0;
 static uint64_t next_ble_hb_us = 0;
 static bool ble_stall_active = false;
-static uint32_t ble_hb_ok = 0;
-static uint32_t ble_hb_acl = 0;
-static uint32_t ble_hb_blk = 0;
-static uint32_t ble_hb_disc = 0;
 static uint32_t ble_stall_in_mark = 0;  // 直近チェック時の入力数
 static uint32_t ble_stall_ok_mark = 0;  // 直近チェック時の受理数
 static uint64_t ble_stall_since_us = 0; // 「入力は来たが受理されていない」開始時刻
 static uint32_t ble_stall_in_start = 0; // その開始時点の入力数 (未処理件数の算出用)
+static uint32_t ble_hb_in = 0;          // 直近 HB 時点の入力数
+static uint32_t ble_hb_loops = 0;       // 直近 HB 時点のループ周回数
+static uint64_t ble_hb_us = 0;          // 直近 HB の時刻
 
 static void ble_health_task(uint64_t now_us) {
     if (((int64_t) (next_ble_chk_us - now_us)) > 0) return;
@@ -775,24 +789,35 @@ static void ble_health_task(uint64_t now_us) {
 
     if (((int64_t) (next_ble_hb_us - now_us)) <= 0) {
         next_ble_hb_us = now_us + RLOG_BLE_HB_MS * 1000ULL;
-        const bool changed = (h.ok != ble_hb_ok) || (h.acl_full != ble_hb_acl) ||
-                             (h.blocked != ble_hb_blk) || (h.disc != ble_hb_disc);
-        if (connected || changed) {
-            ble_hb_ok = h.ok;
-            ble_hb_acl = h.acl_full;
-            ble_hb_blk = h.blocked;
-            ble_hb_disc = h.disc;
-            if (ever) {
-                remote_log_eventf("BLE-HB ci=%u ok=%u blk=%u acl=%u disc=%u rs=0x%02X tx=%ums",
-                                  (unsigned) h.ci, (unsigned) h.ok, (unsigned) h.blocked,
-                                  (unsigned) h.acl_full, (unsigned) h.disc,
-                                  (unsigned) h.disc_reason, (unsigned) tx_ms);
-            } else {
-                remote_log_eventf("BLE-HB ci=%u ok=0 blk=%u acl=%u disc=%u rs=0x%02X tx=none",
-                                  (unsigned) h.ci, (unsigned) h.blocked,
-                                  (unsigned) h.acl_full, (unsigned) h.disc,
-                                  (unsigned) h.disc_reason);
+        // 入力側の観測値: 前回 HB からの入力数 / 入力間隔の最大値 / ループ速度。
+        // かくつきは 5 秒平均の in= では見えないので gmax (最大空白) を持つ。
+        // 入力が 1 件も無い区間は gmax を 0 にする (無操作を「空白」と呼ばない)
+        const uint32_t in_delta = count_ingest - ble_hb_in;
+        const uint32_t gmax_ms = (in_delta != 0) ? (ingest_gap_max_us / 1000u) : 0;
+        uint32_t lps = 0;
+        if (ble_hb_us != 0) {
+            const uint64_t dt_us = now_us - ble_hb_us;
+            if (dt_us != 0) {
+                lps = (uint32_t) (((uint64_t) (remote_log_loop_count - ble_hb_loops)) * 1000000ULL / dt_us);
             }
+        }
+        ble_hb_in = count_ingest;
+        ble_hb_loops = remote_log_loop_count;
+        ble_hb_us = now_us;
+        ingest_gap_max_us = 0;
+
+        if (ever) {
+            remote_log_eventf("BLE-HB ci=%u ok=%u blk=%u acl=%u disc=%u rs=0x%02X tx=%ums in=%u gmax=%ums lps=%u",
+                              (unsigned) h.ci, (unsigned) h.ok, (unsigned) h.blocked,
+                              (unsigned) h.acl_full, (unsigned) h.disc,
+                              (unsigned) h.disc_reason, (unsigned) tx_ms,
+                              (unsigned) in_delta, (unsigned) gmax_ms, (unsigned) lps);
+        } else {
+            remote_log_eventf("BLE-HB ci=%u ok=0 blk=%u acl=%u disc=%u rs=0x%02X tx=none in=%u gmax=%ums lps=%u",
+                              (unsigned) h.ci, (unsigned) h.blocked,
+                              (unsigned) h.acl_full, (unsigned) h.disc,
+                              (unsigned) h.disc_reason,
+                              (unsigned) in_delta, (unsigned) gmax_ms, (unsigned) lps);
         }
     }
 }
