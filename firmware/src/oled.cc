@@ -366,8 +366,11 @@ void oled_task(void) {
         tx_icon = "\x85"; // 0x85: 稲妻/電気アイコン (TX点滅)
         ui_tx_timer--;
     }
-    // BT 接続中は 500ms ごとにモードアイコン横のドットを点滅（BL-34 heartbeat）
-    char hb_char = (is_bt_mode && ui_bt_state == OLED_BT_CONNECTED && ((now_us / 500000) % 2)) ? '.' : ' ';
+    // モードアイコン横のドットを 500ms ごとに点滅（BL-34 heartbeat）。
+    // この描画は main ループから呼ばれるため、点滅が続いていれば「メインループが
+    // 生きている」ことが画面だけで分かる。BT 接続状態などの条件は付けない
+    // （ウェッジ時に OLED が固まったかどうかで生死を判定できるようにする）
+    char hb_char = ((now_us / 500000) % 2) ? '.' : ' ';
     char line0[24];
     snprintf(line0, sizeof(line0), "%s%c %-4s             %s", mode_icon, hb_char, state_str, tx_icon);
 

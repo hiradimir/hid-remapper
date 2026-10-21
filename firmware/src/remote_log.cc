@@ -166,6 +166,25 @@ static uint64_t next_ping_us = 0;
 
 #define RLOG_CONNECT_TIMEOUT_MS 45000 // 接続試行の滞留検知 (BADAUTH等のイベント無し滞留含む)
 
+// ログに出す SSID のマスク。ログは実機検証の証跡として外部に残るため、先頭 6 文字だけ
+// 残して以降を伏せる (伏字は固定 5 個なので元の長さも漏らさない)。
+// 戻り値は静的バッファ。1 つの printf に複数回渡さないこと
+static const char* rlog_ssid_masked(void) {
+    static char buf[16];
+    size_t n = 0;
+    while (n < 6 && RLOG_WIFI_SSID[n] != '\0') {
+        buf[n] = RLOG_WIFI_SSID[n];
+        n++;
+    }
+    if (RLOG_WIFI_SSID[n] == '\0') {
+        buf[n] = '\0'; // 6 文字以下はそのまま (伏せる余地がない)
+    } else {
+        memcpy(buf + n, "*****", 5);
+        buf[n + 5] = '\0';
+    }
+    return buf;
+}
+
 // ---------------------------------------------------------------------------
 // リングバッファ (IRQ マスク付き spin lock 保護 — 任意コンテキストからの追記に対応)
 // ---------------------------------------------------------------------------
@@ -589,7 +608,7 @@ static void wifi_task(uint64_t now_us) {
             if (now_us < next_connect_attempt_us) return;
             wifi_state = WIFI_CONNECTING;
             connect_started_us = now_us;
-            remote_log_eventf("WIFI connect start t=%us ssid=%s", rlog_upt_s(), RLOG_WIFI_SSID);
+            remote_log_eventf("WIFI connect start t=%us ssid=%s", rlog_upt_s(), rlog_ssid_masked());
             oled_set_wifi_state(".");
             cyw43_arch_wifi_connect_async(RLOG_WIFI_SSID, RLOG_WIFI_PASSWORD,
                                           RLOG_WIFI_PASSWORD[0] ? CYW43_AUTH_WPA2_MIXED_PSK : CYW43_AUTH_OPEN);
@@ -837,7 +856,7 @@ void remote_log_init(void) {
         apply_static_addr();
     }
     remote_log_eventf("RLOG init target=%s:%d ssid=%s ip=%s",
-                      RLOG_TARGET_IP, RLOG_TARGET_PORT, RLOG_WIFI_SSID,
+                      RLOG_TARGET_IP, RLOG_TARGET_PORT, rlog_ssid_masked(),
                       rl_static_valid ? "static" : "dhcp");
 
     const uint64_t boot_grace_us = 3000000ULL; // BLE 起動を優先させる 3 秒猶予
@@ -845,7 +864,7 @@ void remote_log_init(void) {
     next_ping_us = time_us_64() + 5000000ULL;
 
     remote_log_eventf("RLOG init target=%s:%d ssid=%s ok",
-                      RLOG_TARGET_IP, RLOG_TARGET_PORT, RLOG_WIFI_SSID);
+                      RLOG_TARGET_IP, RLOG_TARGET_PORT, rlog_ssid_masked());
 }
 
 #endif // ENABLE_REMOTE_LOG
