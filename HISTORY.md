@@ -9,6 +9,31 @@
 
 ---
 
+## 2026-10-21 BL-43/45 観測用: BLE ヘルスログ (BLE-HB / BLE STALL) + BL-04 セット移植
+
+- **BL-04 後期セットを `feature/pico-w-ble` へ forward (`6ee0d59`)**: 実機検証済みの
+  `b375cef`..`38c5666` を、現在の `ble_lock` ラッパーと BL-34 の Toast 流儀に合わせて移植。
+  - ペアリング = `Ctrl+Win+Alt+Space` の 2 段階 (1 回目: カレントスロットのボンド消去 /
+    2 回目: ペアリング開始)。`Ctrl+Win+Alt+Fx` はペアリングではなく OS へパススルー、
+    切替は `Ctrl+Win+Fx` のみ
+  - 切替・ON/OFF トグル受付から **3 秒ロック** (Toast `Can't switch now`)
+  - ペアリングはカレントスロットのみ / `is_pairing_mode` と 60 秒カウントダウンは
+    受付時点で開始し、150ms 遷移の適用時に再スタート
+  - all-clear は保留キュー・リンクフラグ・復帰タイマを全リセット (切断ハンドラが
+    clear 前の状態を参照しない)
+  - スロット別ボンド消去 (`ble_clear_slot_bonds`) を追加
+- **BLE ウェッジ観測 (`89381ef`)**: `ble_hid` に「受理した通知数 / 0x57 (ACL buffer full) /
+  フロー制御待ちで捨てた数 / 切断回数と理由 / 最終通知時刻」のカウンタを追加し、
+  `remote_log` が 1 秒周期で判定する。リアルタイム経路は加算のみ
+  - `BLE STALL tx=6200ms ci=12 ok=1523 blk=0 acl=0 disc=1 rs=0x13` (接続中に 5 秒途絶)
+  - `BLE STALL END ...` (復帰) / `BLE-HB ...` (15 秒ごと、変化が無ければ接続中のみ)
+  - `blk` が増える = フロー制御待ち / `acl` が増える = コントローラ拒否 /
+    `ok` が止まる = 通知自体が来ていない、と 3 分割で読める
+- **焼き手順**: `git log --oneline -1` が `89381ef` 以降であることを確認してから
+  `-DENABLE_REMOTE_LOG=ON` でビルド (secret は `src/remote_log_net.h`)。受信は
+  `python3 tools/udp_log_listener.py -o <file>`。3 構成 (rlog on/off, BLE off) で
+  ビルド確認済み・警告 0
+
 ## 2026-10-21 BL-39 完了: Wi-Fi UDP リモートログを `feature/pico-w-ble` へマージ
 
 - **実機で安定動作を確認して完了**。切り分け用にルディが Mac をインターネット共有 AP
