@@ -210,6 +210,10 @@ static int consecutive_can_send_timeouts = 0;
 
 static int current_slot = 0;
 
+uint32_t ble_hid_get_connected_slot_mask(void) {
+    return (current_state == BLE_STATE_CONNECTED) ? (1u << current_slot) : 0;
+}
+
 static bool is_pairing_mode = false;
 static btstack_timer_source_t pairing_timeout_timer;
 static btstack_timer_source_t disconnect_timeout_timer;

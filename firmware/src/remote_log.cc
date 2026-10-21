@@ -39,6 +39,7 @@ extern "C" {
 #endif
 
 #include "oled.h"
+#include "ble_hid.h"
 
 #ifndef RLOG_WIFI_COUNTRY
 #define RLOG_WIFI_COUNTRY 0
@@ -99,8 +100,11 @@ static spin_lock_t *rl_lock = nullptr; // IRQ マスク付きロック (任意�
 static volatile bool rl_cs_ready = false;
 
 static uint8_t rl_ring[RLOG_RING_SIZE];
-static volatile size_t rl_head = 0; // 消費位置 (フラッシュ済み)
-static volatile size_t rl_tail = 0; // 追記位置
+// 絶対カーソル (リング位置は abs % RLOG_RING_SIZE)。u64 なので数値比較で
+// 前後関係・巻き戻し判定ができる
+static volatile uint64_t rl_tail_abs = 0;   // 追記位置 (完結行のみ一括で書かれる)
+static volatile uint64_t rl_head_abs = 0;   // 送信カーソル (udp_send 成功時のみ前進)
+static volatile uint64_t rl_mirror_abs = 0; // UART ミラー用カーソル (RLOG_STDIO_MIRROR 時前進)
 
 static volatile uint32_t rl_drops = 0;      // Drop-Oldest による破棄行数
 static volatile uint32_t rl_datagrams = 0;  // UDP 送信成功数
@@ -140,27 +144,34 @@ static inline void rl_exit(uint32_t save) {
 }
 
 static size_t ring_free_locked(void) {
-    ssize_t used = (ssize_t) rl_tail - (ssize_t) rl_head;
-    if (used < 0) used += RLOG_RING_SIZE;
+    uint64_t used = rl_tail_abs - rl_head_abs;
     return (size_t) (RLOG_RING_SIZE - 1 - used);
 }
 
 // 最も古い行 ('\n' まで) を破棄する。行末が見つからない場合は全消去。
+// 捨てた領域を指していたミラーカーソルは送信位置まで揃える (捨て領域の再表示防止)
 static void ring_drop_oldest_line_locked(void) {
-    for (size_t i = rl_head; i != rl_tail; i = (i + 1) % RLOG_RING_SIZE) {
-        if (rl_ring[i] == '\n') {
-            rl_head = (i + 1) % RLOG_RING_SIZE;
-            return;
+    bool found_nl = false;
+    for (uint64_t i = rl_head_abs; i != rl_tail_abs; i++) {
+        if (rl_ring[i % RLOG_RING_SIZE] == '\n') {
+            rl_head_abs = i + 1;
+            found_nl = true;
+            break;
         }
     }
-    // 行末なし → 溜まっている内容はすべて破棄
-    rl_head = rl_tail;
+    if (!found_nl) {
+        // 行末なし → 溜まっている内容はすべて破棄
+        rl_head_abs = rl_tail_abs;
+    }
+    if (rl_mirror_abs < rl_head_abs) {
+        rl_mirror_abs = rl_head_abs;
+    }
 }
 
 static void ring_write_locked(const uint8_t *data, size_t len) {
-    for (size_t i = 0; i < len; i++) {
-        rl_ring[rl_tail] = data[i];
-        rl_tail = (rl_tail + 1) % RLOG_RING_SIZE;
+    for (size_t j = 0; j < len; j++) {
+        rl_ring[rl_tail_abs % RLOG_RING_SIZE] = data[j];
+        rl_tail_abs++;
     }
 }
 
@@ -198,66 +209,102 @@ void remote_log_count_forward(void) { count_forward++; }
 // UDP フラッシュ (メインループのみ)
 // ---------------------------------------------------------------------------
 
-// 未送信データを 1 データグラムにまとめて送る。失敗時は破棄せず次回再試行。
-// UDP 未接続でも排水は行い (stdio ミラーで UART に出る)、bring-up を観測可能にする。
-static void udp_flush_pending(uint64_t now_us) {
-    (void) now_us;
-
-    // 先頭から行 ('\n' 単位) を束ねる。最大 RLOG_DATAGRAM_MAX バイト。
-    // 行末が確定しない (未完の行しか無い) 場合は何もせず次回へ。
-    uint8_t chunk[RLOG_DATAGRAM_MAX];
-    size_t chunk_len = 0;
-    size_t new_head = rl_head;
-
-    uint32_t save = rl_enter();
-    for (size_t i = rl_head; i != rl_tail; i = (i + 1) % RLOG_RING_SIZE) {
-        uint8_t c = rl_ring[i];
-        chunk[chunk_len++] = c;
-        bool line_complete = (c == '\n');
-        bool chunk_full = (chunk_len >= RLOG_DATAGRAM_MAX);
-        if (line_complete || chunk_full) {
-            new_head = (i + 1) % RLOG_RING_SIZE;
-            break;
+// 行境界 ('\n') 単位でリングから 1 区間取り出す。成功時 *out_end_abs に新カーソル。
+// 追記側は常に完結行のみ書くため、通常は最初の '\n' で確実に terminate する
+// (max_bytes 到達や未完行はデータ異常時の保険として扱う)。何も取り出せないとき 0
+static size_t ring_extract_line_locked(uint64_t from_abs, uint8_t *chunk, size_t max_bytes,
+                                       uint64_t *out_end_abs) {
+    *out_end_abs = from_abs;
+    if (from_abs >= rl_tail_abs) return 0;
+    size_t len = 0;
+    while (len < max_bytes) {
+        uint64_t p = from_abs + len;
+        if (p >= rl_tail_abs) {
+            // 未完の行で終端 → 行末を待つ (前進させない)
+            return 0;
         }
-        if (((i + 1) % RLOG_RING_SIZE) == rl_tail) {
-            // 未完の行で終端 − 行末が来るまで待つ
-            chunk_len = 0;
-            break;
+        uint8_t c = rl_ring[p % RLOG_RING_SIZE];
+        chunk[len++] = c;
+        if (c == '\n') {
+            *out_end_abs = from_abs + len;
+            return len;
         }
     }
-    if (chunk_len == 0) {
-        rl_exit(save);
-        return;
-    }
-    rl_head = new_head;
-    rl_exit(save);
+    // max_bytes に達しても '\n' なし (異常データ保険) → 詰まり防止のため切って前進
+    *out_end_abs = from_abs + len;
+    return len;
+}
 
+// UDP フラッシュ + UART ミラー排水 (メインループ・20ms 間隔)。
+//
+// カーソルの整合:
+//   - 送信カーソル (rl_head_abs) は UDP 未開通・送信失敗・pbuf 確保失敗のとき
+//     一切前進しない → 開通後にバックログがまとめて送られる
+//   - ミラーカーソル (rl_mirror_abs) は UDP 状態と無関係に前進する (起動直後の
+//     行が UART に残る)。Drop-Oldest で捨てられた領域は
+//     ring_drop_oldest_line_locked() がミラーカーソルを揃えることで二重表示を防ぐ
+//   - 送信カーソルとミラーカーソルでそれぞれ 1 ティック 1 チャンクまで
+//     (バックログ大量時も 20ms 間隔のレート制限が維持される)
+static void udp_flush_pending(void) {
 #if RLOG_STDIO_MIRROR
-    // ベンチ観測用: 排水した行をそのまま UART へ
-    printf("%.*s", (int) chunk_len, (const char *) chunk);
-    stdio_flush();
+    {
+        uint8_t mchunk[RLOG_DATAGRAM_MAX];
+        uint64_t mend = 0;
+        size_t mlen = 0;
+        uint32_t save = rl_enter();
+        // リングを 1 周以上取り残していたら送信位置まで飛ばす (捨て領域の再表示防止)
+        if (rl_mirror_abs + RLOG_RING_SIZE <= rl_head_abs) {
+            rl_mirror_abs = rl_head_abs;
+        }
+        mlen = ring_extract_line_locked(rl_mirror_abs, mchunk, sizeof(mchunk), &mend);
+        if (mlen > 0) {
+            rl_mirror_abs = mend;
+        }
+        rl_exit(save);
+        if (mlen > 0) {
+            printf("%.*s", (int) mlen, (const char *) mchunk);
+            stdio_flush();
+        }
+    }
 #endif
 
-    // UDP 送信 (lwIP 呼び出しは必ずメインループから cyw43_arch_lwip_begin で包む)。
-    // pbuf_alloc/free も mem ヒープを触るためロック内に置く (RX 側は async helper の
-    // IRQ 文脈で同じ mem プールを使うためロック外確保はヒープ競合になる)
-    if (udp_state != UDP_OPENED || rl_pcb == nullptr) return;
+    // 送信カーソルから行境界までを取り出す (前進はまだしない)
+    uint8_t chunk[RLOG_DATAGRAM_MAX];
+    uint64_t cend = 0;
+    size_t clen = 0;
+    uint32_t save = rl_enter();
+    clen = ring_extract_line_locked(rl_head_abs, chunk, sizeof(chunk), &cend);
+    rl_exit(save);
+    if (clen == 0) return;
+
+    if (udp_state != UDP_OPENED || rl_pcb == nullptr) {
+        return; // 未開通: 送信カーソルはそのまま (この区間は後でまとめて送る)
+    }
+
+    // lwIP 呼び出し (alloc/free を含む) は async_context ロック内で必須
+    // (RX 側は async helper の IRQ 文脈で同じ mem プールを使うため)
     cyw43_arch_lwip_begin();
-    struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, (u16_t) chunk_len, PBUF_RAM);
+    struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, (u16_t) clen, PBUF_RAM);
     if (p == nullptr) {
         cyw43_arch_lwip_end();
         rl_send_errors++;
-        return;
+        return; // 次ティック再試行 (カーソル前進なし)
     }
-    memcpy(p->payload, chunk, chunk_len);
+    memcpy(p->payload, chunk, clen);
     err_t err = udp_send(rl_pcb, p);
     pbuf_free(p);
     cyw43_arch_lwip_end();
 
     if (err == ERR_OK) {
         rl_datagrams++;
+        uint32_t save2 = rl_enter();
+        // 抽出〜送信の間に Drop-Oldest で送信カーソルが先へ進んでいたら巻き戻さない
+        if (rl_head_abs < cend) {
+            rl_head_abs = cend;
+        }
+        rl_exit(save2);
     } else {
-        // 送信失敗時は最古破棄で物流を止めない (たまに行頭も失われるが観測は継続)
+        // 送信失敗: カーソル前進なし (次ティックで再試行)
         rl_send_errors++;
     }
 }
@@ -275,6 +322,11 @@ static const char *wifi_state_name(int s) {
     }
 }
 
+// イベント行の先頭に載せる uptime (秒)。起動から開通までの時間が追える
+static unsigned rlog_upt_s(void) {
+    return (unsigned) (time_us_64() / 1000000ULL);
+}
+
 static void udp_open_locked_helper(void) {
     cyw43_arch_lwip_begin();
     if (rl_pcb == nullptr) {
@@ -286,7 +338,7 @@ static void udp_open_locked_helper(void) {
     }
     cyw43_arch_lwip_end();
     if (udp_state == UDP_OPENED) {
-        remote_log_eventf("UDP ready -> %s:%d", RLOG_TARGET_IP, RLOG_TARGET_PORT);
+        remote_log_eventf("UDP ready t=%us -> %s:%d", rlog_upt_s(), RLOG_TARGET_IP, RLOG_TARGET_PORT);
     }
 }
 
@@ -315,7 +367,8 @@ static void apply_static_addr(void) {
     }
     cyw43_arch_lwip_end();
     if (need) {
-        remote_log_eventf("STATIC IP %s gw=%s nm=%s",
+        remote_log_eventf("STATIC IP t=%us %s gw=%s nm=%s",
+                          rlog_upt_s(),
                           ip4addr_ntoa(ip_2_ip4(&rl_static_ip)),
                           ip4addr_ntoa(ip_2_ip4(&rl_static_gw)),
                           ip4addr_ntoa(ip_2_ip4(&rl_static_nm)));
@@ -337,7 +390,7 @@ static void wifi_task(uint64_t now_us) {
             if (now_us < next_connect_attempt_us) return;
             wifi_state = WIFI_CONNECTING;
             connect_started_us = now_us;
-            remote_log_eventf("WIFI connect start ssid=%s", RLOG_WIFI_SSID);
+            remote_log_eventf("WIFI connect start t=%us ssid=%s", rlog_upt_s(), RLOG_WIFI_SSID);
             oled_set_wifi_state(".");
             cyw43_arch_wifi_connect_async(RLOG_WIFI_SSID, RLOG_WIFI_PASSWORD,
                                           RLOG_WIFI_PASSWORD[0] ? CYW43_AUTH_WPA2_MIXED_PSK : CYW43_AUTH_OPEN);
@@ -347,13 +400,15 @@ static void wifi_task(uint64_t now_us) {
             if (link == CYW43_LINK_UP) {
                 wifi_state = WIFI_JOINED;
                 udp_open_locked_helper();
+                unsigned joined_t = rlog_upt_s();
                 const ip4_addr_t *ip = netif_ip4_addr(&cyw43_state.netif[CYW43_ITF_STA]);
-                remote_log_eventf("WIFI JOINED ip=%s", ip4addr_ntoa(ip));
+                remote_log_eventf("WIFI JOINED t=%us ip=%s", joined_t, ip4addr_ntoa(ip));
                 oled_set_wifi_state("*");
             } else if (link < 0) {
                 char code[4];
                 snprintf(code, sizeof(code), "%d", link);
-                remote_log_eventf("WIFI FAIL st=%s (retry in %ds)", code, RLOG_CONNECT_RETRY_MS / 1000);
+                remote_log_eventf("WIFI FAIL t=%us st=%s (retry in %ds)", rlog_upt_s(), code,
+                                  RLOG_CONNECT_RETRY_MS / 1000);
                 oled_set_wifi_state(code);
                 wifi_state = WIFI_IDLE;
                 next_connect_attempt_us = now_us + RLOG_CONNECT_RETRY_MS * 1000ULL;
@@ -378,8 +433,9 @@ static void wifi_task(uint64_t now_us) {
                 }
                 cyw43_arch_lwip_end();
                 char code[4];
-                remote_log_eventf("WIFI TO st=%d dhcp=%d js=0x%x nf=0x%x (retry in %ds)", link, dhcp_to,
-                                  js_to, nf_to, RLOG_CONNECT_RETRY_MS / 1000);
+                remote_log_eventf("WIFI TO t=%us st=%d dhcp=%d js=0x%x nf=0x%x (retry in %ds)",
+                                  rlog_upt_s(), link, dhcp_to, js_to, nf_to,
+                                  RLOG_CONNECT_RETRY_MS / 1000);
                 // OLED は T<dhcp 状態> 表示 (2=INIT は DISCOVER 未発火, 6=SELECTING は
                 // DISCOVER 済み OFFER 待ち, 1=REQUESTING は ACK 待ちなどを判別するためのもの)
                 snprintf(code, sizeof(code), "T%d", dhcp_to);
@@ -397,7 +453,7 @@ static void wifi_task(uint64_t now_us) {
 
         case WIFI_JOINED:
             if (link != CYW43_LINK_UP) {
-                remote_log_eventf("WIFI LOST st=%d", link);
+                remote_log_eventf("WIFI LOST t=%us st=%d", rlog_upt_s(), link);
                 oled_set_wifi_state("?");
                 wifi_state = WIFI_IDLE;
                 udp_close_cleanup();
@@ -421,22 +477,23 @@ void remote_log_task(void) {
     next_task_us = now_us + RLOG_FLUSH_INTERVAL_MS * 1000ULL;
 
     wifi_task(now_us);
-    udp_flush_pending(now_us);
+    udp_flush_pending();
 
     // 5秒毎の生存ピング (リングが詰まっていても出す)
     if (((int64_t) (next_ping_us - now_us)) <= 0) {
         next_ping_us = now_us + RLOG_PING_INTERVAL_MS * 1000ULL;
-        size_t pending = (size_t) ((ssize_t) rl_tail - (ssize_t) rl_head);
-        if ((ssize_t) pending < 0) pending += RLOG_RING_SIZE;
+        size_t pending = (size_t) (rl_tail_abs - rl_head_abs);
 
         //診断: DHCP 状態機の位置も添える (lwIP: 2=INIT 6=SELECTING 1=REQUESTING 10=BOUND)。
-        // js=cyw43 wifi_join_state 生値 (0x0e01 で全フラグ到達=join 完了) と
-        // nf=netif->flags 16進 (0x9=UP|LINK_UP|ETHARP 相当) も添える
+        // js=cyw43 wifi_join_state 生値 (0x0e01 で全フラグ到達=join 完了)、
+        // nf=netif->flags 16進 (0x9=UP|LINK_UP|ETHARP 相当)、
+        // m=接続中 BLE スロット bitmask (非接続 0)、ci=接続インターバル (0.625ms 単位)
         struct netif *nif = &cyw43_state.netif[CYW43_ITF_STA];
         int dhcp_state = -1;
         int dhcp_tries = 0;
         unsigned js = 0;
         unsigned nf = 0;
+        int32_t rssi = -127; // STA 非稼働・読み取り失敗時のセンチネル
         const char *ip_str = "0.0.0.0";
         static char ip_buf[16];
         cyw43_arch_lwip_begin();
@@ -454,13 +511,22 @@ void remote_log_task(void) {
         }
         cyw43_arch_lwip_end();
 
-        remote_log_eventf("ALIVE up=%ds wifi=%s(%d) ip=%s dhcp=%d/%d js=0x%x nf=0x%x in=%u fwd=%u q=%u dr=%u dg=%u se=%u",
-                          (unsigned) (now_us / 1000000ULL), wifi_state_name(wifi_state),
-                          cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA),
-                          ip_str, dhcp_state, dhcp_tries, js, nf,
-                          (unsigned) count_ingest, (unsigned) count_forward,
-                          (unsigned) pending, (unsigned) rl_drops,
-                          (unsigned) rl_datagrams, (unsigned) rl_send_errors);
+        // RSSI: 公開 API は内部で CYW43_THREAD_ENTER (async lock, 再入可) を取るので
+        // ここから直接呼べる。失敗 (EPERM 等) はセンチネルのまま
+        int32_t rssi_val = -127;
+        if (cyw43_wifi_get_rssi(&cyw43_state, &rssi_val) == 0) {
+            rssi = rssi_val;
+        }
+
+        remote_log_eventf(
+            "ALIVE up=%ds wifi=%s(%d) ip=%s dhcp=%d/%d js=0x%x nf=0x%x rssi=%d m=0x%x ci=%u in=%u fwd=%u q=%u dr=%u dg=%u se=%u",
+            (unsigned) (now_us / 1000000ULL), wifi_state_name(wifi_state),
+            cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA),
+            ip_str, dhcp_state, dhcp_tries, js, nf, (int) rssi,
+            (unsigned) ble_hid_get_connected_slot_mask(), (unsigned) ble_hid_get_conn_interval(),
+            (unsigned) count_ingest, (unsigned) count_forward,
+            (unsigned) pending, (unsigned) rl_drops,
+            (unsigned) rl_datagrams, (unsigned) rl_send_errors);
     }
 }
 
@@ -468,8 +534,9 @@ void remote_log_init(void) {
     int lock_num = spin_lock_claim_unused(true);
     rl_lock = spin_lock_init((uint) lock_num);
     rl_cs_ready = true;
-    rl_head = 0;
-    rl_tail = 0;
+    rl_head_abs = 0;
+    rl_tail_abs = 0;
+    rl_mirror_abs = 0;
 
     // STA モードの起動 (cyw43 自体は ble_hid_init() 内で cyw43_arch_init() 済み)。
     // ※これを呼ばないと STA netif が立たず link は永遠に DOWN のまま何も起きない。
