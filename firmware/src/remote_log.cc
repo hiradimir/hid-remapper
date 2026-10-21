@@ -58,6 +58,14 @@ extern "C" {
 #define RLOG_FLUSH_INTERVAL_MS 20
 #endif
 
+// BLE ヘルス観測 (BL-43/45 ウェッジ用)
+#ifndef RLOG_BLE_HB_MS
+#define RLOG_BLE_HB_MS 15000 // BLE ヘルス行の周期 (変化が無ければ接続中のみ)
+#endif
+#ifndef RLOG_BLE_STALL_MS
+#define RLOG_BLE_STALL_MS 5000 // 通知がこれだけ途絶えたら「停止」とみなす
+#endif
+
 #ifndef RLOG_DATAGRAM_MAX
 #define RLOG_DATAGRAM_MAX 512
 #endif
@@ -704,6 +712,70 @@ static void wifi_task(uint64_t now_us) {
 // メインループタスク
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// BLE ヘルス観測 (BL-43/45 ウェッジ用)
+// ---------------------------------------------------------------------------
+// 目的: 「BLE は繋がったまま転送だけ止まる」ウェッジを数字で捉える。
+// リアルタイム経路 (ble_hid) はカウンタ加算のみで、整形・出力はここに限定する。
+//   - BLE STALL / BLE STALL END : 受理済み通知が RLOG_BLE_STALL_MS 途絶えた瞬間と復帰
+//   - BLE-HB                    : 15 秒ごとの健全性サマリ (変化が無ければ接続中のみ)
+// ok/blk/acl の増え方で「フロー制御待ちで捨てている (blk)」「コントローラが
+// バッファ不足を返している (acl)」「そもそも通知が来ていない (ok 停止)」を切り分ける
+static uint64_t next_ble_chk_us = 0;
+static uint64_t next_ble_hb_us = 0;
+static bool ble_stall_active = false;
+static uint32_t ble_hb_ok = 0;
+static uint32_t ble_hb_acl = 0;
+static uint32_t ble_hb_blk = 0;
+static uint32_t ble_hb_disc = 0;
+
+static void ble_health_task(uint64_t now_us) {
+    if (((int64_t) (next_ble_chk_us - now_us)) > 0) return;
+    next_ble_chk_us = now_us + 1000000ULL; // 1 秒周期で判定
+
+    ble_hid_health_t h;
+    ble_hid_get_health(&h);
+
+    const bool connected = ble_hid_is_connected();
+    const bool ever = (h.last_ok_us != 0);
+    const uint32_t tx_ms = ever ? (uint32_t) ((now_us - h.last_ok_us) / 1000ULL) : 0xFFFFFFFFu;
+
+    const bool stalled = connected && ever && tx_ms >= RLOG_BLE_STALL_MS;
+    if (stalled && !ble_stall_active) {
+        ble_stall_active = true;
+        remote_log_eventf("BLE STALL tx=%ums ci=%u ok=%u blk=%u acl=%u disc=%u rs=0x%02X",
+                          (unsigned) tx_ms, (unsigned) h.ci, (unsigned) h.ok,
+                          (unsigned) h.blocked, (unsigned) h.acl_full,
+                          (unsigned) h.disc, (unsigned) h.disc_reason);
+    } else if (!stalled && ble_stall_active) {
+        ble_stall_active = false;
+        remote_log_eventf("BLE STALL END tx=%ums ok=%u", (unsigned) tx_ms, (unsigned) h.ok);
+    }
+
+    if (((int64_t) (next_ble_hb_us - now_us)) <= 0) {
+        next_ble_hb_us = now_us + RLOG_BLE_HB_MS * 1000ULL;
+        const bool changed = (h.ok != ble_hb_ok) || (h.acl_full != ble_hb_acl) ||
+                             (h.blocked != ble_hb_blk) || (h.disc != ble_hb_disc);
+        if (connected || changed) {
+            ble_hb_ok = h.ok;
+            ble_hb_acl = h.acl_full;
+            ble_hb_blk = h.blocked;
+            ble_hb_disc = h.disc;
+            if (ever) {
+                remote_log_eventf("BLE-HB ci=%u ok=%u blk=%u acl=%u disc=%u rs=0x%02X tx=%ums",
+                                  (unsigned) h.ci, (unsigned) h.ok, (unsigned) h.blocked,
+                                  (unsigned) h.acl_full, (unsigned) h.disc,
+                                  (unsigned) h.disc_reason, (unsigned) tx_ms);
+            } else {
+                remote_log_eventf("BLE-HB ci=%u ok=0 blk=%u acl=%u disc=%u rs=0x%02X tx=none",
+                                  (unsigned) h.ci, (unsigned) h.blocked,
+                                  (unsigned) h.acl_full, (unsigned) h.disc,
+                                  (unsigned) h.disc_reason);
+            }
+        }
+    }
+}
+
 void remote_log_task(void) {
     uint64_t now_us = time_us_64();
     if (((int64_t) (next_task_us - now_us)) > 0) return;
@@ -711,6 +783,7 @@ void remote_log_task(void) {
 
     wifi_task(now_us);
     udp_flush_pending();
+    ble_health_task(now_us); // BLE ウェッジ観測 (1 秒周期の判定 + 15 秒周期の HB)
 
     // 5秒毎の生存ピング (リングが詰まっていても出す)
     if (((int64_t) (next_ping_us - now_us)) <= 0) {

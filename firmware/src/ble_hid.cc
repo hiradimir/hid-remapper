@@ -214,6 +214,25 @@ uint32_t ble_hid_get_connected_slot_mask(void) {
     return (current_state == BLE_STATE_CONNECTED) ? (1u << current_slot) : 0;
 }
 
+// BL-43/45 ウェッジ観測用カウンタ。リアルタイム経路では加算のみ行う
+static volatile uint32_t health_ok = 0;
+static volatile uint32_t health_acl_full = 0;
+static volatile uint32_t health_blocked = 0;
+static volatile uint32_t health_disc = 0;
+static volatile uint8_t health_disc_reason = 0;
+static volatile uint64_t health_last_ok_us = 0;
+
+void ble_hid_get_health(ble_hid_health_t* out) {
+    if (out == nullptr) return;
+    out->ci = ble_hid_get_conn_interval();
+    out->ok = health_ok;
+    out->acl_full = health_acl_full;
+    out->blocked = health_blocked;
+    out->disc = health_disc;
+    out->disc_reason = health_disc_reason;
+    out->last_ok_us = health_last_ok_us;
+}
+
 static bool is_pairing_mode = false;
 static btstack_timer_source_t pairing_timeout_timer;
 static btstack_timer_source_t disconnect_timeout_timer;
@@ -1393,6 +1412,8 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
 
             uint8_t reason = hci_event_disconnection_complete_get_reason(packet);
             printf("[BT] Disconnected (reason=0x%02X)\r\n", reason);
+            health_disc++;
+            health_disc_reason = reason;
             remote_log_eventf("DISC rs=0x%02X sw=%d tg=%d pair=%d slot=%d",
                               reason, switch_pending, pending_toggle_off,
                               is_pairing_mode, current_slot + 1);
@@ -1626,6 +1647,7 @@ void ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len) {
     if (report_id != 1 && report_id != 2 && report_id != 3) return;
 
     if (!ble_can_send) {
+        health_blocked++; // フロー制御待ちで捨てた (ウェッジ時に増える)
         return;
     }
 
@@ -1633,6 +1655,12 @@ void ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len) {
 
     oled_notify_tx();
     uint8_t status = hids_device_send_input_report_for_id(con_handle, report_id, (uint8_t*)data, len);
+    if (status == ERROR_CODE_SUCCESS) {
+        health_ok++;
+        health_last_ok_us = time_us_64();
+    } else if (status == 0x57) { // BTSTACK_ACL_BUFFERS_FULL: 受理されず再要求になる
+        health_acl_full++;
+    }
     if (status == ERROR_CODE_SUCCESS || status == 0x57) { // 0x57: BTSTACK_ACL_BUFFERS_FULL
         ble_can_send = false;
         btstack_run_loop_remove_timer(&can_send_timeout_timer);

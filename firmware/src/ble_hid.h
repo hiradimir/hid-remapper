@@ -10,6 +10,18 @@ extern "C" {
 
 typedef bool (*ble_send_report_fn_t)(uint8_t interface, const uint8_t* report_with_id, uint8_t len);
 
+// BLE ウェッジ観測用のヘルスカウンタ (BL-43/45)。
+// リアルタイム経路ではカウンタを増やすだけで、整形はメインループ側で行う
+typedef struct {
+    uint16_t ci;         // 接続間隔 (1.25ms 単位、0 = 未接続)
+    uint32_t ok;         // HCI が受理した通知の累計
+    uint32_t acl_full;   // 0x57 (BTSTACK_ACL_BUFFERS_FULL) の累計
+    uint32_t blocked;    // ble_can_send 待ちで捨てたレポート累計
+    uint32_t disc;       // 切断イベントの累計
+    uint8_t disc_reason; // 直近の HCI 切断理由
+    uint64_t last_ok_us; // 最後に受理された通知の時刻 (0 = まだ)
+} ble_hid_health_t;
+
 #if defined(ENABLE_BLE) && ENABLE_BLE
 
 void ble_hid_init(void);
@@ -29,6 +41,7 @@ void ble_hid_switch_host(uint8_t slot);
 void ble_led(bool value);
 uint16_t ble_hid_get_conn_interval(void);
 uint32_t ble_hid_get_connected_slot_mask(void);
+void ble_hid_get_health(ble_hid_health_t* out);
 
 // ホットキー判定（スロット切替・ペアリングモード・ボンド消去）
 bool ble_hid_check_hotkey(uint8_t interface, const uint8_t* report_with_id, uint8_t len);
@@ -60,6 +73,16 @@ static inline void ble_hid_switch_host(uint8_t slot) { (void)slot; }
 static inline void ble_led(bool value) { (void)value; }
 static inline uint16_t ble_hid_get_conn_interval(void) { return 0; }
 static inline uint32_t ble_hid_get_connected_slot_mask(void) { return 0; }
+static inline void ble_hid_get_health(ble_hid_health_t* out) {
+    if (out == nullptr) return;
+    out->ci = 0;
+    out->ok = 0;
+    out->acl_full = 0;
+    out->blocked = 0;
+    out->disc = 0;
+    out->disc_reason = 0;
+    out->last_ok_us = 0;
+}
 static inline bool ble_hid_check_hotkey(uint8_t interface, const uint8_t* report_with_id, uint8_t len) {
     (void)interface; (void)report_with_id; (void)len;
     return false;
