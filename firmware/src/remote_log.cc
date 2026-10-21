@@ -728,6 +728,10 @@ static uint32_t ble_hb_ok = 0;
 static uint32_t ble_hb_acl = 0;
 static uint32_t ble_hb_blk = 0;
 static uint32_t ble_hb_disc = 0;
+static uint32_t ble_stall_in_mark = 0;  // 直近チェック時の入力数
+static uint32_t ble_stall_ok_mark = 0;  // 直近チェック時の受理数
+static uint64_t ble_stall_since_us = 0; // 「入力は来たが受理されていない」開始時刻
+static uint32_t ble_stall_in_start = 0; // その開始時点の入力数 (未処理件数の算出用)
 
 static void ble_health_task(uint64_t now_us) {
     if (((int64_t) (next_ble_chk_us - now_us)) > 0) return;
@@ -740,16 +744,33 @@ static void ble_health_task(uint64_t now_us) {
     const bool ever = (h.last_ok_us != 0);
     const uint32_t tx_ms = ever ? (uint32_t) ((now_us - h.last_ok_us) / 1000ULL) : 0xFFFFFFFFu;
 
-    const bool stalled = connected && ever && tx_ms >= RLOG_BLE_STALL_MS;
+    // 停止判定は「入力は来ているのに、通知が受理されない」状態で行う。
+    // 単純な「通知が無い時間」で判定すると、単に無操作のときも停止に見えてしまう。
+    // 切断→再接続の直後も入力が来るまで判定しない (前回の受理時刻が古いため)
+    const uint32_t in_now = count_ingest;
+    const bool in_moved = (in_now != ble_stall_in_mark);
+    const bool ok_moved = (h.ok != ble_stall_ok_mark);
+    ble_stall_in_mark = in_now;
+    ble_stall_ok_mark = h.ok;
+    if (ok_moved) {
+        ble_stall_since_us = 0;
+    } else if (in_moved && ble_stall_since_us == 0) {
+        ble_stall_since_us = now_us;
+        ble_stall_in_start = in_now;
+    }
+
+    const bool stalled = connected && ble_stall_since_us != 0 &&
+                         (now_us - ble_stall_since_us) >= (uint64_t) RLOG_BLE_STALL_MS * 1000ULL;
     if (stalled && !ble_stall_active) {
         ble_stall_active = true;
-        remote_log_eventf("BLE STALL tx=%ums ci=%u ok=%u blk=%u acl=%u disc=%u rs=0x%02X",
-                          (unsigned) tx_ms, (unsigned) h.ci, (unsigned) h.ok,
-                          (unsigned) h.blocked, (unsigned) h.acl_full,
-                          (unsigned) h.disc, (unsigned) h.disc_reason);
+        remote_log_eventf("BLE STALL in=%u/%us ci=%u ok=%u blk=%u acl=%u disc=%u rs=0x%02X",
+                          (unsigned) (in_now - ble_stall_in_start),
+                          (unsigned) ((now_us - ble_stall_since_us) / 1000000ULL),
+                          (unsigned) h.ci, (unsigned) h.ok, (unsigned) h.blocked,
+                          (unsigned) h.acl_full, (unsigned) h.disc, (unsigned) h.disc_reason);
     } else if (!stalled && ble_stall_active) {
         ble_stall_active = false;
-        remote_log_eventf("BLE STALL END tx=%ums ok=%u", (unsigned) tx_ms, (unsigned) h.ok);
+        remote_log_eventf("BLE STALL END ok=%u tx=%ums", (unsigned) h.ok, (unsigned) tx_ms);
     }
 
     if (((int64_t) (next_ble_hb_us - now_us)) <= 0) {

@@ -523,7 +523,8 @@ void oled_task(void) {
 
     // Line 2: USB 入力デバイス種別 \x86 1:MS    \x86 2:KBD  (21 chars)
     char line2[24];
-    snprintf(line2, sizeof(line2), "\x86 1:%-3.3s    \x86 2:%-3.3s  ", ui_p1_dev, ui_p2_dev);
+    // 右端 col17..19 は WiFi 状態 (BL-39) 用に空けておく
+    snprintf(line2, sizeof(line2), "\x86 1:%-3.3s   \x86 2:%-3.3s", ui_p1_dev, ui_p2_dev);
 
     // Line 3: リアルタイムイベント通知 または フルMACアドレス (21 chars)
     char line3[32];
@@ -552,10 +553,11 @@ void oled_task(void) {
     draw_string_6x8(0, 16, line2);
     draw_string_6x8(0, 24, line3);
 
-    // BL-39: WiFi の異常時だけ Line0 右端 (col18) に 3 文字で重ね描きする。
-    // 正常時 ("*") と未設定は何も描かない — "BLE-FAST 11.25ms" の表示を隠さないため
-    if (ui_wifi_str[0] != '\0' && strcmp(ui_wifi_str, "*") != 0) {
-        draw_string_6x8(18 * 6, 0, ui_wifi_str);
+    // BL-39: WiFi 状態 (最大 3 文字) を Line2 右端 (col17, x=102) に描く。
+    // Line0 は BT 接続時に "BLE-FAST 11.25ms" で埋まるため、常時見える独立欄として
+    // Line2 の末尾 3 文字分を確保した。リモートログ無効時は空文字列で何も出ない
+    if (ui_wifi_str[0] != '\0') {
+        draw_string_6x8(17 * 6, 16, ui_wifi_str);
     }
 
     // 画面へ転送 (Horizontal addressing: Page 0..3)
