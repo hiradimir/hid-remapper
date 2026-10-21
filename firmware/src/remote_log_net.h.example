@@ -17,4 +17,13 @@
 // #define RLOG_STATIC_IP "192.168.0.240"
 // #define RLOG_STATIC_GATEWAY "192.168.0.1"
 // #define RLOG_STATIC_NETMASK "255.255.255.0"
+//
+// UART ミラー (任意, 既定 OFF)。UDP が主経路のため既定格下。UART (STDIO_USB) で
+// bring-up を観察するときだけ 1 にする (printf がメインループを最大 ~5.5ms/20ms
+// 押さえる点に注意)
+// #define RLOG_STDIO_MIRROR 1
+//
+// リングサイズ (任意, 既定 16KB)。RAM が足りないときに下げる。静的配列 (.bss) として
+// 消費する。1 行 (~200B) × 数十行以上を残したいなら既定のまま推奨
+// #define RLOG_RING_SIZE 16384
 #endif

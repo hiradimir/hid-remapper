@@ -75,11 +75,18 @@ extern "C" {
 // 1 でリングから排水した行を stdio (UART) にもミラーする (ベンチ bring-up 用)。
 // メインループの排水時にのみ出すので、BLE リアルタイム経路に printf は発生しない
 #ifndef RLOG_STDIO_MIRROR
-#define RLOG_STDIO_MIRROR 1
+#define RLOG_STDIO_MIRROR 0
 #endif
 
-#define RLOG_RING_SIZE 4096
+// リングサイズ (バイト)。remote_log_net.h から上書き可。RAM を静的配列として消費する
+#ifndef RLOG_RING_SIZE
+#define RLOG_RING_SIZE 16384
+#endif
 #define RLOG_LINE_MAX 200
+
+// データグラム先頭に付ける "#<seq> " プレフィックスの最大長 (余裕含む 16 バイト)。
+// 抽出側は RLOG_DATAGRAM_MAX からこの分を引いた長さを上限とする
+#define RLOG_SEQ_PREFIX_MAX 16
 
 // ---------------------------------------------------------------------------
 // 状態
@@ -109,6 +116,8 @@ static volatile uint64_t rl_mirror_abs = 0; // UART ミラー用カーソル (RL
 static volatile uint32_t rl_drops = 0;      // Drop-Oldest による破棄行数
 static volatile uint32_t rl_datagrams = 0;  // UDP 送信成功数
 static volatile uint32_t rl_send_errors = 0;
+static volatile uint32_t rl_seq = 0;      // 送信済みデータグラム通番 (送信成功ごとに +1)
+static volatile uint32_t rl_last_ack = 0; // 受信 "ACK <seq>" の最終値 (未達 = seq - ack で読む)
 
 static uint32_t count_ingest = 0; // main ループ: read_report で拾ったレポート数
 static uint32_t count_forward = 0; // main ループ: 転送 (kyouhan) 実行数
@@ -268,12 +277,14 @@ static void udp_flush_pending(void) {
     }
 #endif
 
-    // 送信カーソルから行境界までを取り出す (前進はまだしない)
+    // 送信カーソルから行境界までを取り出す (前進はまだしない)。
+    // 先頭に "#<seq> " プレフィックスを書くため 16 バイトの余白を空けて抽出
     uint8_t chunk[RLOG_DATAGRAM_MAX];
     uint64_t cend = 0;
     size_t clen = 0;
     uint32_t save = rl_enter();
-    clen = ring_extract_line_locked(rl_head_abs, chunk, sizeof(chunk), &cend);
+    clen = ring_extract_line_locked(rl_head_abs, chunk + RLOG_SEQ_PREFIX_MAX,
+                                    sizeof(chunk) - RLOG_SEQ_PREFIX_MAX, &cend);
     rl_exit(save);
     if (clen == 0) return;
 
@@ -281,16 +292,22 @@ static void udp_flush_pending(void) {
         return; // 未開通: 送信カーソルはそのまま (この区間は後でまとめて送る)
     }
 
+    // 送信通番 (成功したときだけ rl_seq を前進させる)
+    uint32_t seq = rl_seq + 1u;
+    int plen = snprintf((char *) chunk, RLOG_SEQ_PREFIX_MAX, "#%u ", (unsigned) seq);
+    if (plen <= 0 || plen >= RLOG_SEQ_PREFIX_MAX) plen = 0;
+
     // lwIP 呼び出し (alloc/free を含む) は async_context ロック内で必須
     // (RX 側は async helper の IRQ 文脈で同じ mem プールを使うため)
     cyw43_arch_lwip_begin();
-    struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, (u16_t) clen, PBUF_RAM);
+    struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, (u16_t) (clen + plen), PBUF_RAM);
     if (p == nullptr) {
         cyw43_arch_lwip_end();
         rl_send_errors++;
         return; // 次ティック再試行 (カーソル前進なし)
     }
-    memcpy(p->payload, chunk, clen);
+    memcpy(p->payload, chunk, (size_t) plen);
+    memcpy((uint8_t *) p->payload + plen, chunk + RLOG_SEQ_PREFIX_MAX, clen);
     err_t err = udp_send(rl_pcb, p);
     pbuf_free(p);
     cyw43_arch_lwip_end();
@@ -302,6 +319,7 @@ static void udp_flush_pending(void) {
         if (rl_head_abs < cend) {
             rl_head_abs = cend;
         }
+        rl_seq = seq;
         rl_exit(save2);
     } else {
         // 送信失敗: カーソル前進なし (次ティックで再試行)
@@ -322,6 +340,32 @@ static const char *wifi_state_name(int s) {
     }
 }
 
+// udp_recv コールバック。async helper の IRQ 文脈で走るため printf / ロック取得 /
+// メモリ確保は禁止し、軽い解析と volatile 代入のみ行う。pbuf は必ず解放する
+static void rl_udp_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p,
+                           const ip_addr_t *addr, u16_t port) {
+    (void) arg; (void) pcb; (void) addr; (void) port;
+    if (p == nullptr) return;
+    // スキャッタ/ギャザ (pbuf チェーン) に備えて pbuf_copy_partial で最大 15 バイト
+    // だけ取る (メモリ確保なし・チェーン追跡は lwIP 内部で完結)
+    char buf[16];
+    u16_t n = pbuf_copy_partial(p, buf, sizeof(buf) - 1, 0);
+    if (n > sizeof(buf) - 1) n = sizeof(buf) - 1;
+    buf[n] = '\0';
+    // "ACK <数字列>" のみ受け付ける (strtoul 相当の 10 進手書き解析)
+    if (n >= 5 && buf[0] == 'A' && buf[1] == 'C' && buf[2] == 'K' && buf[3] == ' ') {
+        uint32_t v = 0;
+        for (u16_t i = 4; i < n && buf[i] >= '0' && buf[i] <= '9'; i++) {
+            v = v * 10u + (uint32_t) (buf[i] - '0');
+        }
+        // 単調更新のみ (古い番号の遅延 ACK で巻き戻さない)
+        if (v > rl_last_ack) {
+            rl_last_ack = v;
+        }
+    }
+    pbuf_free(p);
+}
+
 // イベント行の先頭に載せる uptime (秒)。起動から開通までの時間が追える
 static unsigned rlog_upt_s(void) {
     return (unsigned) (time_us_64() / 1000000ULL);
@@ -334,6 +378,8 @@ static void udp_open_locked_helper(void) {
     }
     if (rl_pcb != nullptr && rl_target_valid) {
         udp_connect(rl_pcb, &rl_target_addr, RLOG_TARGET_PORT);
+        // ACK 受信用コールバック (IRQ 文脈で呼ばれる)
+        udp_recv(rl_pcb, rl_udp_recv_cb, nullptr);
         udp_state = UDP_OPENED;
     }
     cyw43_arch_lwip_end();
@@ -484,15 +530,12 @@ void remote_log_task(void) {
         next_ping_us = now_us + RLOG_PING_INTERVAL_MS * 1000ULL;
         size_t pending = (size_t) (rl_tail_abs - rl_head_abs);
 
-        //診断: DHCP 状態機の位置も添える (lwIP: 2=INIT 6=SELECTING 1=REQUESTING 10=BOUND)。
-        // js=cyw43 wifi_join_state 生値 (0x0e01 で全フラグ到達=join 完了)、
-        // nf=netif->flags 16進 (0x9=UP|LINK_UP|ETHARP 相当)、
-        // m=接続中 BLE スロット bitmask (非接続 0)、ci=接続インターバル (0.625ms 単位)
+        // 診断: DHCP 状態機の位置も添える (lwIP: 2=INIT 6=SELECTING 1=REQUESTING 10=BOUND)。
+        // js (cyw43 wifi_join_state) / nf (netif->flags) の 16 進診断は WIFI TO 側に
+        // 持たせてあり ALIVE は行長確保のため省略。seq/ack で未達数 (seq-ack) を読む
         struct netif *nif = &cyw43_state.netif[CYW43_ITF_STA];
         int dhcp_state = -1;
         int dhcp_tries = 0;
-        unsigned js = 0;
-        unsigned nf = 0;
         int32_t rssi = -127; // STA 非稼働・読み取り失敗時のセンチネル
         const char *ip_str = "0.0.0.0";
         static char ip_buf[16];
@@ -503,8 +546,6 @@ void remote_log_task(void) {
                 dhcp_state = (int) d->state;
                 dhcp_tries = (int) d->tries;
             }
-            js = (unsigned) cyw43_state.wifi_join_state;
-            nf = (unsigned) nif->flags;
             strncpy(ip_buf, ip4addr_ntoa(netif_ip4_addr(nif)), sizeof(ip_buf) - 1);
             ip_buf[sizeof(ip_buf) - 1] = '\0';
             ip_str = ip_buf;
@@ -519,11 +560,12 @@ void remote_log_task(void) {
         }
 
         remote_log_eventf(
-            "ALIVE up=%ds wifi=%s(%d) ip=%s dhcp=%d/%d js=0x%x nf=0x%x rssi=%d m=0x%x ci=%u in=%u fwd=%u q=%u dr=%u dg=%u se=%u",
+            "ALIVE up=%ds wifi=%s(%d) ip=%s dhcp=%d/%d rssi=%d m=0x%x ci=%u seq=%u ack=%u in=%u fwd=%u q=%u dr=%u dg=%u se=%u",
             (unsigned) (now_us / 1000000ULL), wifi_state_name(wifi_state),
             cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA),
-            ip_str, dhcp_state, dhcp_tries, js, nf, (int) rssi,
+            ip_str, dhcp_state, dhcp_tries, (int) rssi,
             (unsigned) ble_hid_get_connected_slot_mask(), (unsigned) ble_hid_get_conn_interval(),
+            (unsigned) rl_seq, (unsigned) rl_last_ack,
             (unsigned) count_ingest, (unsigned) count_forward,
             (unsigned) pending, (unsigned) rl_drops,
             (unsigned) rl_datagrams, (unsigned) rl_send_errors);
@@ -537,6 +579,8 @@ void remote_log_init(void) {
     rl_head_abs = 0;
     rl_tail_abs = 0;
     rl_mirror_abs = 0;
+    rl_seq = 0;
+    rl_last_ack = 0;
 
     // STA モードの起動 (cyw43 自体は ble_hid_init() 内で cyw43_arch_init() 済み)。
     // ※これを呼ばないと STA netif が立たず link は永遠に DOWN のまま何も起きない。
