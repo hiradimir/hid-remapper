@@ -32,6 +32,7 @@ extern "C" {
 #include <lwip/inet.h>
 #include <lwip/netif.h>
 #include <lwip/dhcp.h>
+#include <lwip/etharp.h>
 #if __has_include("remote_log_net.h")
 #include "remote_log_net.h"
 #else
@@ -135,6 +136,7 @@ static volatile uint32_t rl_send_errors = 0;
 static volatile uint32_t rl_seq = 0;      // 送信済みデータグラム通番 (送信成功ごとに +1)
 static volatile uint32_t reconnect_count = 0; // WIFI LOST 検出回数 (BADAUTH 頻度の指標)
 static int rl_last_err = 0; // 直近の udp_send エラーコード (err_t: -1=ERR_MEM -3=ERR_TIMEOUT -4=ERR_RTE)
+static int rl_target_arp_state = -1; // 宛先 ARP 状態: -1=未調査 1=解決 2=未解決 (変化時のみ報告)
 static volatile uint32_t rl_last_ack = 0; // 受信 "ACK <seq>" の最終値 (未達 = seq - ack で読む)
 static volatile uint32_t inflight_seq = 0; // 送信中 (未 ACK) の seq、0 = なし (stop-and-wait)
 static volatile uint64_t inflight_end_abs = 0; // inflight 行の終端リング位置 (送信成功時の cend)
@@ -538,9 +540,11 @@ static void udp_close_cleanup(void) {
     }
     udp_state = UDP_CLOSED;
     // 未 ACK の行は送信カーソル (rl_head_abs) のままリングに残す →
-    // 再接続後に新しい seq で送り直される。inflight と giveup 起点は畳む
+    // 再接続後に新しい seq で送り直される。inflight と giveup 起点は畳む。
+    // ARP 状態もクリア (再接続後の解決判定を新規に出させる)
     inflight_seq = 0;
     first_send_us = 0;
+    rl_target_arp_state = -1;
 }
 
 // 静的 IP の適用 (DHCP を止めて直接アドレスを置く)。再接続後の再適用は netif の
@@ -558,11 +562,15 @@ static void apply_static_addr(void) {
     }
     cyw43_arch_lwip_end();
     if (need) {
+        // ip4addr_ntoa は静的バッファを回して返すため 1 つの printf に複数回渡すと
+        // 全部が最後の値 (netmask) になる (実機発覚: 「255.255.255.0 gw=255.255.255.0
+        //  nm=255.255.255.0」)。ip4addr_ntoa_r で個別バッファに書いてから渡す
+        char s_ip[16], s_gw[16], s_nm[16];
         remote_log_eventf("STATIC IP t=%us %s gw=%s nm=%s",
                           rlog_upt_s(),
-                          ip4addr_ntoa(ip_2_ip4(&rl_static_ip)),
-                          ip4addr_ntoa(ip_2_ip4(&rl_static_gw)),
-                          ip4addr_ntoa(ip_2_ip4(&rl_static_nm)));
+                          ip4addr_ntoa_r(ip_2_ip4(&rl_static_ip), s_ip, (int) sizeof(s_ip)),
+                          ip4addr_ntoa_r(ip_2_ip4(&rl_static_gw), s_gw, (int) sizeof(s_gw)),
+                          ip4addr_ntoa_r(ip_2_ip4(&rl_static_nm), s_nm, (int) sizeof(s_nm)));
     }
 }
 
@@ -746,6 +754,36 @@ void remote_log_task(void) {
             }
             oled_set_wifi_state(wi_str);
         }
+
+        // 宛先 ARP 解決の監視 (状態変化時のみ 1 行、開通後のみ)。
+        // lwIP は ARP 未解決でも udp_send が ERR_OK を返して ARP キューに積むため、
+        // se も OLED も無反応のまま「宛先が間違っていて ARP request だけ出続ける」
+        // 状態が検出できない。5 秒周期で ARP 表を引き、解決/未解決の変化点だけ報告する
+        if (udp_state == UDP_OPENED && rl_target_valid && rl_pcb != nullptr) {
+            struct eth_addr *ea = nullptr;
+            const ip4_addr_t *rip = nullptr;
+            struct eth_addr mac = {};
+            // ARP 表のエントリはロック外で書き換わり得るためロック内でコピーする
+            cyw43_arch_lwip_begin();
+            s8_t ai = etharp_find_addr(&cyw43_state.netif[CYW43_ITF_STA],
+                                       ip_2_ip4(&rl_target_addr), &ea, &rip);
+            int arp_state = (ai >= 0 && ea != nullptr) ? 1 : 2;
+            if (arp_state == 1) {
+                mac = *ea;
+            }
+            cyw43_arch_lwip_end();
+            if (arp_state != rl_target_arp_state) {
+                rl_target_arp_state = arp_state;
+                if (arp_state == 1) {
+                    remote_log_eventf(
+                        "RLOG target resolved mac=%02x:%02x:%02x:%02x:%02x:%02x",
+                        mac.addr[0], mac.addr[1], mac.addr[2],
+                        mac.addr[3], mac.addr[4], mac.addr[5]);
+                } else {
+                    remote_log_eventf("RLOG target unresolved ip=%s (arp)", RLOG_TARGET_IP);
+                }
+            }
+        }
     }
 }
 
@@ -766,6 +804,7 @@ void remote_log_init(void) {
     rtx_count = 0;
     ack_mode_off = false;
     rl_last_err = 0;
+    rl_target_arp_state = -1;
 
     // STA モードの起動 (cyw43 自体は ble_hid_init() 内で cyw43_arch_init() 済み)。
     // ※これを呼ばないと STA netif が立たず link は永遠に DOWN のまま何も起きない。
