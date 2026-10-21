@@ -19,6 +19,12 @@
                        の seq= と ack= の差が未達 datagram 数として読める
     Ctrl+C で停止。従来どおり tee で保存することも可能:
     python3 tools/udp_log_listener.py | tee bt_udp_$(date +%H%M).log
+
+重複排除:
+    ファームの簡易再送 (stop-and-wait) により同一 seq が複数回届くことがあるため、
+    seq <= 直近表示 seq の datagram は表示しない (ACK は重複でも返す — 再送の
+    ACK が失われた場合に備える)。--no-ack 時は重複が発生しないため実質影響なし。
+    seq の大幅後退 (>64) は ファーム再起動 (seq リセット) とみなして表示を再開する
 """
 import argparse
 import datetime
@@ -50,6 +56,7 @@ def main() -> None:
         args.append if out else "stdout")
     ack_mode = "" if args.no_ack else " + ACK"
     print(f"listening on udp/{args.port} -> {target}{ack_mode}", flush=True)
+    last_shown_seq = -1  # 重複排除: この番号以下の seq の datagram は表示しない
     try:
         while True:
             data, addr = sock.recvfrom(2048)
@@ -59,13 +66,25 @@ def main() -> None:
             seq = int(m.group(1)) if m else None
             if seq is not None and not args.no_ack:
                 # ACK は受信 datagram ごとに 1 個 (送信元のソースポート宛に返す)。
+                # 重複 datagram でも ACK を返す (再送の ACK が失われた場合に必要)。
                 # ACK 送信失敗は握りつぶして観測を継続する
                 try:
                     sock.sendto(f"ACK {seq}".encode(), addr)
                 except OSError:
                     pass
+            # 重複排除: seq <= 直近表示 seq は再複製 (再送) なので捨てる。
+            # ただし seq が大きく後退 (>64) した場合はファーム再起動 (seq リセット)
+            # とみなして番号をリセットして表示する
+            if seq is not None:
+                if seq <= last_shown_seq:
+                    if last_shown_seq - seq > 64:
+                        last_shown_seq = seq
+                    else:
+                        continue
+                else:
+                    last_shown_seq = seq
             # 表示は seq を付けた形 ("12:34:56.789 192.168.1.250 #1234 ALIVE ...")。
-            # seq がない payload (旧ファーム / --no-ack で運用中の欠番) はそのまま表示
+            # seq がない payload (旧ファーム / ACK 無効機構) はそのまま表示
             body = payload if seq is None else SEQ_RE.sub("", payload, count=1)
             for line in body.splitlines():
                 text = f"{ts} {addr[0]:<15}" + (

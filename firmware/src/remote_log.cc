@@ -82,11 +82,24 @@ extern "C" {
 #ifndef RLOG_RING_SIZE
 #define RLOG_RING_SIZE 16384
 #endif
-#define RLOG_LINE_MAX 200
+#define RLOG_LINE_MAX 256
 
 // データグラム先頭に付ける "#<seq> " プレフィックスの最大長 (余裕含む 16 バイト)。
 // 抽出側は RLOG_DATAGRAM_MAX からこの分を引いた長さを上限とする
 #define RLOG_SEQ_PREFIX_MAX 16
+
+// ACK ベース簡易再送 (stop-and-wait)。RLOG_ACK_ENABLE=0 で機構ごと無効 (投げっぱなし)。
+// Receiver から ACK が 1 度も返らない環境 (nc -lu 等) では RLOG_ACK_GIVEUP_MS 経過で
+// 自動的に投げっぱなしにフォールバックする (--no-ack 運用で止まらない)
+#ifndef RLOG_ACK_ENABLE
+#define RLOG_ACK_ENABLE 1
+#endif
+#ifndef RLOG_ACK_TIMEOUT_MS
+#define RLOG_ACK_TIMEOUT_MS 500 // ACK 待ちの再送間隔
+#endif
+#ifndef RLOG_ACK_GIVEUP_MS
+#define RLOG_ACK_GIVEUP_MS 10000 // これだけ ACK が 1 度も返らなければ fire&forget へ
+#endif
 
 // ---------------------------------------------------------------------------
 // 状態
@@ -118,6 +131,12 @@ static volatile uint32_t rl_datagrams = 0;  // UDP 送信成功数
 static volatile uint32_t rl_send_errors = 0;
 static volatile uint32_t rl_seq = 0;      // 送信済みデータグラム通番 (送信成功ごとに +1)
 static volatile uint32_t rl_last_ack = 0; // 受信 "ACK <seq>" の最終値 (未達 = seq - ack で読む)
+static volatile uint32_t inflight_seq = 0; // 送信中 (未 ACK) の seq、0 = なし (stop-and-wait)
+static volatile uint64_t inflight_end_abs = 0; // inflight 行の終端リング位置 (送信成功時の cend)
+static uint64_t inflight_sent_us = 0;          // inflight の送信 (または最終再送) 時刻
+static uint64_t first_send_us = 0;             // ACK 検証の起点 (最初の成功送信時刻)
+static volatile uint32_t rtx_count = 0;        // 再送回数 (ALIVE の rtx=)
+static volatile bool ack_mode_off = false;     // ACK が返らない環境の fire&forget フォールバック
 
 static uint32_t count_ingest = 0; // main ループ: read_report で拾ったレポート数
 static uint32_t count_forward = 0; // main ループ: 転送 (kyouhan) 実行数
@@ -244,11 +263,50 @@ static size_t ring_extract_line_locked(uint64_t from_abs, uint8_t *chunk, size_t
     return len;
 }
 
+static void udp_flush_pending(void);
+
+// イベント行の先頭に載せる uptime (秒)。起動から開通までの時間が追える
+static unsigned rlog_upt_s(void) {
+    return (unsigned) (time_us_64() / 1000000ULL);
+}
+
+// 行 (プレフィックス無しの純行) を "#<seq> " を付けて 1 データグラムで送る。
+// lwIP 呼び出し (alloc/free を含む) は async_context ロック内で必須
+// (RX 側は async helper の IRQ 文脈で同じ mem プールを使うため)。
+// 呼び出し元はメインループのみ
+static err_t rl_udp_send_seq(uint32_t seq, const uint8_t *line, size_t len) {
+    char prefix[RLOG_SEQ_PREFIX_MAX];
+    int plen = snprintf(prefix, sizeof(prefix), "#%u ", (unsigned) seq);
+    size_t pl = (plen > 0 && (size_t) plen < sizeof(prefix)) ? (size_t) plen : 0;
+    size_t total = pl + len;
+    if (total > RLOG_DATAGRAM_MAX) { // 異常データ保険: 総長はデータグラム上限内に切る
+        len = RLOG_DATAGRAM_MAX - pl;
+        total = RLOG_DATAGRAM_MAX;
+    }
+    err_t ret = ERR_MEM;
+    cyw43_arch_lwip_begin();
+    struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, (u16_t) total, PBUF_RAM);
+    if (p != nullptr) {
+        memcpy(p->payload, prefix, pl);
+        memcpy((uint8_t *) p->payload + pl, line, len);
+        ret = udp_send(rl_pcb, p);
+        pbuf_free(p);
+    }
+    cyw43_arch_lwip_end();
+    return ret;
+}
+
 // UDP フラッシュ + UART ミラー排水 (メインループ・20ms 間隔)。
 //
 // カーソルの整合:
 //   - 送信カーソル (rl_head_abs) は UDP 未開通・送信失敗・pbuf 確保失敗のとき
 //     一切前進しない → 開通後にバックログがまとめて送られる
+//   - stop-and-wait (RLOG_ACK_ENABLE): 送信成功後もカーソルは前進させず
+//     inflight_seq を設定して ACK を待つ。ACK 済み (rl_last_ack >= inflight_seq)
+//     で初めて前進する。タイムアウトで同じ行を同じ seq で再送するため、
+//     ネットワークで落ちた datagram はリングに残り続ける
+//   - ACK が返らない環境は RLOG_ACK_GIVEUP_MS 経過で ack_mode_off = true に落ち、
+//     以降は従来通り送信成功で即前進する (--no-ack 運用で停止しない)
 //   - ミラーカーソル (rl_mirror_abs) は UDP 状態と無関係に前進する (起動直後の
 //     行が UART に残る)。Drop-Oldest で捨てられた領域は
 //     ring_drop_oldest_line_locked() がミラーカーソルを揃えることで二重表示を防ぐ
@@ -277,53 +335,112 @@ static void udp_flush_pending(void) {
     }
 #endif
 
-    // 送信カーソルから行境界までを取り出す (前進はまだしない)。
-    // 先頭に "#<seq> " プレフィックスを書くため 16 バイトの余白を空けて抽出
-    uint8_t chunk[RLOG_DATAGRAM_MAX];
-    uint64_t cend = 0;
-    size_t clen = 0;
-    uint32_t save = rl_enter();
-    clen = ring_extract_line_locked(rl_head_abs, chunk + RLOG_SEQ_PREFIX_MAX,
-                                    sizeof(chunk) - RLOG_SEQ_PREFIX_MAX, &cend);
-    rl_exit(save);
-    if (clen == 0) return;
+#if RLOG_ACK_ENABLE
+    if (!ack_mode_off) {
+        // (1) ACK 到着: inflight が ACK 済みなら、ここで初めて送信カーソルを前進させる
+        if (inflight_seq != 0 && rl_last_ack >= inflight_seq) {
+            uint32_t save = rl_enter();
+            if (rl_head_abs < inflight_end_abs) {
+                rl_head_abs = inflight_end_abs;
+            }
+            rl_exit(save);
+            inflight_seq = 0;
+        }
+        // (2) フォールバック: ACK が 1 度も返らないまま GIVEUP 経過 → fire&forget へ
+        if (first_send_us != 0 && rl_last_ack == 0 &&
+            (time_us_64() - first_send_us) >= RLOG_ACK_GIVEUP_MS * 1000ULL) {
+            ack_mode_off = true;
+            if (inflight_seq != 0) {
+                // 待っていた行は最低 1 回は送信済み → 投げっぱなしに切り替えて解放
+                uint32_t save = rl_enter();
+                if (rl_head_abs < inflight_end_abs) {
+                    rl_head_abs = inflight_end_abs;
+                }
+                rl_exit(save);
+                inflight_seq = 0;
+            }
+            remote_log_eventf("RLOG ACK disable t=%us (no ack in %us) -> fire-forget",
+                              rlog_upt_s(), (unsigned) (RLOG_ACK_GIVEUP_MS / 1000));
+        }
+    }
+#endif
 
+    // (3) inflight 未解決: ACK 待ち or 再送
+    if (inflight_seq != 0) {
+#if RLOG_ACK_ENABLE
+        uint64_t elapsed = time_us_64() - inflight_sent_us;
+        if (!ack_mode_off && elapsed < RLOG_ACK_TIMEOUT_MS * 1000ULL) {
+            return; // ACK 待ち (次ティックも待つ)
+        }
+#endif
+        if (inflight_end_abs <= rl_head_abs) {
+            // 待機中に Drop-Oldest で行が破棄された → 諦めて次の行へ
+            inflight_seq = 0;
+            return;
+        }
+        // 同じ行を同じ seq で再送 (カーソルは動かさない)
+        uint8_t rchunk[RLOG_DATAGRAM_MAX - RLOG_SEQ_PREFIX_MAX];
+        uint64_t rcend = 0;
+        size_t rlen = 0;
+        uint32_t save = rl_enter();
+        rlen = ring_extract_line_locked(rl_head_abs, rchunk, sizeof(rchunk), &rcend);
+        rl_exit(save);
+        if (rlen == 0) { // 行が消えた (異常) → 解放して次へ
+            inflight_seq = 0;
+            return;
+        }
+        err_t err = rl_udp_send_seq(inflight_seq, rchunk, rlen);
+        if (err == ERR_OK) {
+            rl_datagrams++;
+            inflight_sent_us = time_us_64();
+            rtx_count++;
+            return;
+        }
+        rl_send_errors++; // 再送失敗: 次ティックで再試行
+        return;
+    }
+
+    // (4) 新規行の送信: 直前に inflight が未解決でないときのみ到達する
     if (udp_state != UDP_OPENED || rl_pcb == nullptr) {
         return; // 未開通: 送信カーソルはそのまま (この区間は後でまとめて送る)
     }
 
-    // 送信通番 (成功したときだけ rl_seq を前進させる)
-    uint32_t seq = rl_seq + 1u;
-    int plen = snprintf((char *) chunk, RLOG_SEQ_PREFIX_MAX, "#%u ", (unsigned) seq);
-    if (plen <= 0 || plen >= RLOG_SEQ_PREFIX_MAX) plen = 0;
-
-    // lwIP 呼び出し (alloc/free を含む) は async_context ロック内で必須
-    // (RX 側は async helper の IRQ 文脈で同じ mem プールを使うため)
-    cyw43_arch_lwip_begin();
-    struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, (u16_t) (clen + plen), PBUF_RAM);
-    if (p == nullptr) {
-        cyw43_arch_lwip_end();
-        rl_send_errors++;
-        return; // 次ティック再試行 (カーソル前進なし)
+    // 送信カーソルから行境界までを取り出す (前進はまだしない)。
+    // プレフィックスは rl_udp_send_seq 側で組み立てるため、先頭余白は不要
+    uint8_t chunk[RLOG_DATAGRAM_MAX - RLOG_SEQ_PREFIX_MAX];
+    uint64_t cend = 0;
+    size_t clen = 0;
+    {
+        uint32_t save = rl_enter();
+        clen = ring_extract_line_locked(rl_head_abs, chunk, sizeof(chunk), &cend);
+        rl_exit(save);
     }
-    memcpy(p->payload, chunk, (size_t) plen);
-    memcpy((uint8_t *) p->payload + plen, chunk + RLOG_SEQ_PREFIX_MAX, clen);
-    err_t err = udp_send(rl_pcb, p);
-    pbuf_free(p);
-    cyw43_arch_lwip_end();
+    if (clen == 0) return;
 
+    uint32_t seq = rl_seq + 1u; // 送信に成功したときだけ rl_seq に採用
+    err_t err = rl_udp_send_seq(seq, chunk, clen);
     if (err == ERR_OK) {
         rl_datagrams++;
-        uint32_t save2 = rl_enter();
-        // 抽出〜送信の間に Drop-Oldest で送信カーソルが先へ進んでいたら巻き戻さない
-        if (rl_head_abs < cend) {
-            rl_head_abs = cend;
-        }
         rl_seq = seq;
-        rl_exit(save2);
+        if (RLOG_ACK_ENABLE && !ack_mode_off) {
+            // stop-and-wait: ここではカーソルを前進させない。
+            // ACK 済みになったら先頭の (1) で前進する
+            inflight_seq = seq;
+            inflight_end_abs = cend;
+            inflight_sent_us = time_us_64();
+            if (first_send_us == 0) {
+                first_send_us = time_us_64(); // ACK 検証 (giveup) の起点
+            }
+        } else {
+            // fire&forget: 送信成功で即前進 (Drop-Oldest が先へ進めていたら巻き戻さない)
+            uint32_t save = rl_enter();
+            if (rl_head_abs < cend) {
+                rl_head_abs = cend;
+            }
+            rl_exit(save);
+        }
     } else {
-        // 送信失敗: カーソル前進なし (次ティックで再試行)
-        rl_send_errors++;
+        rl_send_errors++; // 送信失敗: カーソル前進なし (次ティックで再試行)
     }
 }
 
@@ -366,11 +483,6 @@ static void rl_udp_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p,
     pbuf_free(p);
 }
 
-// イベント行の先頭に載せる uptime (秒)。起動から開通までの時間が追える
-static unsigned rlog_upt_s(void) {
-    return (unsigned) (time_us_64() / 1000000ULL);
-}
-
 static void udp_open_locked_helper(void) {
     cyw43_arch_lwip_begin();
     if (rl_pcb == nullptr) {
@@ -396,6 +508,10 @@ static void udp_close_cleanup(void) {
         rl_pcb = nullptr;
     }
     udp_state = UDP_CLOSED;
+    // 未 ACK の行は送信カーソル (rl_head_abs) のままリングに残す →
+    // 再接続後に新しい seq で送り直される。inflight と giveup 起点は畳む
+    inflight_seq = 0;
+    first_send_us = 0;
 }
 
 // 静的 IP の適用 (DHCP を止めて直接アドレスを置く)。再接続後の再適用は netif の
@@ -560,12 +676,12 @@ void remote_log_task(void) {
         }
 
         remote_log_eventf(
-            "ALIVE up=%ds wifi=%s(%d) ip=%s dhcp=%d/%d rssi=%d m=0x%x ci=%u seq=%u ack=%u in=%u fwd=%u q=%u dr=%u dg=%u se=%u",
+            "ALIVE up=%ds wifi=%s(%d) ip=%s dhcp=%d/%d rssi=%d m=0x%x ci=%u seq=%u ack=%u rtx=%u in=%u fwd=%u q=%u dr=%u dg=%u se=%u",
             (unsigned) (now_us / 1000000ULL), wifi_state_name(wifi_state),
             cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA),
             ip_str, dhcp_state, dhcp_tries, (int) rssi,
             (unsigned) ble_hid_get_connected_slot_mask(), (unsigned) ble_hid_get_conn_interval(),
-            (unsigned) rl_seq, (unsigned) rl_last_ack,
+            (unsigned) rl_seq, (unsigned) rl_last_ack, (unsigned) rtx_count,
             (unsigned) count_ingest, (unsigned) count_forward,
             (unsigned) pending, (unsigned) rl_drops,
             (unsigned) rl_datagrams, (unsigned) rl_send_errors);
@@ -581,6 +697,12 @@ void remote_log_init(void) {
     rl_mirror_abs = 0;
     rl_seq = 0;
     rl_last_ack = 0;
+    inflight_seq = 0;
+    inflight_end_abs = 0;
+    inflight_sent_us = 0;
+    first_send_us = 0;
+    rtx_count = 0;
+    ack_mode_off = false;
 
     // STA モードの起動 (cyw43 自体は ble_hid_init() 内で cyw43_arch_init() 済み)。
     // ※これを呼ばないと STA netif が立たず link は永遠に DOWN のまま何も起きない。
