@@ -336,6 +336,13 @@ static void udp_flush_pending(void) {
 #endif
 
 #if RLOG_ACK_ENABLE
+    // (0) ACK 自動復帰: fire&forget に落ちていても後から ACK が届くことがある
+    // (Pico 起動後に listener を起動する運用) → ACK モードへ戻す
+    if (ack_mode_off && rl_last_ack != 0) {
+        ack_mode_off = false;
+        remote_log_eventf("RLOG ACK enable t=%us (ack=%u)", rlog_upt_s(),
+                          (unsigned) rl_last_ack);
+    }
     if (!ack_mode_off) {
         // (1) ACK 到着: inflight が ACK 済みなら、ここで初めて送信カーソルを前進させる
         if (inflight_seq != 0 && rl_last_ack >= inflight_seq) {
@@ -564,10 +571,22 @@ static void wifi_task(uint64_t now_us) {
                 udp_open_locked_helper();
                 unsigned joined_t = rlog_upt_s();
                 const ip4_addr_t *ip = netif_ip4_addr(&cyw43_state.netif[CYW43_ITF_STA]);
-                remote_log_eventf("WIFI JOINED t=%us ip=%s", joined_t, ip4addr_ntoa(ip));
+                // 接続先 AP の BSSID (AiMesh の「遠いノードに繋いでいる」切り分け用)。
+                // cyw43 公開 API は CYW43_THREAD_ENTER を内部で取るため
+                // (RSSI の前例と同じ扱い) メインループからそのまま呼べる
+                uint8_t bssid[6] = {0};
+                char bssid_str[24];
+                if (cyw43_wifi_get_bssid(&cyw43_state, bssid) == 0) {
+                    snprintf(bssid_str, sizeof(bssid_str), "%02x:%02x:%02x:%02x:%02x:%02x",
+                             bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5]);
+                } else {
+                    snprintf(bssid_str, sizeof(bssid_str), "??");
+                }
+                remote_log_eventf("WIFI JOINED t=%us ip=%s bssid=%s",
+                                  joined_t, ip4addr_ntoa(ip), bssid_str);
                 oled_set_wifi_state("*");
             } else if (link < 0) {
-                char code[4];
+                char code[8]; // OLED 用の short code (表示は 2 文字程度だが長幅を確保)
                 snprintf(code, sizeof(code), "%d", link);
                 remote_log_eventf("WIFI FAIL t=%us st=%s (retry in %ds)", rlog_upt_s(), code,
                                   RLOG_CONNECT_RETRY_MS / 1000);
@@ -594,7 +613,7 @@ static void wifi_task(uint64_t now_us) {
                     nf_to = (unsigned) nif_to->flags;
                 }
                 cyw43_arch_lwip_end();
-                char code[4];
+                char code[8]; // OLED 用の short code (上と同様)
                 remote_log_eventf("WIFI TO t=%us st=%d dhcp=%d js=0x%x nf=0x%x (retry in %ds)",
                                   rlog_upt_s(), link, dhcp_to, js_to, nf_to,
                                   RLOG_CONNECT_RETRY_MS / 1000);
