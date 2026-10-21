@@ -134,6 +134,7 @@ static volatile uint32_t rl_datagrams = 0;  // UDP 送信成功数
 static volatile uint32_t rl_send_errors = 0;
 static volatile uint32_t rl_seq = 0;      // 送信済みデータグラム通番 (送信成功ごとに +1)
 static volatile uint32_t reconnect_count = 0; // WIFI LOST 検出回数 (BADAUTH 頻度の指標)
+static int rl_last_err = 0; // 直近の udp_send エラーコード (err_t: -1=ERR_MEM -3=ERR_TIMEOUT -4=ERR_RTE)
 static volatile uint32_t rl_last_ack = 0; // 受信 "ACK <seq>" の最終値 (未達 = seq - ack で読む)
 static volatile uint32_t inflight_seq = 0; // 送信中 (未 ACK) の seq、0 = なし (stop-and-wait)
 static volatile uint64_t inflight_end_abs = 0; // inflight 行の終端リング位置 (送信成功時の cend)
@@ -300,6 +301,23 @@ static err_t rl_udp_send_seq(uint32_t seq, const uint8_t *line, size_t len) {
     return ret;
 }
 
+// 送信エラーの記録。se (rl_send_errors) が 0 から非 0 に変わった瞬間、または
+// エラーコードが前回と変わったときにだけ 1 行イベントを出す (イベント乱発を防ぐ)。
+// メインループ経路からのみ呼ぶ (イベント行はリング経由なのでリアルタイム経路非経由)
+static void rl_send_err_done(err_t err) {
+    bool first = (rl_send_errors == 0);
+    bool changed = ((int) err != rl_last_err);
+    rl_last_err = (int) err;
+    rl_send_errors++;
+    if (first) {
+        remote_log_eventf("RLOG send error first err=%d se=%u",
+                          (int) err, (unsigned) rl_send_errors);
+    } else if (changed) {
+        remote_log_eventf("RLOG send error err=%d se=%u",
+                          (int) err, (unsigned) rl_send_errors);
+    }
+}
+
 // UDP フラッシュ + UART ミラー排水 (メインループ・20ms 間隔)。
 //
 // カーソルの整合:
@@ -407,7 +425,7 @@ static void udp_flush_pending(void) {
             rtx_count++;
             return;
         }
-        rl_send_errors++; // 再送失敗: 次ティックで再試行
+        rl_send_err_done(err); // 再送失敗: 次ティックで再試行
         return;
     }
 
@@ -451,7 +469,7 @@ static void udp_flush_pending(void) {
             rl_exit(save);
         }
     } else {
-        rl_send_errors++; // 送信失敗: カーソル前進なし (次ティックで再試行)
+        rl_send_err_done(err); // 送信失敗: カーソル前進なし (次ティックで再試行)
     }
 }
 
@@ -590,10 +608,11 @@ static void wifi_task(uint64_t now_us) {
                                   joined_t, ip4addr_ntoa(ip), bssid_str);
                 oled_set_wifi_state("*");
             } else if (link < 0) {
+                reconnect_count++; // BADAUTH (-3) 等の失敗も再接続系として数える
                 char code[16]; // OLED 用の short code (幅は診断値の桁数変動に任せる)
                 snprintf(code, sizeof(code), "%d", link);
-                remote_log_eventf("WIFI FAIL t=%us st=%s (retry in %ds)", rlog_upt_s(), code,
-                                  RLOG_CONNECT_RETRY_MS / 1000);
+                remote_log_eventf("WIFI FAIL t=%us st=%s rc=%u (retry in %ds)", rlog_upt_s(), code,
+                                  (unsigned) reconnect_count, RLOG_CONNECT_RETRY_MS / 1000);
                 oled_set_wifi_state(code);
                 wifi_state = WIFI_IDLE;
                 next_connect_attempt_us = now_us + RLOG_CONNECT_RETRY_MS * 1000ULL;
@@ -711,6 +730,22 @@ void remote_log_task(void) {
             (unsigned) count_ingest, (unsigned) count_forward,
             (unsigned) pending, (unsigned) rl_drops,
             (unsigned) rl_datagrams, (unsigned) rl_send_errors);
+
+        // OLED: Wi-Fi 欄に送信エラー (se) を出す。JOINED なのに 0 送信 — が
+        // lwIP で拒否されている (se 増加) のかネットワークに出ていないかを
+        // UART 無しで判別できる。se != 0 なら "!<下 2 桁>" (例 "!07")、
+        // se == 0 なら従来どおり "*"。非 JOINED の他状態コード (".", "?", "T6" など)
+        // は Events 側で設定されるためここでは上書きしない。
+        // リング書き込みと同じメインループなので追加ロック不要
+        if (wifi_state == WIFI_JOINED) {
+            char wi_str[4];
+            if (rl_send_errors != 0) {
+                snprintf(wi_str, sizeof(wi_str), "!%02u", (unsigned) (rl_send_errors % 100));
+            } else {
+                snprintf(wi_str, sizeof(wi_str), "*");
+            }
+            oled_set_wifi_state(wi_str);
+        }
     }
 }
 
@@ -730,6 +765,7 @@ void remote_log_init(void) {
     first_send_us = 0;
     rtx_count = 0;
     ack_mode_off = false;
+    rl_last_err = 0;
 
     // STA モードの起動 (cyw43 自体は ble_hid_init() 内で cyw43_arch_init() 済み)。
     // ※これを呼ばないと STA netif が立たず link は永遠に DOWN のまま何も起きない。
