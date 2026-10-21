@@ -98,7 +98,10 @@ extern "C" {
 #define RLOG_ACK_TIMEOUT_MS 500 // ACK 待ちの再送間隔
 #endif
 #ifndef RLOG_ACK_GIVEUP_MS
-#define RLOG_ACK_GIVEUP_MS 10000 // これだけ ACK が 1 度も返らなければ fire&forget へ
+#define RLOG_ACK_GIVEUP_MS 60000 // 開通後これだけ ACK が 1 度も返らなければ fire&forget へ。
+// 実機で「Pico 起動 → 数十秒後に listener 起動」の運用があり、短いと giveup 時点で
+// 起動〜開通の履歴 (seq 1..N) が送り直されないまま消える。60 秒にすればリング保持分
+// (16KB ≒ 100 行) が再送で復元される。後から ACK が届けば ACK モードへ自動復帰する
 #endif
 
 // ---------------------------------------------------------------------------
@@ -130,6 +133,7 @@ static volatile uint32_t rl_drops = 0;      // Drop-Oldest による破棄行数
 static volatile uint32_t rl_datagrams = 0;  // UDP 送信成功数
 static volatile uint32_t rl_send_errors = 0;
 static volatile uint32_t rl_seq = 0;      // 送信済みデータグラム通番 (送信成功ごとに +1)
+static volatile uint32_t reconnect_count = 0; // WIFI LOST 検出回数 (BADAUTH 頻度の指標)
 static volatile uint32_t rl_last_ack = 0; // 受信 "ACK <seq>" の最終値 (未達 = seq - ack で読む)
 static volatile uint32_t inflight_seq = 0; // 送信中 (未 ACK) の seq、0 = なし (stop-and-wait)
 static volatile uint64_t inflight_end_abs = 0; // inflight 行の終端リング位置 (送信成功時の cend)
@@ -586,7 +590,7 @@ static void wifi_task(uint64_t now_us) {
                                   joined_t, ip4addr_ntoa(ip), bssid_str);
                 oled_set_wifi_state("*");
             } else if (link < 0) {
-                char code[8]; // OLED 用の short code (表示は 2 文字程度だが長幅を確保)
+                char code[16]; // OLED 用の short code (幅は診断値の桁数変動に任せる)
                 snprintf(code, sizeof(code), "%d", link);
                 remote_log_eventf("WIFI FAIL t=%us st=%s (retry in %ds)", rlog_upt_s(), code,
                                   RLOG_CONNECT_RETRY_MS / 1000);
@@ -613,7 +617,7 @@ static void wifi_task(uint64_t now_us) {
                     nf_to = (unsigned) nif_to->flags;
                 }
                 cyw43_arch_lwip_end();
-                char code[8]; // OLED 用の short code (上と同様)
+                char code[16]; // OLED 用の short code (幅は診断値の桁数変動に任せる)
                 remote_log_eventf("WIFI TO t=%us st=%d dhcp=%d js=0x%x nf=0x%x (retry in %ds)",
                                   rlog_upt_s(), link, dhcp_to, js_to, nf_to,
                                   RLOG_CONNECT_RETRY_MS / 1000);
@@ -634,7 +638,9 @@ static void wifi_task(uint64_t now_us) {
 
         case WIFI_JOINED:
             if (link != CYW43_LINK_UP) {
-                remote_log_eventf("WIFI LOST t=%us st=%d", rlog_upt_s(), link);
+                reconnect_count++;
+                remote_log_eventf("WIFI LOST t=%us st=%d rc=%u", rlog_upt_s(), link,
+                                  (unsigned) reconnect_count);
                 oled_set_wifi_state("?");
                 wifi_state = WIFI_IDLE;
                 udp_close_cleanup();
@@ -695,12 +701,13 @@ void remote_log_task(void) {
         }
 
         remote_log_eventf(
-            "ALIVE up=%ds wifi=%s(%d) ip=%s dhcp=%d/%d rssi=%d m=0x%x ci=%u seq=%u ack=%u rtx=%u in=%u fwd=%u q=%u dr=%u dg=%u se=%u",
+            "ALIVE up=%ds wifi=%s(%d) ip=%s dhcp=%d/%d rssi=%d m=0x%x ci=%u seq=%u ack=%u rtx=%u rc=%u in=%u fwd=%u q=%u dr=%u dg=%u se=%u",
             (unsigned) (now_us / 1000000ULL), wifi_state_name(wifi_state),
             cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA),
             ip_str, dhcp_state, dhcp_tries, (int) rssi,
             (unsigned) ble_hid_get_connected_slot_mask(), (unsigned) ble_hid_get_conn_interval(),
             (unsigned) rl_seq, (unsigned) rl_last_ack, (unsigned) rtx_count,
+            (unsigned) reconnect_count,
             (unsigned) count_ingest, (unsigned) count_forward,
             (unsigned) pending, (unsigned) rl_drops,
             (unsigned) rl_datagrams, (unsigned) rl_send_errors);
@@ -715,6 +722,7 @@ void remote_log_init(void) {
     rl_tail_abs = 0;
     rl_mirror_abs = 0;
     rl_seq = 0;
+    reconnect_count = 0;
     rl_last_ack = 0;
     inflight_seq = 0;
     inflight_end_abs = 0;
