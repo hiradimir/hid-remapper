@@ -1583,9 +1583,11 @@ void ble_hid_init(void) {
 
 
 void ble_hid_task(void) {
-    ble_lock();
+    // 【BL-45】main ループから毎回 (~25k/s) 呼ばれるため、ここで async ロックを
+    // 取らない。高頻度のロック取得が CYW43 側の BT 処理を阻害し、広告コマンドが
+    // 受理されても電波に乗らない現象を起こしていた。BTstack API を触る区間
+    // (スロット切替・広告の張り直し) だけ個別にロックする
     ble_hid_task_locked();
-    ble_unlock();
 }
 
 static void ble_hid_task_locked(void) {
@@ -1600,7 +1602,9 @@ static void ble_hid_task_locked(void) {
         adv_retry_next_us = now_us + 1000000ULL;
         remote_log_eventf("ADV-RETRY st=%d pair=%d req=%d", (int) current_state,
                           is_pairing_mode, adv_enable_req);
+        ble_lock();
         adv_set(1);
+        ble_unlock();
     }
     if (now_us - last_countdown_check_us >= 500000) { // 500ms周期でカウントダウン更新
         last_countdown_check_us = now_us;
@@ -1621,6 +1625,7 @@ static void ble_hid_task_locked(void) {
     }
 
     if (slot_change_requested) {
+        ble_lock(); // BTstack のタイマ操作・切断要求を触るため
         slot_change_requested = false;
         btstack_run_loop_remove_timer(&bl17_cooldown_timer);
         bl17_reject_in_progress = false;
@@ -1668,6 +1673,7 @@ static void ble_hid_task_locked(void) {
             switch_pending = false;
             schedule_slot_transition(slot, is_pairing);
         }
+        ble_unlock();
     }
 }
 
