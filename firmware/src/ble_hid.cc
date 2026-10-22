@@ -930,6 +930,9 @@ static void apply_slot_identity(int slot) {
 // 同一スロット押下でスロットのON/OFF（電波OFF・切断 / 再接続）をトグルする
 void ble_switch_slot(int slot) {
     if (slot < 0 || slot >= MAX_SLOTS) return;
+    // 注: ここは ble_lock を取らない。BL-33 の排他は送信経路 (ble_hid_send_report)
+    // が対象で、制御経路のロックは BL-43 P1 の仮説として追加されたもの。
+    // 実機で「ロック保持中のアドレス変更が広告を壊す」ことが判明したため戻した (BL-45)
 
     // 切替・ON/OFFトグル直後の連続操作を禁止（BT 状態の不整合防止）。
     // 受け付けた時点から SWITCH_LOCK_US の間は切替系ホットキーを無視する
@@ -943,9 +946,7 @@ void ble_switch_slot(int slot) {
     }
     switch_lock_until_us = now_us + SWITCH_LOCK_US;
 
-    ble_lock();
     ble_switch_slot_locked(slot);
-    ble_unlock();
 }
 
 static void ble_switch_slot_locked(int slot) {
@@ -1027,9 +1028,8 @@ void ble_hid_switch_host(uint8_t slot) {
 void ble_enter_pairing_mode(int slot) {
     // ペアリングはカレントスロットのみ対象（別スロット指定ではペアリングを開始しない）
     if (slot < 0 || slot >= MAX_SLOTS || slot != current_slot) return;
-    ble_lock();
+    // 制御経路はロックしない (BL-45: ロック保持中の広告設定が効かなくなる)
     ble_enter_pairing_mode_locked(slot);
-    ble_unlock();
 }
 
 static void ble_enter_pairing_mode_locked(int slot) {
@@ -1625,9 +1625,7 @@ static void ble_hid_task_locked(void) {
         adv_retry_next_us = now_us + 1000000ULL;
         remote_log_eventf("ADV-RETRY st=%d pair=%d req=%d", (int) current_state,
                           is_pairing_mode, adv_enable_req);
-        ble_lock();
         adv_set(1);
-        ble_unlock();
     }
     if (now_us - last_countdown_check_us >= 500000) { // 500ms周期でカウントダウン更新
         last_countdown_check_us = now_us;
@@ -1648,7 +1646,6 @@ static void ble_hid_task_locked(void) {
     }
 
     if (slot_change_requested) {
-        ble_lock(); // BTstack のタイマ操作・切断要求を触るため
         slot_change_requested = false;
         btstack_run_loop_remove_timer(&bl17_cooldown_timer);
         bl17_reject_in_progress = false;
@@ -1696,7 +1693,6 @@ static void ble_hid_task_locked(void) {
             switch_pending = false;
             schedule_slot_transition(slot, is_pairing);
         }
-        ble_unlock();
     }
 }
 
@@ -1763,9 +1759,7 @@ void ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len) {
 
 
 void ble_hid_kick_reconnect(void) {
-    ble_lock();
     ble_hid_kick_reconnect_locked();
-    ble_unlock();
 }
 
 static void ble_hid_kick_reconnect_locked(void) {
@@ -1829,15 +1823,12 @@ static void ble_clear_slot_bonds_locked(int slot) {
 
 static void ble_clear_slot_bonds(int slot) {
     if (slot < 0 || slot >= MAX_SLOTS) return;
-    ble_lock();
+    // 制御経路はロックしない (BL-45)
     ble_clear_slot_bonds_locked(slot);
-    ble_unlock();
 }
 
 void ble_clear_bonds(void) {
-    ble_lock();
     ble_clear_bonds_locked();
-    ble_unlock();
 }
 
 static void ble_clear_bonds_locked(void) {
