@@ -1055,6 +1055,10 @@ void remote_log_init(void) {
     }
     // どのビルドが焼かれているかを最初に残す (焼き間違いの検出用)
     remote_log_eventf("BUILD %s %s", REMAPPER_BUILD_TIME, REMAPPER_GIT_SHA);
+#if defined(BLE_LOCK_DISABLE) && BLE_LOCK_DISABLE
+    // 切り分け用ビルドの取り違え防止 (常用ビルドでは出ない)
+    remote_log_eventf("BUILD VARIANT ble_lock=disabled");
+#endif
 
     remote_log_eventf("RLOG init target=%s:%d ssid=%s ip=%s",
                       RLOG_TARGET_IP, RLOG_TARGET_PORT, rlog_ssid_masked(),
