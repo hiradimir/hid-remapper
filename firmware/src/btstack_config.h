@@ -35,6 +35,7 @@
 // コントローラ ACL バッファを抑制し、HCI Controller-to-Host フロー制御を有効化する
 // 最大 6-8 回の接続/切断サイクルでスタックが沈黙する既知事例 (pico-sdk #2181 / btstack #654) の対策
 // SCO は未使用だがフロー制御の必須ペアとして上流例の値をそのまま設定する
+#if !defined(BL43_NO_FLOW_CONTROL)
 #define MAX_NR_CONTROLLER_ACL_BUFFERS 3
 #define MAX_NR_CONTROLLER_SCO_PACKETS 3
 #define ENABLE_HCI_CONTROLLER_TO_HOST_FLOW_CONTROL
@@ -42,6 +43,7 @@
 #define HCI_HOST_ACL_PACKET_NUM 3
 #define HCI_HOST_SCO_PACKET_LEN 120
 #define HCI_HOST_SCO_PACKET_NUM 3
+#endif
 
 // 【BL-45】ランダムアドレス変更後に広告パラメータを送り直す (BTstack の
 // コントローラバグ回避オプション)。CYW43439 はアドレス変更だけでは広告の

@@ -38,6 +38,17 @@ option(ENABLE_REMOTE_LOG "Enable Wi-Fi (UDP) remote logging (requires pico_w + s
 option(BLE_LOCK_DISABLE "Disable ble_lock (BL-45 bisect only)" OFF)
 # BL-45 切り分け専用: 1 にすると実行中のランダムアドレス変更を行わない (常用は OFF)
 option(BL45_SKIP_ADDR_CHANGE "Do not change the BLE random address at runtime (BL-45 bisect only)" OFF)
+# BL-45 切り分け専用: BL-43 P1 で入れた flow control 設定を無効化する
+option(BL43_NO_FLOW_CONTROL "Disable the BL-43 flow control config (BL-45 bisect only)" OFF)
+if(BL43_NO_FLOW_CONTROL)
+    # btstack_config.h は BTstack 側のソースが読むため、ライブラリ側に定義を渡す
+    if(TARGET pico_btstack_ble)
+        target_compile_definitions(pico_btstack_ble INTERFACE BL43_NO_FLOW_CONTROL=1)
+    endif()
+    if(TARGET pico_btstack_cyw43)
+        target_compile_definitions(pico_btstack_cyw43 INTERFACE BL43_NO_FLOW_CONTROL=1)
+    endif()
+endif()
 
 if(ENABLE_BLE AND NOT (PICO_BOARD STREQUAL "pico_w" OR PICO_BOARD STREQUAL "pico2_w" OR PICO_PLATFORM STREQUAL "rp2350-arm-s"))
     message(FATAL_ERROR "ENABLE_BLE requires PICO_BOARD=pico_w/pico2_w or an RP2350-based CYW43 board")
