@@ -886,6 +886,14 @@ static void apply_slot_identity(int slot) {
 #else
     gap_random_address_set_mode(GAP_RANDOM_ADDRESS_TYPE_STATIC);
     gap_random_address_set(slot_addr);
+    // 【BL-45】アドレス変更後に広告パラメータを明示的に送り直す。
+    // BL-29 で「初期化時に一括設定」へ変更してから、実行中のアドレス変更が
+    // 広告に反映されなくなった (コントローラはアドレスのラッチをパラメータ
+    // 設定時に行う)。BTstack の ENABLE_LE_SET_ADV_PARAMS_ON_RANDOM_ADDRESS_CHANGE
+    // だけでは効かなかったため、旧実装と同じくここで直接設定する
+    bd_addr_t null_addr;
+    memset(null_addr, 0, 6);
+    gap_advertisements_set_params(0x0030, 0x0030, 0, 0, null_addr, 0x07, 0x00);
 #endif
 
     // アドバタイズデータ設定
