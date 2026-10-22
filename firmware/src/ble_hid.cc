@@ -252,7 +252,11 @@ uint32_t ble_hid_get_connected_slot_mask(void) {
 static volatile uint32_t health_ok = 0;
 static volatile uint32_t health_acl_full = 0;
 static volatile uint32_t health_blocked = 0;
-static volatile uint32_t health_err = 0;   // 0x57 以外の送信エラー (ok が伸びない原因の切り分け)
+static volatile uint32_t health_err = 0;
+// コントローラが返した "Number Of Completed Packets" の回数と総数。
+// 0x57 膠着時にこれが止まっていれば「コントローラがクレジットを返していない」
+static volatile uint32_t health_cp_events = 0;
+static volatile uint32_t health_cp_packets = 0;   // 0x57 以外の送信エラー (ok が伸びない原因の切り分け)
 static volatile uint32_t health_disc = 0;
 static volatile uint8_t health_disc_reason = 0;
 static volatile uint64_t health_last_ok_us = 0;
@@ -264,6 +268,8 @@ void ble_hid_get_health(ble_hid_health_t* out) {
     out->acl_full = health_acl_full;
     out->blocked = health_blocked;
     out->err = health_err;
+    out->cp_events = health_cp_events;
+    out->cp_packets = health_cp_packets;
     out->disc = health_disc;
     out->disc_reason = health_disc_reason;
     out->last_ok_us = health_last_ok_us;
@@ -1229,6 +1235,21 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
         // 広告の有効化がコントローラに受理されたかを記録する。
         // 0x0C (Command Disallowed) 等が返ると「ペアリングモードなのに発見されない」
         // 状態になるため、status を残す (BL-45 切り分け用)
+        // コントローラが「送信完了」を返した数。ACL クレジットの返却そのもの
+        case HCI_EVENT_NUMBER_OF_COMPLETED_PACKETS: {
+            const uint8_t* p = packet + 2; // event type + length の後ろ
+            uint8_t n = *p++;
+            uint32_t total = 0;
+            for (uint8_t i = 0; i < n; i++) {
+                p += 2; // connection handle
+                total += (uint32_t) p[0] | ((uint32_t) p[1] << 8);
+                p += 2;
+            }
+            health_cp_events++;
+            health_cp_packets += total;
+            break;
+        }
+
         case HCI_EVENT_COMMAND_COMPLETE: {
             uint16_t opcode = hci_event_command_complete_get_command_opcode(packet);
             const uint8_t* params = hci_event_command_complete_get_return_parameters(packet);
