@@ -751,6 +751,15 @@ static void get_slot_random_address(int slot, bd_addr_t out_addr) {
     // 以前は addr[0] に 0xC0 を付けていたため、実際の広告アドレスは最上位 2 ビットが
     // 00 = Non-Resolvable Private Address となり、**仕様上スキャナから無視される**。
     // そのため新規デバイスとして発見できず、既存ボンドのホストだけが接続できていた (BL-45)
+#if defined(BL45_LEGACY_ADDR) && BL45_LEGACY_ADDR
+    // 切り分け専用: BL-45 以前の（規格上は不正な）アドレス生成に戻す
+    out_addr[0] = 0xC0 | (id.id[2] & 0x3F);
+    out_addr[1] = id.id[3];
+    out_addr[2] = id.id[4];
+    out_addr[3] = id.id[5];
+    out_addr[4] = id.id[6] ^ slot_salts[slot];
+    out_addr[5] = id.id[7] + (uint8_t) slot + slot_salts[slot];
+#else
     out_addr[0] = id.id[2];
     out_addr[1] = id.id[3];
     out_addr[2] = id.id[4];
@@ -759,6 +768,7 @@ static void get_slot_random_address(int slot, bd_addr_t out_addr) {
     // 最上位バイト: 上位 2 ビットを 11 に固定し、残り 6 ビットでスロット/ソルトを表現
     // (ペアリング毎に新 MAC となり旧ホストの自動奪取を遮断する従来の狙いは維持)
     out_addr[5] = 0xC0 | ((uint8_t) (id.id[7] + (uint8_t) slot + slot_salts[slot]) & 0x3F);
+#endif
 }
 
 // 【BL-32】切断完了後の CYW43 内部リソース解放猶予タイマ（150ms）

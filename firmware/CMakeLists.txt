@@ -38,6 +38,7 @@ option(ENABLE_REMOTE_LOG "Enable Wi-Fi (UDP) remote logging (requires pico_w + s
 option(BLE_LOCK_DISABLE "Disable ble_lock (BL-45 bisect only)" OFF)
 # BL-45 切り分け専用: 1 にすると実行中のランダムアドレス変更を行わない (常用は OFF)
 option(BL45_SKIP_ADDR_CHANGE "Do not change the BLE random address at runtime (BL-45 bisect only)" OFF)
+option(BL45_LEGACY_ADDR "Use the legacy (invalid) random address scheme (BL-45 bisect only)" OFF)
 # BL-45 切り分け専用: BL-43 P1 で入れた flow control 設定を無効化する
 option(BL43_NO_FLOW_CONTROL "Disable the BL-43 flow control config (BL-45 bisect only)" OFF)
 if(BL43_NO_FLOW_CONTROL)
@@ -94,6 +95,9 @@ if(ENABLE_BLE)
     endif()
     if(BL45_SKIP_ADDR_CHANGE)
         target_compile_definitions(remapper PUBLIC BL45_SKIP_ADDR_CHANGE=1)
+    endif()
+    if(BL45_LEGACY_ADDR)
+        target_compile_definitions(remapper PUBLIC BL45_LEGACY_ADDR=1)
     endif()
 
     if(ENABLE_OLED)
