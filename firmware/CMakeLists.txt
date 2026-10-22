@@ -119,6 +119,31 @@ if(ENABLE_BLE)
     endif()
 endif()
 
+# ビルド識別子 (焼いた UF2 がどのビルドかをログ/バナーで確認できるようにする)
+string(TIMESTAMP REMAPPER_BUILD_TIME "%Y-%m-%d %H:%M:%S")
+set(REMAPPER_GIT_SHA "unknown")
+execute_process(COMMAND git rev-parse --short HEAD
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE REMAPPER_GIT_SHA
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+if(NOT REMAPPER_GIT_SHA)
+    set(REMAPPER_GIT_SHA "unknown")
+endif()
+execute_process(COMMAND git status --porcelain
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE REMAPPER_GIT_DIRTY
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+if(REMAPPER_GIT_DIRTY)
+    string(APPEND REMAPPER_GIT_SHA "+dirty")
+endif()
+
+target_compile_definitions(remapper PUBLIC
+    REMAPPER_BUILD_TIME="${REMAPPER_BUILD_TIME}"
+    REMAPPER_GIT_SHA="${REMAPPER_GIT_SHA}"
+)
+
 target_include_directories(remapper PRIVATE
     src
     src/tusb_config_both

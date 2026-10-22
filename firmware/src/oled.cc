@@ -515,16 +515,18 @@ void oled_task(void) {
             }
         }
     }
-    snprintf(line1, sizeof(line1), "1:%c%c 2:%c%c 3:%c%c 4:%c%c",
-             s_os[0], s_sym[0],
-             s_os[1], s_sym[1],
-             s_os[2], s_sym[2],
-             s_os[3], s_sym[3]);
+    // 現在のスロットは区切りを ':' ではなく '>' にして「ここに居る」を示す
+    // (未ボンドのスロットに居るとき 1:M  2:-- ... と区別が付かなくなるため)
+    snprintf(line1, sizeof(line1), "%c%c%c%c %c%c%c%c %c%c%c%c %c%c%c%c",
+             '1', (ui_current_slot == 0) ? '>' : ':', s_os[0], s_sym[0],
+             '2', (ui_current_slot == 1) ? '>' : ':', s_os[1], s_sym[1],
+             '3', (ui_current_slot == 2) ? '>' : ':', s_os[2], s_sym[2],
+             '4', (ui_current_slot == 3) ? '>' : ':', s_os[3], s_sym[3]);
 
     // Line 2: USB 入力デバイス種別 \x86 1:MS    \x86 2:KBD  (21 chars)
     char line2[24];
-    // 右端 col17..19 は WiFi 状態 (BL-39) 用に空けておく
-    snprintf(line2, sizeof(line2), "\x86 1:%-3.3s   \x86 2:%-3.3s", ui_p1_dev, ui_p2_dev);
+    // P1/P2 の区切りは 2 スペース。右端 col18..20 は WiFi 状態 (BL-39) 用に空ける
+    snprintf(line2, sizeof(line2), "\x86 1:%-3.3s  \x86 2:%-3.3s", ui_p1_dev, ui_p2_dev);
 
     // Line 3: リアルタイムイベント通知 または フルMACアドレス (21 chars)
     char line3[32];
@@ -557,7 +559,7 @@ void oled_task(void) {
     // Line0 は BT 接続時に "BLE-FAST 11.25ms" で埋まるため、常時見える独立欄として
     // Line2 の末尾 3 文字分を確保した。リモートログ無効時は空文字列で何も出ない
     if (ui_wifi_str[0] != '\0') {
-        draw_string_6x8(17 * 6, 16, ui_wifi_str);
+        draw_string_6x8(18 * 6, 16, ui_wifi_str);
     }
 
     // 画面へ転送 (Horizontal addressing: Page 0..3)

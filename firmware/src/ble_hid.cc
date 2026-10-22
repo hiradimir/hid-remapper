@@ -1587,9 +1587,9 @@ static void ble_hid_task_locked(void) {
 
     // 広告の張り直し (BL-45): 要求は出したのにコントローラが受理していない、
     // または切断処理などで落ちたままのときに 1 秒間隔で再要求する
-    if (con_handle == HCI_CON_HANDLE_INVALID &&
+    if (con_handle == HCI_CON_HANDLE_INVALID && adv_enable_req != 0 && !adv_enabled_ok &&
         (current_state == BLE_STATE_PAIRING || current_state == BLE_STATE_RECONNECTING) &&
-        !adv_enabled_ok && now_us >= adv_retry_next_us) {
+        now_us >= adv_retry_next_us) {
         adv_retry_next_us = now_us + 1000000ULL;
         remote_log_eventf("ADV-RETRY st=%d pair=%d req=%d", (int) current_state,
                           is_pairing_mode, adv_enable_req);

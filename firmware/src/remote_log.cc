@@ -42,6 +42,13 @@ extern "C" {
 #include "oled.h"
 #include "ble_hid.h"
 
+#ifndef REMAPPER_BUILD_TIME
+#define REMAPPER_BUILD_TIME "unknown"
+#endif
+#ifndef REMAPPER_GIT_SHA
+#define REMAPPER_GIT_SHA "unknown"
+#endif
+
 #ifndef RLOG_WIFI_COUNTRY
 #define RLOG_WIFI_COUNTRY 0
 #endif
@@ -1021,6 +1028,9 @@ void remote_log_init(void) {
     if (rl_static_valid) {
         apply_static_addr();
     }
+    // どのビルドが焼かれているかを最初に残す (焼き間違いの検出用)
+    remote_log_eventf("BUILD %s %s", REMAPPER_BUILD_TIME, REMAPPER_GIT_SHA);
+
     remote_log_eventf("RLOG init target=%s:%d ssid=%s ip=%s",
                       RLOG_TARGET_IP, RLOG_TARGET_PORT, rlog_ssid_masked(),
                       rl_static_valid ? "static" : "dhcp");
