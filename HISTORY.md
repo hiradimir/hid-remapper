@@ -9,6 +9,25 @@
 
 ---
 
+## 2026-10-22 BL-45 再現: ペアリングモードなのに発見されない (Windows / Mac 両方)
+
+- ルディ実機: Windows とペアリング不可。**Mac の「新規デバイス」画面にも出ない**ため、
+  Windows 固有ではなく**広告が出ていない**ことが確定 (BL-45 の再現)
+- ログ (`bl39_1809.log`) の状況: `PAIRING-START slot=2` → `APPLY-DONE st=1 pair=1`
+  → **`LE-CONN` が一度も無い** (ホストが接続を試みていない)。試行のたびに
+  `addr=` が変わる (ソルトローテーションは仕様どおり)
+- なお**スロット 1 (Mac) が 5 時間動き続けたのは既存ボンドでの再接続**であり、
+  発見 (スキャン) を必要としないため BL-45 の影響を受けない
+- 仮説: `LE Set Advertise Enable` がコントローラに拒否されても (0x0C 等)
+  ファームは「pair=1」と表示したまま無言で失敗する。`apply_slot_identity()` は
+  `enable(0)` → アドレス設定 → `set_data` → `enable(1)` を数 µs で連続発行するため、
+  直前コマンド未完了で `0x0C Command Disallowed` になり得る
+- 対策と計装 (`a46e7eb`): 要求値と command-complete status を保持し
+  `ADV-EN status=.. en=..` / `ADV-ADDR status=..` をログ、未受理なら
+  PAIRING/RECONNECTING 中 1 秒間隔で `ADV-RETRY` として張り直す (自己修復)
+- 次: 実機で `ADV-EN status` を確認 → `0x0C` なら原因確定、`0x00` なら
+  アドバタイズパラメータ/アドレス側を追う
+
 ## 2026-10-21 BL-43/45 観測用: BLE ヘルスログ (BLE-HB / BLE STALL) + BL-04 セット移植
 
 - **BL-04 後期セットを `feature/pico-w-ble` へ forward (`6ee0d59`)**: 実機検証済みの
