@@ -879,8 +879,14 @@ static void apply_slot_identity(int slot) {
     // アドレス設定（Static Random Address）
     bd_addr_t slot_addr;
     get_slot_random_address(current_slot, slot_addr);
+#if defined(BL45_SKIP_ADDR_CHANGE) && BL45_SKIP_ADDR_CHANGE
+    // 切り分け専用: 実行中のランダムアドレス変更が広告を壊す疑いを検証するため、
+    // 初期化時に設定したアドレスをそのまま使う (常用ビルドでは無効)
+    remote_log_eventf("ADV-ADDR skipped (bisect) want=%s", bd_addr_to_str(slot_addr));
+#else
     gap_random_address_set_mode(GAP_RANDOM_ADDRESS_TYPE_STATIC);
     gap_random_address_set(slot_addr);
+#endif
 
     // アドバタイズデータ設定
     char name_buf[32];
