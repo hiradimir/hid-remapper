@@ -217,6 +217,10 @@ static int consecutive_can_send_timeouts = 0;
 // 広告の有効化は「コマンドは投げたがコントローラに拒否された (0x0C 等)」場合に
 // 無言で失敗し、ペアリングモードなのに誰からも見えない状態になる (BL-45)。
 // 要求値と受理結果を保持し、未達なら ble_hid_task 側で張り直す
+// ボンド済み IRK をコントローラのリゾルビングリストへ読み込めたか。
+// これが無いと RPA を使うホストを accept list で照合できない
+static bool resolving_list_loaded = false;
+
 static volatile int adv_enable_req = 0;
 static volatile bool adv_enabled_ok = false;
 // コントローラが広告有効化を**拒否した**ときだけ立てる (成功時の取りこぼしで
@@ -746,16 +750,6 @@ static void pairing_mode_timeout_handler(btstack_timer_source_t *ts) {
 // LE Set Random Address が広告に反映されない。スロットごとにアドレスを
 // 変える設計をやめ、**1 アドレス + accept list による接続制限**で
 // スロットを分離する
-static void get_device_random_address(bd_addr_t out_addr) {
-    pico_unique_board_id_t id;
-    pico_get_unique_board_id(&id);
-    out_addr[0] = id.id[2];
-    out_addr[1] = id.id[3];
-    out_addr[2] = id.id[4];
-    out_addr[3] = id.id[5];
-    out_addr[4] = id.id[6];
-    out_addr[5] = 0xC0 | (id.id[7] & 0x3F); // 最上位 2 ビット = 11 (Static Random)
-}
 
 
 // 【BL-32】切断完了後の CYW43 内部リソース解放猶予タイマ（150ms）
@@ -851,11 +845,15 @@ static void update_adv_filter_policy(void) {
     uint8_t policy = 0x00;
 #else
     gap_whitelist_clear();
-    uint8_t policy = 0x00; // 0x02 = 接続要求のみ accept list で制限
-    if (!is_pairing_mode && slot_peers[current_slot].valid) {
+    uint8_t policy = 0x00;
+    // 参考実装 (EhHHKB2 fw/ble/ble_hid.c) と同じ方式:
+    //   policy 0x03 = スキャン要求・接続要求とも accept list の相手のみ。
+    //   RPA を使うホストを照合するにはリゾルビングリストが必要なので、
+    //   未ロード時はオープン広告 (0x00) にフォールバックする
+    if (!is_pairing_mode && slot_peers[current_slot].valid && resolving_list_loaded) {
         gap_whitelist_add((bd_addr_type_t) slot_peers[current_slot].addr_type,
                           slot_peers[current_slot].addr);
-        policy = 0x02;
+        policy = 0x03;
     }
 #endif
     bd_addr_t null_addr;
@@ -898,10 +896,8 @@ static void apply_slot_identity(int slot) {
         return;
     }
 
-    // アドレスは起動時にラッチ済みの固定値を使う (実行中は変更しない)。
+    // アドレスは public 固定 (実行中に変更しない)。
     // 代わりに accept list で「現在スロットのボンド相手」だけ接続を許可する
-    bd_addr_t slot_addr;
-    get_device_random_address(slot_addr);
     update_adv_filter_policy();
 
     // アドバタイズデータ設定
@@ -937,9 +933,12 @@ static void apply_slot_identity(int slot) {
     // アドバタイズ即時有効化
     adv_set(1);
 
+    bd_addr_t local_addr;
+    gap_local_bd_addr(local_addr);
     printf("[BT] <- apply_slot_identity done (state=%d, pairing=%d, bonded=%d). ADDR=%s\r\n",
-           current_state, is_pairing_mode, is_bonded, bd_addr_to_str(slot_addr));
-    remote_log_eventf("APPLY-DONE st=%d pair=%d addr=%s", current_state, is_pairing_mode, bd_addr_to_str(slot_addr));
+           current_state, is_pairing_mode, is_bonded, bd_addr_to_str(local_addr));
+    remote_log_eventf("APPLY-DONE st=%d pair=%d addr=%s", current_state, is_pairing_mode,
+                      bd_addr_to_str(local_addr));
 }
 
 // ホットキーから呼ばれる関数
@@ -1113,6 +1112,9 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             printf("[BT] BTSTACK_STATE: %d\r\n", state);
             remote_log_eventf("STACK st=%d", state);
             if (state == HCI_STATE_WORKING) {
+                // 広告開始より前にボンド済み IRK をリゾルビングリストへ読み込む
+                resolving_list_loaded =
+                    gap_load_resolving_list_from_le_device_db() == ERROR_CODE_SUCCESS;
                 // チップが完全に起動したこの瞬間に初期スロットを適用する
                 if (radio_off_saved) {
                     printf("[BT] Boot with Radio OFF saved -> STANDBY_SILENT\r\n");
@@ -1486,6 +1488,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             zero_sent_waiting_ack = false;
             current_peer_addr[0] = '\0';
 
+            resolving_list_loaded = gap_load_resolving_list_from_le_device_db() == ERROR_CODE_SUCCESS;
             uint8_t reason = hci_event_disconnection_complete_get_reason(packet);
             printf("[BT] Disconnected (reason=0x%02X)\r\n", reason);
             health_disc++;
@@ -1601,10 +1604,13 @@ void ble_hid_init(void) {
     // 初期化時に一括設定し、実行中の再設定（HCI競合やCommand Disallowed）を防止。
     // 30ms間隔により、Windows 11 や macOS の低デューティスキャンでも確実に検出可能。
     // 静的ランダムアドレスモードを初期化し、own_address_type=Random (1) を確定させる
+    // アドバタイズはコントローラの public アドレスで行う。
+    // 【BL-45】CYW43439 はランダムアドレスを電源投入時にラッチし、実行中の変更が
+    // 広告に反映されない。参考実装 (EhHHKB2) もランダムアドレスを使わず、
+    // 1 アドレス + accept list でスロットを分離している
     bd_addr_t init_addr;
-    get_device_random_address(init_addr);
-    gap_random_address_set_mode(GAP_RANDOM_ADDRESS_TYPE_STATIC);
-    gap_random_address_set(init_addr);
+    gap_local_bd_addr(init_addr);
+    remote_log_eventf("BT ADDR public=%s", bd_addr_to_str(init_addr));
 
     uint16_t adv_int_min = 0x0030; // 30 ms
     uint16_t adv_int_max = 0x0030; // 30 ms

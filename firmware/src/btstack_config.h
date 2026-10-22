@@ -27,7 +27,7 @@
 #define HCI_ACL_PAYLOAD_SIZE (1691 + 4)
 #define MAX_NR_HCI_CONNECTIONS 1
 #define MAX_NR_GATT_CLIENTS 1
-#define MAX_NR_WHITELIST_ENTRIES 1
+#define MAX_NR_WHITELIST_ENTRIES 4
 #define MAX_NR_SM_LOOKUP_ENTRIES 3
 #define MAX_NR_SERVICE_RECORD_ITEMS 1
 
@@ -44,6 +44,11 @@
 #define HCI_HOST_SCO_PACKET_LEN 120
 #define HCI_HOST_SCO_PACKET_NUM 3
 #endif
+
+// 【BL-45】RPA (Resolvable Private Address) を使うホストを accept list で照合するには
+// リゾルビングリストが必要。参考実装 (EhHHKB2) も同じ構成。
+// これが無いと gap_load_resolving_list_from_le_device_db() 自体がリンクされない
+#define ENABLE_LE_PRIVACY_ADDRESS_RESOLUTION
 
 // 【BL-45】ランダムアドレス変更後に広告パラメータを送り直す (BTstack の
 // コントローラバグ回避オプション)。CYW43439 はアドレス変更だけでは広告の
