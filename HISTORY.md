@@ -9,6 +9,34 @@
 
 ---
 
+## 2026-10-22 (3) BL-45: 参考実装 (EhHHKB2) との比較と、残った 3 差分
+
+- ルディ提供の参考実装 `~/git/EhHHKB2` (RP2040+CYW43 のマルチペアリング HID) と比較。
+  あちらは **ランダムアドレスを一切使わず**、`public` アドレス 1 本 +
+  **accept list (filter policy 0x03)** + `ENABLE_LE_PRIVACY_ADDRESS_RESOLUTION` で
+  スロットを分離している。こちらの設計方針をそのまま採用した
+- 判明した不足: うちの `btstack_config.h` に `ENABLE_LE_PRIVACY_ADDRESS_RESOLUTION` が
+  **無かった**（無いと `gap_load_resolving_list_from_le_device_db()` がリンクすらされず、
+  RPA を使うホストを accept list で照合できない = ホワイトリスト方式が成立しない）。
+  追加し、`MAX_NR_WHITELIST_ENTRIES` を 1 → 4 にした
+- それでも**発見されない**ため、以下を順に切り分けた（すべて不可）:
+  - public アドレスでの広告（`BT ADDR public=28:CD:C1:0E:D6:05` = CYW43 の正規アドレス）
+  - accept list を使わない（policy 0 固定）
+  - **最小構成の広告**（flags + `Remap-Test` の名前のみ / 100ms / policy 0）
+  - コマンドは毎回 `ADV-PARAM` / `ADV-DATA` / `ADV-EN` すべて status 0x00
+- **動いていた構成**: `ab02e0a`（`BL45_SKIP_ADDR_CHANGE=ON`、ランダムアドレスを
+  起動時ラッチのまま使う・プライバシー解決なし・whitelist 操作なし）。12:24 / 13:19 に
+  Mac/Windows で発見・ペアリング確認済み
+- **残った差分は 3 つだけ**（次回はこれを 1 つずつ）:
+  1. `ENABLE_LE_PRIVACY_ADDRESS_RESOLUTION` の有無
+  2. accept list 操作（`gap_whitelist_clear/add` と policy）の有無
+  3. アドレス（起動時ラッチのランダム vs public）
+- 次回の手順（統制）: アンカー `ab02e0a` を焼き直して**動くことを再確認** →
+  上記 3 つを 1 つずつ足して都度確認。ホストは Mac 固定・ボンド全消去・設定画面を
+  開いたまま・60 秒待つ。各ビルドの `BUILD` 行 (SHA) を必ず記録する
+- soak 用の暫定版は `remapper_check_noaddr_ab02e0a.uf2`（全スロットが同一アドレス。
+  別スロットのホストが接続要求してくる副作用あり）
+
 ## 2026-10-22 (続き) BL-45: 実行中のランダムアドレス変更で広告が電波に乗らない
 
 - **症状**: ペアリングモードに入り `ADV-ADDR` / `ADV-PARAM` / `ADV-DATA` / `ADV-EN` が
