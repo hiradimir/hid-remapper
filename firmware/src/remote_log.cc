@@ -1069,6 +1069,9 @@ void remote_log_init(void) {
     // 切り分け用ビルドの取り違え防止 (常用ビルドでは出ない)
     remote_log_eventf("BUILD VARIANT ble_lock=disabled");
 #endif
+#if defined(BL45_SKIP_ADDR_CHANGE) && BL45_SKIP_ADDR_CHANGE
+    remote_log_eventf("BUILD VARIANT addr_change=skipped");
+#endif
 
     remote_log_eventf("RLOG init target=%s:%d ssid=%s ip=%s",
                       RLOG_TARGET_IP, RLOG_TARGET_PORT, rlog_ssid_masked(),
