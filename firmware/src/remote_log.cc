@@ -867,6 +867,14 @@ static void ble_health_task(uint64_t now_us) {
         const uint32_t in_delta = count_ingest - ble_hb_in;
         const uint32_t gmax_ms = (in_delta != 0) ? (ingest_gap_max_us / 1000u) : 0;
         const uint32_t lmax_ms = loop_gap_max_us / 1000u;
+        // USB デバイス側の状態 (入力の行き先があるか)
+#if defined(ENABLE_BLE) && ENABLE_BLE
+        const bool usb_mounted = usb_is_mounted();
+        const bool usb_ready = usb_is_ready();
+#else
+        const bool usb_mounted = false;
+        const bool usb_ready = false;
+#endif
         const uint32_t rtt_ms = ack_rtt_last_ms;
         const uint32_t rmax_ms = ack_rtt_max_ms;
         ack_rtt_max_ms = 0;
@@ -884,19 +892,21 @@ static void ble_health_task(uint64_t now_us) {
         loop_gap_max_us = 0;
 
         if (ever) {
-            remote_log_eventf("BLE-HB ci=%u ok=%u blk=%u acl=%u disc=%u rs=0x%02X tx=%ums in=%u gmax=%ums lps=%u lmax=%ums rtt=%ums rmax=%ums",
+            remote_log_eventf("BLE-HB ci=%u ok=%u blk=%u acl=%u disc=%u rs=0x%02X tx=%ums in=%u gmax=%ums lps=%u lmax=%ums rtt=%ums rmax=%ums u=%u/%u",
                               (unsigned) h.ci, (unsigned) h.ok, (unsigned) h.blocked,
                               (unsigned) h.acl_full, (unsigned) h.disc,
                               (unsigned) h.disc_reason, (unsigned) tx_ms,
                               (unsigned) in_delta, (unsigned) gmax_ms, (unsigned) lps,
-                              (unsigned) lmax_ms, (unsigned) rtt_ms, (unsigned) rmax_ms);
+                              (unsigned) lmax_ms, (unsigned) rtt_ms, (unsigned) rmax_ms,
+                              (unsigned) usb_mounted, (unsigned) usb_ready);
         } else {
-            remote_log_eventf("BLE-HB ci=%u ok=0 blk=%u acl=%u disc=%u rs=0x%02X tx=none in=%u gmax=%ums lps=%u lmax=%ums rtt=%ums rmax=%ums",
+            remote_log_eventf("BLE-HB ci=%u ok=0 blk=%u acl=%u disc=%u rs=0x%02X tx=none in=%u gmax=%ums lps=%u lmax=%ums rtt=%ums rmax=%ums u=%u/%u",
                               (unsigned) h.ci, (unsigned) h.blocked,
                               (unsigned) h.acl_full, (unsigned) h.disc,
                               (unsigned) h.disc_reason,
                               (unsigned) in_delta, (unsigned) gmax_ms, (unsigned) lps,
-                              (unsigned) lmax_ms, (unsigned) rtt_ms, (unsigned) rmax_ms);
+                              (unsigned) lmax_ms, (unsigned) rtt_ms, (unsigned) rmax_ms,
+                              (unsigned) usb_mounted, (unsigned) usb_ready);
         }
     }
 }

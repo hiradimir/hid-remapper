@@ -485,7 +485,14 @@ void oled_task(void) {
     } else if (is_bt_mode) {
         snprintf(line0, sizeof(line0), "%s%s%cBLE-IDLE         ", tx_icon, mode_icon, hb_char);
     } else {
-        snprintf(line0, sizeof(line0), "%s\x86.USB-OUT          ", tx_icon);
+        // BLE 未接続時の表示。USB ホストに載っていない (給電のみ) ときは
+        // 「USB-OUT」と嘘をつかず NO-HOST を出す (入力の行き先が無いため)
+#if defined(ENABLE_BLE) && ENABLE_BLE
+        const char* out_str = usb_is_mounted() ? "USB-OUT" : "NO-HOST";
+#else
+        const char* out_str = "USB-OUT";
+#endif
+        snprintf(line0, sizeof(line0), "%s\x86.%-8s        ", tx_icon, out_str);
     }
 
     // Line 1: 各スロット状態 1:%c%c 2:%c%c 3:%c%c 4:%c%c
