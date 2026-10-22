@@ -492,7 +492,9 @@ void oled_task(void) {
 #else
         const char* out_str = "USB-OUT";
 #endif
-        snprintf(line0, sizeof(line0), "%s\x86.%-8s        ", tx_icon, out_str);
+        // '.' は点滅ドット (hb_char)。固定の '.' だと止まっていても点灯に見えて
+        // ハング判定ができないため、BT 側と同じ 500ms 点滅にする
+        snprintf(line0, sizeof(line0), "%s\x86%c%-8s        ", tx_icon, hb_char, out_str);
     }
 
     // Line 1: 各スロット状態 1:%c%c 2:%c%c 3:%c%c 4:%c%c
