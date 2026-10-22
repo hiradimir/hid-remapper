@@ -1161,8 +1161,10 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                 remote_log_eventf("ADV-EN status=0x%02X en=%d slot=%d pair=%d st=%d",
                                   st, adv_enable_req, current_slot + 1, is_pairing_mode,
                                   (int) current_state);
-            } else if (opcode == HCI_OPCODE_HCI_LE_SET_ADVERTISING_SET_RANDOM_ADDRESS) {
+            } else if (opcode == HCI_OPCODE_HCI_LE_SET_RANDOM_ADDRESS) {
                 remote_log_eventf("ADV-ADDR status=0x%02X", params[0]);
+            } else if (opcode == HCI_OPCODE_HCI_LE_SET_ADVERTISING_PARAMETERS) {
+                remote_log_eventf("ADV-PARAM status=0x%02X", params[0]);
             }
             break;
         }

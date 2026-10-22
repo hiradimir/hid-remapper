@@ -43,6 +43,12 @@
 #define HCI_HOST_SCO_PACKET_LEN 120
 #define HCI_HOST_SCO_PACKET_NUM 3
 
+// 【BL-45】ランダムアドレス変更後に広告パラメータを送り直す (BTstack の
+// コントローラバグ回避オプション)。CYW43439 はアドレス変更だけでは広告の
+// アドレスが更新されず、**古いアドレスのまま広告が続く**ため、ホスト側からは
+// 「既知のデバイス」に見えて新規デバイス一覧に出ない、という症状になり得る
+#define ENABLE_LE_SET_ADV_PARAMS_ON_RANDOM_ADDRESS_CHANGE
+
 // セキュリティ・暗号化
 #define ENABLE_LE_SECURE_CONNECTIONS
 
