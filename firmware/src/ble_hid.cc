@@ -1137,6 +1137,19 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             break;
         }
 
+        // 広告の有効化がコントローラに受理されたかを記録する。
+        // 0x0C (Command Disallowed) 等が返ると「ペアリングモードなのに発見されない」
+        // 状態になるため、status を残す (BL-45 切り分け用)
+        case HCI_EVENT_COMMAND_COMPLETE: {
+            uint16_t opcode = hci_event_command_complete_get_command_opcode(packet);
+            if (opcode == HCI_OPCODE_HCI_LE_SET_ADVERTISE_ENABLE) {
+                const uint8_t* params = hci_event_command_complete_get_return_parameters(packet);
+                remote_log_eventf("ADV-EN status=0x%02X slot=%d pair=%d",
+                                  params[0], current_slot + 1, is_pairing_mode);
+            }
+            break;
+        }
+
         case HCI_EVENT_LE_META: {
             uint8_t subevent = hci_event_le_meta_get_subevent_code(packet);
             if (subevent == HCI_SUBEVENT_LE_CONNECTION_COMPLETE) {
