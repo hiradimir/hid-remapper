@@ -119,32 +119,21 @@ if(ENABLE_BLE)
     endif()
 endif()
 
-# ビルド識別子 (焼いた UF2 がどのビルドかをログ/バナーで確認できるようにする)
-string(TIMESTAMP REMAPPER_BUILD_TIME "%Y-%m-%d %H:%M:%S")
-set(REMAPPER_GIT_SHA "unknown")
-execute_process(COMMAND git rev-parse --short HEAD
-    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-    OUTPUT_VARIABLE REMAPPER_GIT_SHA
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET)
-if(NOT REMAPPER_GIT_SHA)
-    set(REMAPPER_GIT_SHA "unknown")
-endif()
-execute_process(COMMAND git status --porcelain
-    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-    OUTPUT_VARIABLE REMAPPER_GIT_DIRTY
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET)
-if(REMAPPER_GIT_DIRTY)
-    string(APPEND REMAPPER_GIT_SHA "+dirty")
-endif()
-
-target_compile_definitions(remapper PUBLIC
-    REMAPPER_BUILD_TIME="${REMAPPER_BUILD_TIME}"
-    REMAPPER_GIT_SHA="${REMAPPER_GIT_SHA}"
-)
+# ビルド識別子: 焼いた UF2 がどのビルドかをログで確認できるようにする。
+# 値は毎ビルド走る custom target でヘッダに書き出す (configure 時に固定すると
+# cmake を再実行するまで古い日時/SHA のままになる)
+set(REMAPPER_BUILD_ID_HEADER ${CMAKE_CURRENT_BINARY_DIR}/generated/build_id.h)
+add_custom_target(build_id_gen ALL
+    COMMAND ${CMAKE_COMMAND}
+            -DSRC_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+            -DOUT_HEADER=${REMAPPER_BUILD_ID_HEADER}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/gen_build_id.cmake
+    BYPRODUCTS ${REMAPPER_BUILD_ID_HEADER}
+    COMMENT "Generating build id header")
+add_dependencies(remapper build_id_gen)
 
 target_include_directories(remapper PRIVATE
+    ${CMAKE_CURRENT_BINARY_DIR}/generated
     src
     src/tusb_config_both
     ${PICO_PIO_USB_PATH}

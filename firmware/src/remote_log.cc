@@ -39,15 +39,9 @@ extern "C" {
 #error "ENABLE_REMOTE_LOG requires src/remote_log_net.h (copy remote_log_net.h.example)"
 #endif
 
+#include "build_id.h"
 #include "oled.h"
 #include "ble_hid.h"
-
-#ifndef REMAPPER_BUILD_TIME
-#define REMAPPER_BUILD_TIME "unknown"
-#endif
-#ifndef REMAPPER_GIT_SHA
-#define REMAPPER_GIT_SHA "unknown"
-#endif
 
 #ifndef RLOG_WIFI_COUNTRY
 #define RLOG_WIFI_COUNTRY 0
