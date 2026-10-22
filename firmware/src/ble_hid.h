@@ -17,6 +17,7 @@ typedef struct {
     uint32_t ok;         // HCI が受理した通知の累計
     uint32_t acl_full;   // 0x57 (BTSTACK_ACL_BUFFERS_FULL) の累計
     uint32_t blocked;    // ble_can_send 待ちで捨てたレポート累計
+    uint32_t err;        // 0x57 以外の送信エラー累計
     uint32_t disc;       // 切断イベントの累計
     uint8_t disc_reason; // 直近の HCI 切断理由
     uint64_t last_ok_us; // 最後に受理された通知の時刻 (0 = まだ)
@@ -82,6 +83,7 @@ static inline void ble_hid_get_health(ble_hid_health_t* out) {
     out->ok = 0;
     out->acl_full = 0;
     out->blocked = 0;
+    out->err = 0;
     out->disc = 0;
     out->disc_reason = 0;
     out->last_ok_us = 0;

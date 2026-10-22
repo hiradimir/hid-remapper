@@ -849,11 +849,11 @@ static void ble_health_task(uint64_t now_us) {
                          (now_us - ble_stall_since_us) >= (uint64_t) RLOG_BLE_STALL_MS * 1000ULL;
     if (stalled && !ble_stall_active) {
         ble_stall_active = true;
-        remote_log_eventf("BLE STALL in=%u/%us ci=%u ok=%u blk=%u acl=%u disc=%u rs=0x%02X",
+        remote_log_eventf("BLE STALL in=%u/%us ci=%u ok=%u blk=%u acl=%u err=%u disc=%u rs=0x%02X",
                           (unsigned) (in_now - ble_stall_in_start),
                           (unsigned) ((now_us - ble_stall_since_us) / 1000000ULL),
                           (unsigned) h.ci, (unsigned) h.ok, (unsigned) h.blocked,
-                          (unsigned) h.acl_full, (unsigned) h.disc, (unsigned) h.disc_reason);
+                          (unsigned) h.acl_full, (unsigned) h.err, (unsigned) h.disc, (unsigned) h.disc_reason);
     } else if (!stalled && ble_stall_active) {
         ble_stall_active = false;
         remote_log_eventf("BLE STALL END ok=%u tx=%ums", (unsigned) h.ok, (unsigned) tx_ms);
@@ -892,17 +892,17 @@ static void ble_health_task(uint64_t now_us) {
         loop_gap_max_us = 0;
 
         if (ever) {
-            remote_log_eventf("BLE-HB ci=%u ok=%u blk=%u acl=%u disc=%u rs=0x%02X tx=%ums in=%u gmax=%ums lps=%u lmax=%ums rtt=%ums rmax=%ums u=%u/%u",
+            remote_log_eventf("BLE-HB ci=%u ok=%u blk=%u acl=%u err=%u disc=%u rs=0x%02X tx=%ums in=%u gmax=%ums lps=%u lmax=%ums rtt=%ums rmax=%ums u=%u/%u",
                               (unsigned) h.ci, (unsigned) h.ok, (unsigned) h.blocked,
-                              (unsigned) h.acl_full, (unsigned) h.disc,
+                              (unsigned) h.acl_full, (unsigned) h.err, (unsigned) h.disc,
                               (unsigned) h.disc_reason, (unsigned) tx_ms,
                               (unsigned) in_delta, (unsigned) gmax_ms, (unsigned) lps,
                               (unsigned) lmax_ms, (unsigned) rtt_ms, (unsigned) rmax_ms,
                               (unsigned) usb_mounted, (unsigned) usb_ready);
         } else {
-            remote_log_eventf("BLE-HB ci=%u ok=0 blk=%u acl=%u disc=%u rs=0x%02X tx=none in=%u gmax=%ums lps=%u lmax=%ums rtt=%ums rmax=%ums u=%u/%u",
+            remote_log_eventf("BLE-HB ci=%u ok=0 blk=%u acl=%u err=%u disc=%u rs=0x%02X tx=none in=%u gmax=%ums lps=%u lmax=%ums rtt=%ums rmax=%ums u=%u/%u",
                               (unsigned) h.ci, (unsigned) h.blocked,
-                              (unsigned) h.acl_full, (unsigned) h.disc,
+                              (unsigned) h.acl_full, (unsigned) h.err, (unsigned) h.disc,
                               (unsigned) h.disc_reason,
                               (unsigned) in_delta, (unsigned) gmax_ms, (unsigned) lps,
                               (unsigned) lmax_ms, (unsigned) rtt_ms, (unsigned) rmax_ms,

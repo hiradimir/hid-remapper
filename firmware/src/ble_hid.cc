@@ -245,6 +245,7 @@ uint32_t ble_hid_get_connected_slot_mask(void) {
 static volatile uint32_t health_ok = 0;
 static volatile uint32_t health_acl_full = 0;
 static volatile uint32_t health_blocked = 0;
+static volatile uint32_t health_err = 0;   // 0x57 以外の送信エラー (ok が伸びない原因の切り分け)
 static volatile uint32_t health_disc = 0;
 static volatile uint8_t health_disc_reason = 0;
 static volatile uint64_t health_last_ok_us = 0;
@@ -255,6 +256,7 @@ void ble_hid_get_health(ble_hid_health_t* out) {
     out->ok = health_ok;
     out->acl_full = health_acl_full;
     out->blocked = health_blocked;
+    out->err = health_err;
     out->disc = health_disc;
     out->disc_reason = health_disc_reason;
     out->last_ok_us = health_last_ok_us;
@@ -1792,6 +1794,7 @@ void ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len) {
             btstack_run_loop_remove_timer(&can_send_timeout_timer);
         }
     } else {
+        health_err++; // ok が伸びない理由を HB の err= で判別できるようにする
         printf("[BLE-ERR] send_report id=%d len=%d status=0x%02X\r\n", report_id, len, status);
         ble_can_send = true;
     }
