@@ -741,35 +741,22 @@ static void pairing_mode_timeout_handler(btstack_timer_source_t *ts) {
 }
 
 // 基板固有 ID とスロット番号から、BLE規格準拠の Static Random Address を生成
-static void get_slot_random_address(int slot, bd_addr_t out_addr) {
+// デバイス固有の固定アドレス (スロット・ソルトに依存しない)。
+// 【BL-45】CYW43439 は広告アドレスを電源投入時にラッチし、実行中の
+// LE Set Random Address が広告に反映されない。スロットごとにアドレスを
+// 変える設計をやめ、**1 アドレス + accept list による接続制限**で
+// スロットを分離する
+static void get_device_random_address(bd_addr_t out_addr) {
     pico_unique_board_id_t id;
     pico_get_unique_board_id(&id);
-
-    // Static Random Address の要件: **最上位 2 ビットが 11**。
-    // BTstack の bd_addr_t は LSB 先頭 (addr[0] が最下位、bd_addr_to_str も addr[0] から
-    // 表示する) ため、要件は addr[5] に適用しなければならない。
-    // 以前は addr[0] に 0xC0 を付けていたため、実際の広告アドレスは最上位 2 ビットが
-    // 00 = Non-Resolvable Private Address となり、**仕様上スキャナから無視される**。
-    // そのため新規デバイスとして発見できず、既存ボンドのホストだけが接続できていた (BL-45)
-#if defined(BL45_LEGACY_ADDR) && BL45_LEGACY_ADDR
-    // 切り分け専用: BL-45 以前の（規格上は不正な）アドレス生成に戻す
-    out_addr[0] = 0xC0 | (id.id[2] & 0x3F);
-    out_addr[1] = id.id[3];
-    out_addr[2] = id.id[4];
-    out_addr[3] = id.id[5];
-    out_addr[4] = id.id[6] ^ slot_salts[slot];
-    out_addr[5] = id.id[7] + (uint8_t) slot + slot_salts[slot];
-#else
     out_addr[0] = id.id[2];
     out_addr[1] = id.id[3];
     out_addr[2] = id.id[4];
     out_addr[3] = id.id[5];
-    out_addr[4] = id.id[6] ^ slot_salts[slot];
-    // 最上位バイト: 上位 2 ビットを 11 に固定し、残り 6 ビットでスロット/ソルトを表現
-    // (ペアリング毎に新 MAC となり旧ホストの自動奪取を遮断する従来の狙いは維持)
-    out_addr[5] = 0xC0 | ((uint8_t) (id.id[7] + (uint8_t) slot + slot_salts[slot]) & 0x3F);
-#endif
+    out_addr[4] = id.id[6];
+    out_addr[5] = 0xC0 | (id.id[7] & 0x3F); // 最上位 2 ビット = 11 (Static Random)
 }
+
 
 // 【BL-32】切断完了後の CYW43 内部リソース解放猶予タイマ（150ms）
 // 切断直後に連続して HCI コマンド（アドレス変更・広告開始）を投げると
@@ -853,6 +840,26 @@ static void bl17_cooldown_timer_handler(btstack_timer_source_t *ts) {
 }
 
 // スロットごとの名前とアドレスを適用してアドバタイズを即時・確実に再設定する共通関数
+// 広告の接続フィルタを現在のスロットに合わせる。
+//   - ペアリング中 / 未ボンド: 誰でも接続可 (発見してもらう必要がある)
+//   - ボンド済み & 非ペアリング: accept list の相手のみ接続可
+//     (同じアドレスを複数ホストが知っていても、現在のスロットの相手以外は
+//      コントローラが接続を拒否する = スロット分離)
+static void update_adv_filter_policy(void) {
+    gap_whitelist_clear();
+    uint8_t policy = 0x00; // 0x02 = 接続要求のみ accept list で制限
+    if (!is_pairing_mode && slot_peers[current_slot].valid) {
+        gap_whitelist_add((bd_addr_type_t) slot_peers[current_slot].addr_type,
+                          slot_peers[current_slot].addr);
+        policy = 0x02;
+    }
+    bd_addr_t null_addr;
+    memset(null_addr, 0, 6);
+    gap_advertisements_set_params(0x0030, 0x0030, 0, 0, null_addr, 0x07, policy);
+    remote_log_eventf("ADV-FILTER slot=%d policy=%d peer_ok=%d", current_slot + 1, policy,
+                      slot_peers[current_slot].valid ? 1 : 0);
+}
+
 static void apply_slot_identity(int slot) {
     current_slot = slot;
     schedule_save_current_slot((uint8_t)slot); // 2秒後にFlashへ遅延保存（連続切替時のFlash競合・摩耗防止）
@@ -886,25 +893,11 @@ static void apply_slot_identity(int slot) {
         return;
     }
 
-    // アドレス設定（Static Random Address）
+    // アドレスは起動時にラッチ済みの固定値を使う (実行中は変更しない)。
+    // 代わりに accept list で「現在スロットのボンド相手」だけ接続を許可する
     bd_addr_t slot_addr;
-    get_slot_random_address(current_slot, slot_addr);
-#if defined(BL45_SKIP_ADDR_CHANGE) && BL45_SKIP_ADDR_CHANGE
-    // 切り分け専用: 実行中のランダムアドレス変更が広告を壊す疑いを検証するため、
-    // 初期化時に設定したアドレスをそのまま使う (常用ビルドでは無効)
-    remote_log_eventf("ADV-ADDR skipped (bisect) want=%s", bd_addr_to_str(slot_addr));
-#else
-    gap_random_address_set_mode(GAP_RANDOM_ADDRESS_TYPE_STATIC);
-    gap_random_address_set(slot_addr);
-    // 【BL-45】アドレス変更後に広告パラメータを明示的に送り直す。
-    // BL-29 で「初期化時に一括設定」へ変更してから、実行中のアドレス変更が
-    // 広告に反映されなくなった (コントローラはアドレスのラッチをパラメータ
-    // 設定時に行う)。BTstack の ENABLE_LE_SET_ADV_PARAMS_ON_RANDOM_ADDRESS_CHANGE
-    // だけでは効かなかったため、旧実装と同じくここで直接設定する
-    bd_addr_t null_addr;
-    memset(null_addr, 0, 6);
-    gap_advertisements_set_params(0x0030, 0x0030, 0, 0, null_addr, 0x07, 0x00);
-#endif
+    get_device_random_address(slot_addr);
+    update_adv_filter_policy();
 
     // アドバタイズデータ設定
     char name_buf[32];
@@ -1604,7 +1597,7 @@ void ble_hid_init(void) {
     // 30ms間隔により、Windows 11 や macOS の低デューティスキャンでも確実に検出可能。
     // 静的ランダムアドレスモードを初期化し、own_address_type=Random (1) を確定させる
     bd_addr_t init_addr;
-    get_slot_random_address(current_slot, init_addr);
+    get_device_random_address(init_addr);
     gap_random_address_set_mode(GAP_RANDOM_ADDRESS_TYPE_STATIC);
     gap_random_address_set(init_addr);
 
