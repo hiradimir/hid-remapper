@@ -217,6 +217,13 @@ static int consecutive_can_send_timeouts = 0;
 // 広告の有効化は「コマンドは投げたがコントローラに拒否された (0x0C 等)」場合に
 // 無言で失敗し、ペアリングモードなのに誰からも見えない状態になる (BL-45)。
 // 要求値と受理結果を保持し、未達なら ble_hid_task 側で張り直す
+// 【BL-45】CYW43 は広告アドレスを「電源投入時」にラッチし、実行中の
+// LE Set Random Address では広告に反映されない。スロット切替でアドレスが
+// 変わる場合は BLE コントローラを OFF→ON して初期化時と同じ経路で設定する
+static volatile int power_cycle_slot = -1; // >=0: OFF→ON 後に identity を適用する slot
+static bd_addr_t addr_at_power_on;
+static bool addr_at_power_on_valid = false;
+
 static volatile int adv_enable_req = 0;
 static volatile bool adv_enabled_ok = false;
 // コントローラが広告有効化を**拒否した**ときだけ立てる (成功時の取りこぼしで
@@ -844,6 +851,20 @@ static void bl17_cooldown_timer_handler(btstack_timer_source_t *ts) {
 
 // スロットごとの名前とアドレスを適用してアドバタイズを即時・確実に再設定する共通関数
 static void apply_slot_identity(int slot) {
+    // 電源投入時と違うアドレスに切り替える必要があるなら、まずコントローラを再起動する
+    {
+        bd_addr_t want;
+        get_slot_random_address(slot, want);
+        // 実際に広告を出す状態になるときだけ再起動する (未ボンド&非ペアリングは無音)
+        bool will_advertise = is_pairing_mode || is_slot_bonded(slot);
+        if (will_advertise && addr_at_power_on_valid &&
+            memcmp(want, addr_at_power_on, 6) != 0 && power_cycle_slot < 0) {
+            power_cycle_slot = slot;
+            remote_log_eventf("BT PWR-CYCLE slot=%d want=%s", slot + 1, bd_addr_to_str(want));
+            hci_power_control(HCI_POWER_OFF);
+            return;
+        }
+    }
     current_slot = slot;
     schedule_save_current_slot((uint8_t)slot); // 2秒後にFlashへ遅延保存（連続切替時のFlash競合・摩耗防止）
 
@@ -1096,6 +1117,21 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             uint8_t state = btstack_event_state_get_state(packet);
             printf("[BT] BTSTACK_STATE: %d\r\n", state);
             remote_log_eventf("STACK st=%d", state);
+            if (state == HCI_STATE_OFF && power_cycle_slot >= 0) {
+                // 電源投入前にアドレスをセットしておく (ブート時と同じ経路)。
+                // BTstack は power on の初期化シーケンスでこれをコントローラへ送る
+                int slot = power_cycle_slot;
+                bd_addr_t want;
+                get_slot_random_address(slot, want);
+                gap_random_address_set_mode(GAP_RANDOM_ADDRESS_TYPE_STATIC);
+                gap_random_address_set(want);
+                memcpy(addr_at_power_on, want, 6);
+                addr_at_power_on_valid = true;
+                current_slot = slot;
+                remote_log_eventf("BT PWR-ON slot=%d addr=%s", slot + 1, bd_addr_to_str(want));
+                hci_power_control(HCI_POWER_ON);
+                return;
+            }
             if (state == HCI_STATE_WORKING) {
                 // チップが完全に起動したこの瞬間に初期スロットを適用する
                 if (radio_off_saved) {
@@ -1105,8 +1141,10 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     update_ui_for_state(current_state);
                     oled_set_status("Ready");
                     ble_led(0);
+                    power_cycle_slot = -1;
                 } else {
                     apply_slot_identity(current_slot);
+                    power_cycle_slot = -1;
                 }
             }
             break;
@@ -1589,6 +1627,8 @@ void ble_hid_init(void) {
     get_slot_random_address(current_slot, init_addr);
     gap_random_address_set_mode(GAP_RANDOM_ADDRESS_TYPE_STATIC);
     gap_random_address_set(init_addr);
+    memcpy(addr_at_power_on, init_addr, 6);
+    addr_at_power_on_valid = true;
 
     uint16_t adv_int_min = 0x0030; // 30 ms
     uint16_t adv_int_max = 0x0030; // 30 ms
