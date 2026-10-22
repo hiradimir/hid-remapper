@@ -858,7 +858,12 @@ static void update_adv_filter_policy(void) {
 #endif
     bd_addr_t null_addr;
     memset(null_addr, 0, 6);
+#if defined(BL45_SIMPLE_ADV) && BL45_SIMPLE_ADV
+    // 切り分け専用: 最小構成の広告 (100ms 間隔・policy 0・名前だけ)
+    gap_advertisements_set_params(0x00A0, 0x00A0, 0, 0, null_addr, 0x07, 0x00);
+#else
     gap_advertisements_set_params(0x0030, 0x0030, 0, 0, null_addr, 0x07, policy);
+#endif
     remote_log_eventf("ADV-FILTER slot=%d policy=%d peer_ok=%d", current_slot + 1, policy,
                       slot_peers[current_slot].valid ? 1 : 0);
 }
@@ -906,6 +911,20 @@ static void apply_slot_identity(int slot) {
 
     uint8_t adv_data[31];
     int adv_data_len = 0;
+#if defined(BL45_SIMPLE_ADV) && BL45_SIMPLE_ADV
+    // 切り分け専用: flags + 短い名前だけ
+    adv_data[adv_data_len++] = 2;
+    adv_data[adv_data_len++] = BLUETOOTH_DATA_TYPE_FLAGS;
+    adv_data[adv_data_len++] = 0x06;
+    {
+        const char* simple_name = "Remap-Test";
+        size_t n = strlen(simple_name);
+        adv_data[adv_data_len++] = (uint8_t) (n + 1);
+        adv_data[adv_data_len++] = BLUETOOTH_DATA_TYPE_COMPLETE_LOCAL_NAME;
+        memcpy(&adv_data[adv_data_len], simple_name, n);
+        adv_data_len += (int) n;
+    }
+#else
 
     adv_data[adv_data_len++] = 2;
     adv_data[adv_data_len++] = BLUETOOTH_DATA_TYPE_FLAGS;
@@ -928,6 +947,7 @@ static void apply_slot_identity(int slot) {
     memcpy(&adv_data[adv_data_len], name_buf, name_len);
     adv_data_len += name_len;
 
+#endif
     gap_advertisements_set_data(adv_data_len, adv_data);
 
     // アドバタイズ即時有効化
