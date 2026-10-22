@@ -221,6 +221,10 @@ static int consecutive_can_send_timeouts = 0;
 // これが無いと RPA を使うホストを accept list で照合できない
 static bool resolving_list_loaded = false;
 
+// 0x57 (ACL バッファ満杯) が続いて通知が成功しない状態からの復旧用。
+// 再接続では直らず、コントローラの再起動だけが効く (2026-10-23 01:48 の実測)
+static volatile bool ctrl_reset_pending = false;
+
 static volatile int adv_enable_req = 0;
 static volatile bool adv_enabled_ok = false;
 // コントローラが広告有効化を**拒否した**ときだけ立てる (成功時の取りこぼしで
@@ -1133,6 +1137,13 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             uint8_t state = btstack_event_state_get_state(packet);
             printf("[BT] BTSTACK_STATE: %d\r\n", state);
             remote_log_eventf("STACK st=%d", state);
+            if (state == HCI_STATE_OFF && ctrl_reset_pending) {
+                // クレジット会計ごとリセットする。アドレスは固定なので再設定不要
+                remote_log_eventf("BT FLOWCTL-RESET ctrl power-on");
+                ctrl_reset_pending = false;
+                hci_power_control(HCI_POWER_ON);
+                return;
+            }
             if (state == HCI_STATE_WORKING) {
                 // 広告開始より前にボンド済み IRK をリゾルビングリストへ読み込む
                 resolving_list_loaded =
@@ -1658,6 +1669,28 @@ void ble_hid_task(void) {
 static void ble_hid_task_locked(void) {
     static uint64_t last_countdown_check_us = 0;
     uint64_t now_us = time_us_64();
+
+    // 【BL-43 系】ACL バッファ満杯 (0x57) の連発で通知が止まったらコントローラを再起動する。
+    // 再接続ではクレジットが戻らないため、HCI 電源の入れ直しだけが回復手段
+    {
+        static uint32_t last_ok = 0;
+        static uint32_t acl_at_last_ok = 0;
+        static uint64_t last_ok_us = 0;
+        if (health_ok != last_ok) {
+            last_ok = health_ok;
+            acl_at_last_ok = health_acl_full;
+            last_ok_us = now_us;
+        } else if (current_state == BLE_STATE_CONNECTED && !ctrl_reset_pending &&
+                   (health_acl_full - acl_at_last_ok) >= 20 &&
+                   (now_us - last_ok_us) > 3000000ULL) {
+            ctrl_reset_pending = true;
+            remote_log_eventf("BT FLOWCTL-RESET ok_stall=%us acl=%u",
+                              (unsigned) ((now_us - last_ok_us) / 1000000ULL),
+                              (unsigned) (health_acl_full - acl_at_last_ok));
+            hci_power_control(HCI_POWER_OFF);
+            return;
+        }
+    }
 
     // 広告の張り直し (BL-45): コントローラが明示的に拒否した (status != 0) 場合のみ。
     // 「まだ受理が確認できていない」だけで再要求すると、アドレス/パラメータ設定の
