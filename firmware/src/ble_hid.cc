@@ -1659,16 +1659,14 @@ static void ble_hid_task_locked(void) {
                 gap_disconnect(con_handle);
             }
         } else {
-            // 未接続状態で別スロットへの切り替え、またはペアリングモード開始
+            // 未接続状態で別スロットへの切り替え、またはペアリングモード開始。
+            // 【BL-45】ここは main ループが ble_lock (cyw43 async lock) を保持している。
+            // この状態で BTstack の広告系 API を直接呼ぶと、コマンドは受理される
+            // (command complete = 0x00) のに電波に乗らず、ホストから発見できない。
+            // ブート時の適用 (STACK WORKING) は async コンテキストから走って動くため、
+            // 同じ経路 = slot_transition タイマ (async) に乗せて実行させる
             switch_pending = false;
-            is_pairing_mode = is_pairing;
-            btstack_run_loop_remove_timer(&pairing_timeout_timer);
-            if (is_pairing) {
-                btstack_run_loop_set_timer_handler(&pairing_timeout_timer, pairing_mode_timeout_handler);
-                btstack_run_loop_set_timer(&pairing_timeout_timer, 60000);
-                btstack_run_loop_add_timer(&pairing_timeout_timer);
-            }
-            apply_slot_identity(slot);
+            schedule_slot_transition(slot, is_pairing);
         }
     }
 }
