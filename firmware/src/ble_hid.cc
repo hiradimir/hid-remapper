@@ -191,6 +191,12 @@ uint16_t ble_hid_get_conn_interval(void) {
 }
 
 // BTstack / CYW43 非同期コンテキスト用排他ロック
+// BLE_LOCK_DISABLE=1 にすると no-op になる。BL-45 (ペアリング検出不可) の
+// 切り分け専用スイッチで、常用ビルドでは 0 のまま (BL-33 の排他を外さない)
+#if defined(BLE_LOCK_DISABLE) && BLE_LOCK_DISABLE
+static inline void ble_lock(void) {}
+static inline void ble_unlock(void) {}
+#else
 static inline void ble_lock(void) {
     async_context_t *context = cyw43_arch_async_context();
     if (context) {
@@ -204,6 +210,7 @@ static inline void ble_unlock(void) {
         async_context_release_lock(context);
     }
 }
+#endif
 
 static int consecutive_can_send_timeouts = 0;
 
