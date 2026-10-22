@@ -219,6 +219,10 @@ static int consecutive_can_send_timeouts = 0;
 // 要求値と受理結果を保持し、未達なら ble_hid_task 側で張り直す
 static volatile int adv_enable_req = 0;
 static volatile bool adv_enabled_ok = false;
+// コントローラが広告有効化を**拒否した**ときだけ立てる (成功時の取りこぼしで
+// 再要求すると、アドレス/パラメータ設定の途中で広告が立ち、以後の設定が
+// 反映されないレースになる)
+static volatile bool adv_retry_pending = false;
 static uint64_t adv_retry_next_us = 0;
 
 static void adv_set(int enable) {
@@ -1171,6 +1175,9 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             if (opcode == HCI_OPCODE_HCI_LE_SET_ADVERTISE_ENABLE) {
                 uint8_t st = params[0];
                 adv_enabled_ok = (st == 0) && (adv_enable_req != 0);
+                if (st != 0 && adv_enable_req != 0) {
+                    adv_retry_pending = true; // 拒否されたときだけ張り直す
+                }
                 remote_log_eventf("ADV-EN status=0x%02X en=%d slot=%d pair=%d st=%d",
                                   st, adv_enable_req, current_slot + 1, is_pairing_mode,
                                   (int) current_state);
@@ -1178,6 +1185,8 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                 remote_log_eventf("ADV-ADDR status=0x%02X", params[0]);
             } else if (opcode == HCI_OPCODE_HCI_LE_SET_ADVERTISING_PARAMETERS) {
                 remote_log_eventf("ADV-PARAM status=0x%02X", params[0]);
+            } else if (opcode == HCI_OPCODE_HCI_LE_SET_ADVERTISING_DATA) {
+                remote_log_eventf("ADV-DATA status=0x%02X", params[0]);
             }
             break;
         }
@@ -1600,11 +1609,13 @@ static void ble_hid_task_locked(void) {
     static uint64_t last_countdown_check_us = 0;
     uint64_t now_us = time_us_64();
 
-    // 広告の張り直し (BL-45): 要求は出したのにコントローラが受理していない、
-    // または切断処理などで落ちたままのときに 1 秒間隔で再要求する
-    if (con_handle == HCI_CON_HANDLE_INVALID && adv_enable_req != 0 && !adv_enabled_ok &&
+    // 広告の張り直し (BL-45): コントローラが明示的に拒否した (status != 0) 場合のみ。
+    // 「まだ受理が確認できていない」だけで再要求すると、アドレス/パラメータ設定の
+    // 途中で広告を有効にしてしまい、以降の設定が反映されない
+    if (adv_retry_pending && con_handle == HCI_CON_HANDLE_INVALID &&
         (current_state == BLE_STATE_PAIRING || current_state == BLE_STATE_RECONNECTING) &&
         now_us >= adv_retry_next_us) {
+        adv_retry_pending = false;
         adv_retry_next_us = now_us + 1000000ULL;
         remote_log_eventf("ADV-RETRY st=%d pair=%d req=%d", (int) current_state,
                           is_pairing_mode, adv_enable_req);
