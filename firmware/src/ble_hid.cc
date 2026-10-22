@@ -846,6 +846,10 @@ static void bl17_cooldown_timer_handler(btstack_timer_source_t *ts) {
 //     (同じアドレスを複数ホストが知っていても、現在のスロットの相手以外は
 //      コントローラが接続を拒否する = スロット分離)
 static void update_adv_filter_policy(void) {
+#if defined(BL45_NO_WHITELIST) && BL45_NO_WHITELIST
+    // 切り分け専用: accept list を触らず policy 0 固定
+    uint8_t policy = 0x00;
+#else
     gap_whitelist_clear();
     uint8_t policy = 0x00; // 0x02 = 接続要求のみ accept list で制限
     if (!is_pairing_mode && slot_peers[current_slot].valid) {
@@ -853,6 +857,7 @@ static void update_adv_filter_policy(void) {
                           slot_peers[current_slot].addr);
         policy = 0x02;
     }
+#endif
     bd_addr_t null_addr;
     memset(null_addr, 0, 6);
     gap_advertisements_set_params(0x0030, 0x0030, 0, 0, null_addr, 0x07, policy);
