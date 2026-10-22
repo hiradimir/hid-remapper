@@ -46,6 +46,11 @@ def main() -> None:
     args = parser.parse_args()
 
     out = None
+    # ファイル名に strftime の % 書式を含めると現在時刻で展開する。
+    # 例: -o 'bl39_%m%d_%H%M.log' -> bl39_1023_0231.log
+    # (24 時間を超えて観測すると HH:MM だけでは日付が分からなくなるため)
+    if args.append and "%" in args.append:
+        args.append = datetime.datetime.now().strftime(args.append)
     if args.append:
         out = open(args.append, "a", encoding="utf-8")
 
@@ -55,7 +60,8 @@ def main() -> None:
     target = f"{args.append} + stdout" if (out and not args.no_stdout) else (
         args.append if out else "stdout")
     ack_mode = "" if args.no_ack else " + ACK"
-    print(f"listening on udp/{args.port} -> {target}{ack_mode}", flush=True)
+    print(f"listening on udp/{args.port} -> {target}{ack_mode}"
+          f"  (started {datetime.datetime.now():%Y-%m-%d %H:%M:%S})", flush=True)
     last_shown_seq = -1  # 重複排除: この番号以下の seq の datagram は表示しない
     try:
         while True:
