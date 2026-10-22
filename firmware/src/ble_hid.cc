@@ -1670,6 +1670,10 @@ bool ble_hid_is_connected(void) {
     return current_state == BLE_STATE_CONNECTED;
 }
 
+bool ble_hid_is_pairing(void) {
+    return is_pairing_mode || (current_state == BLE_STATE_PAIRING);
+}
+
 bool ble_hid_can_send(void) {
     return (current_state == BLE_STATE_CONNECTED) &&
            (con_handle != HCI_CON_HANDLE_INVALID) &&

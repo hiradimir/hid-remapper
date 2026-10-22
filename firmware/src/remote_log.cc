@@ -658,6 +658,37 @@ static void wifi_task(uint64_t now_us) {
         return; // 設定なし → 完全惰性
     }
 
+    // ペアリング中は Wi-Fi を一時停止する (BL-45)。
+    // CYW43 は Wi-Fi と BLE でラジオを共有するため、STA 接続中は BLE の
+    // 広告が受理されても電波に乗らないことがある (ホストから発見できない)。
+    // 既存ボンドの接続維持は問題ないので、**発見が必要なペアリング中だけ**
+    // Wi-Fi を降りて BLE にラジオを明け渡す。ログはリングに溜まり、復帰後に送る
+    {
+        static bool wifi_paused_for_pairing = false;
+        bool pairing = ble_hid_is_pairing();
+        if (pairing && !wifi_paused_for_pairing) {
+            wifi_paused_for_pairing = true;
+            if (wifi_state != WIFI_IDLE) {
+                cyw43_wifi_leave(&cyw43_state, CYW43_ITF_STA);
+                udp_close_cleanup();
+                wifi_state = WIFI_IDLE;
+            }
+            remote_log_eventf("WIFI PAUSE (pairing) t=%us", rlog_upt_s());
+            oled_set_wifi_state("P");
+            return;
+        }
+        if (!pairing && wifi_paused_for_pairing) {
+            wifi_paused_for_pairing = false;
+            udp_close_cleanup();
+            wifi_state = WIFI_IDLE;
+            next_connect_attempt_us = now_us; // すぐ再接続
+            remote_log_eventf("WIFI RESUME t=%us", rlog_upt_s());
+        }
+        if (pairing) {
+            return; // ペアリング中は Wi-Fi を触らない (ラジオを BLE に)
+        }
+    }
+
     // 注意: ここは IP 取得まで見る cyw43_tcpip_link_status() を使うこと。
     // cyw43_wifi_link_status() はドライバレベル (関連付けのみ) で、関連付け後は
     // 永遠に CYW43_LINK_JOIN のまま返すため DHCP 完了 (LINK_UP) を検出できない
