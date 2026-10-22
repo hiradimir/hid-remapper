@@ -224,6 +224,9 @@ static bool resolving_list_loaded = false;
 // 0x57 (ACL バッファ満杯) が続いて通知が成功しない状態からの復旧用。
 // 再接続では直らず、コントローラの再起動だけが効く (2026-10-23 01:48 の実測)
 static volatile bool ctrl_reset_pending = false;
+// 接続中だが 0x57 が連発して通知が成功しない状態 (トランスポートとしては死んでいる)。
+// USB フォールバックの判断に使う
+static volatile bool health_tx_stalled = false;
 
 static volatile int adv_enable_req = 0;
 static volatile bool adv_enabled_ok = false;
@@ -1680,10 +1683,12 @@ static void ble_hid_task_locked(void) {
             last_ok = health_ok;
             acl_at_last_ok = health_acl_full;
             last_ok_us = now_us;
+            health_tx_stalled = false;
         } else if (current_state == BLE_STATE_CONNECTED && !ctrl_reset_pending &&
                    (health_acl_full - acl_at_last_ok) >= 20 &&
                    (now_us - last_ok_us) > 3000000ULL) {
             ctrl_reset_pending = true;
+            health_tx_stalled = true; // 以後 USB フォールバックに切り替える
             remote_log_eventf("BT FLOWCTL-RESET ok_stall=%us acl=%u",
                               (unsigned) ((now_us - last_ok_us) / 1000000ULL),
                               (unsigned) (health_acl_full - acl_at_last_ok));
@@ -1775,6 +1780,12 @@ static void ble_hid_task_locked(void) {
 
 bool ble_hid_is_connected(void) {
     return current_state == BLE_STATE_CONNECTED;
+}
+
+// 接続中でも送信が死んでいる (0x57 枯渇) なら false を返す。
+// 呼び出し側 (トランスポート選択) はこれで USB フォールバックへ落とせる
+bool ble_hid_is_tx_stalled(void) {
+    return health_tx_stalled;
 }
 
 bool ble_hid_is_pairing(void) {
@@ -2160,7 +2171,7 @@ static bool do_send_report_ble(uint8_t interface, const uint8_t* report_with_id,
 
 void ble_transport_task(ble_send_report_fn_t do_send_usb) {
     static bool prev_ble_connected = false;
-    bool curr_ble_connected = ble_hid_is_connected();
+    bool curr_ble_connected = ble_hid_is_connected() && !ble_hid_is_tx_stalled();
     if (curr_ble_connected != prev_ble_connected) {
         prev_ble_connected = curr_ble_connected;
         printf("[BT] Active transport changed: %s\r\n", curr_ble_connected ? "BLE" : "USB");
