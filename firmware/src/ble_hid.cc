@@ -741,14 +741,20 @@ static void get_slot_random_address(int slot, bd_addr_t out_addr) {
     pico_unique_board_id_t id;
     pico_get_unique_board_id(&id);
 
-    // Static Random Address の要件: 最上位2ビットが 11 (0xC0以上)
-    out_addr[0] = 0xC0 | (id.id[2] & 0x3F);
+    // Static Random Address の要件: **最上位 2 ビットが 11**。
+    // BTstack の bd_addr_t は LSB 先頭 (addr[0] が最下位、bd_addr_to_str も addr[0] から
+    // 表示する) ため、要件は addr[5] に適用しなければならない。
+    // 以前は addr[0] に 0xC0 を付けていたため、実際の広告アドレスは最上位 2 ビットが
+    // 00 = Non-Resolvable Private Address となり、**仕様上スキャナから無視される**。
+    // そのため新規デバイスとして発見できず、既存ボンドのホストだけが接続できていた (BL-45)
+    out_addr[0] = id.id[2];
     out_addr[1] = id.id[3];
     out_addr[2] = id.id[4];
     out_addr[3] = id.id[5];
     out_addr[4] = id.id[6] ^ slot_salts[slot];
-    // 末尾バイトにスロット番号およびソルトを加算（ペアリング毎に新MACとなり旧ホストの自動奪取を遮断）
-    out_addr[5] = id.id[7] + (uint8_t)slot + slot_salts[slot];
+    // 最上位バイト: 上位 2 ビットを 11 に固定し、残り 6 ビットでスロット/ソルトを表現
+    // (ペアリング毎に新 MAC となり旧ホストの自動奪取を遮断する従来の狙いは維持)
+    out_addr[5] = 0xC0 | ((uint8_t) (id.id[7] + (uint8_t) slot + slot_salts[slot]) & 0x3F);
 }
 
 // 【BL-32】切断完了後の CYW43 内部リソース解放猶予タイマ（150ms）
