@@ -207,6 +207,18 @@ static inline void ble_unlock(void) {
 
 static int consecutive_can_send_timeouts = 0;
 
+// 広告の有効化は「コマンドは投げたがコントローラに拒否された (0x0C 等)」場合に
+// 無言で失敗し、ペアリングモードなのに誰からも見えない状態になる (BL-45)。
+// 要求値と受理結果を保持し、未達なら ble_hid_task 側で張り直す
+static volatile int adv_enable_req = 0;
+static volatile bool adv_enabled_ok = false;
+static uint64_t adv_retry_next_us = 0;
+
+static void adv_set(int enable) {
+    adv_enable_req = enable;
+    gap_advertisements_enable(enable);
+}
+
 
 static int current_slot = 0;
 
@@ -373,7 +385,7 @@ static void reconnect_timeout_handler(btstack_timer_source_t *ts) {
     if (con_handle == HCI_CON_HANDLE_INVALID && current_state == BLE_STATE_RECONNECTING) {
         printf("[BT] Reconnection timeout (30s expired). Radio OFF.\r\n");
         remote_log_eventf("RECONN-TO radio-off");
-        gap_advertisements_enable(0);
+        adv_set(0);
         current_state = BLE_STATE_STANDBY_SILENT;
         update_ui_for_state(current_state);
         oled_set_status("Ready");
@@ -789,7 +801,7 @@ static void disconnect_timeout_handler(btstack_timer_source_t *ts) {
             if (pending_toggle_off) {
                 pending_toggle_off = false;
                 is_pairing_mode = false;
-                gap_advertisements_enable(0);
+                adv_set(0);
                 current_state = BLE_STATE_STANDBY_SILENT;
                 update_ui_for_state(current_state);
                 schedule_save_radio_off(true); // BL-01: 2秒安定後にFlash保存
@@ -821,7 +833,7 @@ static void apply_slot_identity(int slot) {
     printf("[BT] -> apply_slot_identity(Slot %d, pairing=%d) start\r\n", slot + 1, is_pairing_mode);
 
     // 既存アドバタイズを一旦停止
-    gap_advertisements_enable(0);
+    adv_set(0);
 
     bool is_bonded = is_slot_bonded(current_slot);
 
@@ -884,7 +896,7 @@ static void apply_slot_identity(int slot) {
     gap_advertisements_set_data(adv_data_len, adv_data);
 
     // アドバタイズ即時有効化
-    gap_advertisements_enable(1);
+    adv_set(1);
 
     printf("[BT] <- apply_slot_identity done (state=%d, pairing=%d, bonded=%d). ADDR=%s\r\n",
            current_state, is_pairing_mode, is_bonded, bd_addr_to_str(slot_addr));
@@ -938,7 +950,7 @@ static void ble_switch_slot_locked(int slot) {
             printf("[BT] Slot %d active advertising -> Turning Radio OFF\r\n", slot + 1);
             remote_log_eventf("RADIO-OFF req (adv) slot=%d", slot + 1);
             is_pairing_mode = false;
-            gap_advertisements_enable(0);
+            adv_set(0);
             btstack_run_loop_remove_timer(&reconnect_timeout_timer);
             btstack_run_loop_remove_timer(&pairing_timeout_timer);
             current_state = BLE_STATE_STANDBY_SILENT;
@@ -1066,7 +1078,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                 if (radio_off_saved) {
                     printf("[BT] Boot with Radio OFF saved -> STANDBY_SILENT\r\n");
                     current_state = BLE_STATE_STANDBY_SILENT;
-                    gap_advertisements_enable(0);
+                    adv_set(0);
                     update_ui_for_state(current_state);
                     oled_set_status("Ready");
                     ble_led(0);
@@ -1142,10 +1154,15 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
         // 状態になるため、status を残す (BL-45 切り分け用)
         case HCI_EVENT_COMMAND_COMPLETE: {
             uint16_t opcode = hci_event_command_complete_get_command_opcode(packet);
+            const uint8_t* params = hci_event_command_complete_get_return_parameters(packet);
             if (opcode == HCI_OPCODE_HCI_LE_SET_ADVERTISE_ENABLE) {
-                const uint8_t* params = hci_event_command_complete_get_return_parameters(packet);
-                remote_log_eventf("ADV-EN status=0x%02X slot=%d pair=%d",
-                                  params[0], current_slot + 1, is_pairing_mode);
+                uint8_t st = params[0];
+                adv_enabled_ok = (st == 0) && (adv_enable_req != 0);
+                remote_log_eventf("ADV-EN status=0x%02X en=%d slot=%d pair=%d st=%d",
+                                  st, adv_enable_req, current_slot + 1, is_pairing_mode,
+                                  (int) current_state);
+            } else if (opcode == HCI_OPCODE_HCI_LE_SET_ADVERTISING_SET_RANDOM_ADDRESS) {
+                remote_log_eventf("ADV-ADDR status=0x%02X", params[0]);
             }
             break;
         }
@@ -1204,7 +1221,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     ble_can_send = true;
                     slot_disconnect_after_zero = false;
                     zero_sent_waiting_ack = false;
-                    gap_advertisements_enable(0);
+                    adv_set(0);
 
                     current_state = BLE_STATE_CONNECTING;
                     update_ui_for_state(current_state);
@@ -1437,7 +1454,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                 if (pending_toggle_off) {
                     pending_toggle_off = false;
                     is_pairing_mode = false;
-                    gap_advertisements_enable(0);
+                    adv_set(0);
                     current_state = BLE_STATE_STANDBY_SILENT;
                     update_ui_for_state(current_state);
                     oled_set_radio_off(true);
@@ -1470,7 +1487,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                 // 切断直後は 150ms 毎のステートマシンで安全に電波再開
                 if (bl17_reject_in_progress) {
                     bl17_reject_in_progress = false;
-                    gap_advertisements_enable(0);
+                    adv_set(0);
                     printf("[BT] BL-17 Guard: Pausing pairing adv for 2500ms to stop host retry storm\r\n");
                     btstack_run_loop_remove_timer(&bl17_cooldown_timer);
                     btstack_run_loop_set_timer_handler(&bl17_cooldown_timer, bl17_cooldown_timer_handler);
@@ -1479,7 +1496,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                 } else if (current_state != BLE_STATE_STANDBY_SILENT) {
                     schedule_slot_transition(current_slot, is_pairing_mode);
                 } else {
-                    gap_advertisements_enable(0);
+                    adv_set(0);
                 }
             }
             break;
@@ -1565,6 +1582,17 @@ void ble_hid_task(void) {
 static void ble_hid_task_locked(void) {
     static uint64_t last_countdown_check_us = 0;
     uint64_t now_us = time_us_64();
+
+    // 広告の張り直し (BL-45): 要求は出したのにコントローラが受理していない、
+    // または切断処理などで落ちたままのときに 1 秒間隔で再要求する
+    if (con_handle == HCI_CON_HANDLE_INVALID &&
+        (current_state == BLE_STATE_PAIRING || current_state == BLE_STATE_RECONNECTING) &&
+        !adv_enabled_ok && now_us >= adv_retry_next_us) {
+        adv_retry_next_us = now_us + 1000000ULL;
+        remote_log_eventf("ADV-RETRY st=%d pair=%d req=%d", (int) current_state,
+                          is_pairing_mode, adv_enable_req);
+        adv_set(1);
+    }
     if (now_us - last_countdown_check_us >= 500000) { // 500ms周期でカウントダウン更新
         last_countdown_check_us = now_us;
         if (current_state == BLE_STATE_PAIRING && pairing_start_us > 0) {
@@ -1707,7 +1735,7 @@ static void ble_hid_kick_reconnect_locked(void) {
         if (now - last_kick_ms > 2000) {
             last_kick_ms = now;
             printf("[BT] Activity detected in RECONNECTING state. Re-asserting advertisement.\r\n");
-            gap_advertisements_enable(1);
+            adv_set(1);
             btstack_run_loop_remove_timer(&reconnect_timeout_timer);
             btstack_run_loop_set_timer_handler(&reconnect_timeout_timer, reconnect_timeout_handler);
             btstack_run_loop_set_timer(&reconnect_timeout_timer, 30000);
@@ -1754,7 +1782,7 @@ static void ble_clear_slot_bonds_locked(int slot) {
         is_pairing_mode = false;
         current_state = BLE_STATE_STANDBY_SILENT;
         update_ui_for_state(current_state);
-        gap_advertisements_enable(0);
+        adv_set(0);
     }
     oled_show_toast("Slot Cleared", 2000);
 }
@@ -1841,7 +1869,7 @@ static void ble_clear_bonds_locked(void) {
     update_ui_for_state(current_state);
     oled_set_status("Bonds Cleared");
     oled_show_toast("All Bonds Cleared!", 3000);
-    gap_advertisements_enable(0);
+    adv_set(0);
     ble_led(0);
 }
 
