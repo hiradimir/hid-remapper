@@ -9,6 +9,21 @@
 
 ---
 
+## 2026-10-22 (4) BL-45: アンカー確定 (`3a8d85b`)
+
+- 10:42 ビルドの **`3a8d85b`**（`BL45_SKIP_ADDR_CHANGE` 無し = アドレス変更あり、
+  `BLE_LOCK_DISABLE=ON`）を worktree で忠実に再ビルドし、実機で再確認した (14:08-14:09)
+  - `PAIRING-START slot=1` → `ADV-ADDR/PARAM/EN` → `LE-CONN` → 接続
+  - `SWITCH-REQ 1 -> 2` → `PAIRING-START slot=2` → `LE-CONN` (peer=00:72:EE:6E:C1:88)
+  - **アドレスが `E4:...:27:31` → `E4:...:22:2F` と変わっているのに両方成功**
+    → 「実行中のアドレス変更」自体は動作可能。回帰は別の変更が原因
+  - 成果物: `firmware/artifacts/remapper_3a8d85b_rebuild.uf2`（目印: `BUILD VARIANT ble_lock=disabled`）
+- **次回のビスect計画**（アンカーから 1 段ずつ、`BLE_LOCK_DISABLE=ON` を維持したまま）:
+  1. `93d2546`（= b05bd98 アドレス値修正 + 3749b53 + リトライ条件変更を含む）
+     を `BLE_LOCK_DISABLE=ON` でビルド → ここで NG なら原因はその 3 つのどれか
+  2. OK なら `530766a`（ロックを送信経路のみに変更）で試す → ここで NG ならロック変更が原因
+  3. 各段階でホストは Mac 固定・ボンド全消去・設定画面を開いたまま・60 秒待つ
+
 ## 2026-10-22 (3) BL-45: 参考実装 (EhHHKB2) との比較と、残った 3 差分
 
 - ルディ提供の参考実装 `~/git/EhHHKB2` (RP2040+CYW43 のマルチペアリング HID) と比較。
