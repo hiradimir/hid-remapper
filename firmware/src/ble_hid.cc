@@ -1154,6 +1154,11 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                 return;
             }
             if (state == HCI_STATE_WORKING) {
+                // コントローラ再起動 (FLOWCTL-RESET) 直後は BTstack の広告状態キャッシュが
+                // 「有効」のまま残る。そのまま apply すると disable→enable が「変化なし」と
+                // 判定されてコマンドが送られず、広告が出ないまま再接続タイムアウトになる。
+                // ここで明示的に無効化して、状態変化を作ってから apply させる
+                gap_advertisements_enable(0);
                 // 広告開始より前にボンド済み IRK をリゾルビングリストへ読み込む
                 resolving_list_loaded =
                     gap_load_resolving_list_from_le_device_db() == ERROR_CODE_SUCCESS;
