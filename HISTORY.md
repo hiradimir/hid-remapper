@@ -9,6 +9,24 @@
 
 ---
 
+## 2026-10-23 0x57 膠着の再発と自動復旧の修正
+
+- 18:46 に **0x57 膠着が再発**（同日 2 回目）。スロット切替で再接続しても 2 秒で
+  `CANSEND-TO` → `acl=90` と悪化し、`ok` は凍結したまま
+- 追加した watchdog は正しく発火（`BT FLOWCTL-RESET ok_stall=3s acl=90` →
+  HCI 電源 OFF→ON）したが、**復旧に失敗**:
+  - 電源再投入後 `ADV-ADDR/PARAM/EN` が一切出ず、Mac が再接続できないまま
+    30 秒の再接続タイムアウトで無線 OFF
+  - 原因: **BTstack 側の広告状態キャッシュが「有効」のまま**で、`apply_slot_identity` の
+    disable→enable が「変化なし」と判定され、HCI コマンドが送られていなかった
+  - 修正 (`c28b83b`): `HCI_STATE_WORKING` で必ず `gap_advertisements_enable(0)` を呼び、
+    状態変化を作ってから identity を適用する
+- この間も**入力は USB-OUT にフォールバックして継続**（設計どおり）。ユーザー体感では
+  「USB-OUT になっていた」
+- 観測: 膠着中は `acl` が増え続け `ok`/`cp` が同時に凍結（`cp` も止まる）→ クレジットが
+  コントローラ側から返っていない方向を支持
+- ソーク用: `remapper_anchor_pace11_recover4.uf2`（11ms ペーシング + 復旧修正込み）
+
 ## 2026-10-22 (4) BL-45: アンカー確定 (`3a8d85b`)
 
 - 10:42 ビルドの **`3a8d85b`**（`BL45_SKIP_ADDR_CHANGE` 無し = アドレス変更あり、
