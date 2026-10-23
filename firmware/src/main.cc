@@ -407,6 +407,29 @@ int main() {
 #endif
         }
         tud_task();
+        // USB が列挙されないまま数秒経過したら、D+ を一度落として再接続を促す。
+        // 焼き直し直後に Mac/ハブが再列挙に失敗し、挿し直すまで USB-OUT が
+        // 使えない現象の自動復帰 (最大 5 回まで、3 秒間隔)
+        {
+            static uint64_t usb_retry_next_us = 0;
+            static uint64_t usb_reconnect_at_us = 0;
+            static int usb_retry_count = 0;
+            uint64_t now_usb = time_us_64();
+            if (tud_mounted()) {
+                usb_retry_count = 0;
+            } else if (usb_reconnect_at_us == 0 && usb_retry_count < 5 &&
+                       now_usb >= usb_retry_next_us) {
+                usb_retry_next_us = now_usb + 3000000ULL;
+                usb_retry_count++;
+                tud_disconnect();
+                usb_reconnect_at_us = now_usb + 100000ULL;
+                printf("[USB] not mounted -> re-attach (%d/5)\r\n", usb_retry_count);
+            }
+            if (usb_reconnect_at_us != 0 && now_usb >= usb_reconnect_at_us) {
+                usb_reconnect_at_us = 0;
+                tud_connect();
+            }
+        }
         if (boot_protocol_updated) {
             parse_our_descriptor();
             boot_protocol_updated = false;
