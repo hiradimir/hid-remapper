@@ -2219,7 +2219,18 @@ void ble_transport_task(ble_send_report_fn_t do_send_usb) {
                     uint32_t interval_us = (conn_interval > 0) ? (conn_interval * 1250) : 15000;
                     // 1接続インターバルあたり厳密に最大1パケットへ整合（66.6pkts/s上限）
                     // 14.5ms以上の間隔を保証し、1つの15msアンカー内に2パケット押し込まれるバースト衝突を完全に防止
-                    uint32_t pace_us = (interval_us > 500) ? (interval_us - 500) : 14500;
+                    // 1 接続インターバルに 1 パケットへ揃えるための最低間隔。
+                    // 既定は interval - 500us (15ms 間隔なら 14.5ms)。
+                    // BLE_MOUSE_PACE_MARGIN_US を大きくすると間隔が詰まり、通知レート
+                    // (ok/s) が上がる。バースト衝突が再発しないかは gmax/tx で確認する
+#if defined(BLE_MOUSE_PACE_MARGIN_US)
+                    const uint32_t pace_margin = (uint32_t) BLE_MOUSE_PACE_MARGIN_US;
+#else
+                    const uint32_t pace_margin = 500;
+#endif
+                    uint32_t pace_us = (interval_us > pace_margin + 1000)
+                                           ? (interval_us - pace_margin)
+                                           : 14500;
                     if (now_us - last_mouse_pace_us < pace_us) {
                         ready_to_send = false;
                     }
