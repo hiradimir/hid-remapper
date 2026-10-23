@@ -227,6 +227,10 @@ static volatile bool ctrl_reset_pending = false;
 // 接続中だが 0x57 が連発して通知が成功しない状態 (トランスポートとしては死んでいる)。
 // USB フォールバックの判断に使う
 static volatile bool health_tx_stalled = false;
+// 広告の有効化を遅延させる。disable と enable を同じティックで呼ぶと
+// BTstack が「変化なし」と判定してコマンドを送らないため、時間を離す
+static volatile bool adv_enable_pending = false;
+static uint64_t adv_enable_at_us = 0;
 
 static volatile int adv_enable_req = 0;
 static volatile bool adv_enabled_ok = false;
@@ -965,8 +969,9 @@ static void apply_slot_identity(int slot) {
 #endif
     gap_advertisements_set_data(adv_data_len, adv_data);
 
-    // アドバタイズ即時有効化
-    adv_set(1);
+    // アドバタイズ有効化は少し遅らせる (disable との同時実行で打ち消されるのを防ぐ)
+    adv_enable_pending = true;
+    adv_enable_at_us = time_us_64() + 200000ULL;
 
     bd_addr_t local_addr;
     gap_local_bd_addr(local_addr);
@@ -1551,6 +1556,10 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             current_peer_addr[0] = '\0';
 
             resolving_list_loaded = gap_load_resolving_list_from_le_device_db() == ERROR_CODE_SUCCESS;
+            // 切断完了時は広告を張り直す (接続中は enable が無視されるため、
+            // ここで改めて有効化しないと次の接続待ちに入れない)
+            adv_enable_pending = true;
+            adv_enable_at_us = time_us_64() + 200000ULL;
             uint8_t reason = hci_event_disconnection_complete_get_reason(packet);
             printf("[BT] Disconnected (reason=0x%02X)\r\n", reason);
             health_disc++;
@@ -1698,6 +1707,12 @@ void ble_hid_task(void) {
 static void ble_hid_task_locked(void) {
     static uint64_t last_countdown_check_us = 0;
     uint64_t now_us = time_us_64();
+
+    // 遅延させた広告有効化 (apply_slot_identity / 切断完了から 200ms 後)
+    if (adv_enable_pending && now_us >= adv_enable_at_us) {
+        adv_enable_pending = false;
+        adv_set(1);
+    }
 
     // 【BL-43 系】ACL バッファ満杯 (0x57) の連発で通知が止まったらコントローラを再起動する。
     // 再接続ではクレジットが戻らないため、HCI 電源の入れ直しだけが回復手段
