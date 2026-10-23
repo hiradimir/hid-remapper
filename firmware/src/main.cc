@@ -90,6 +90,11 @@ extern "C" bool usb_is_ready(void) {
     return tud_hid_n_ready(0) || tud_suspended();
 }
 
+// USB ホストがバスをサスペンドしているか (フォールバックが効かない原因の切り分け用)
+extern "C" bool usb_is_suspended(void) {
+    return tud_suspended();
+}
+
 extern "C" void usb_clear_kbd_report(void) {
     uint8_t zero_kbd[16] = {0};
     if (tud_mounted() && !tud_suspended()) {

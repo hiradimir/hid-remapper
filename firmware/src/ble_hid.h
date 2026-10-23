@@ -59,6 +59,7 @@ void ble_transport_task(ble_send_report_fn_t do_send_usb);
 // USB 側ヘルパー（main.cc 側で TinyUSB を直接操作）
 bool usb_is_mounted(void);
 bool usb_is_ready(void);
+bool usb_is_suspended(void);
 void usb_clear_kbd_report(void);
 
 #else
