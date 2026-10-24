@@ -1564,10 +1564,12 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             current_peer_addr[0] = '\0';
 
             resolving_list_loaded = gap_load_resolving_list_from_le_device_db() == ERROR_CODE_SUCCESS;
-            // 切断完了時は広告を張り直す (接続中は enable が無視されるため、
-            // ここで改めて有効化しないと次の接続待ちに入れない)
-            adv_enable_pending = true;
-            adv_enable_at_us = time_us_64() + 200000ULL;
+            // 切断完了時は広告を張り直す (接続中は enable が無視されるため)。
+            // ただしユーザーが OFF を指示した切断 (pending_toggle_off) では張り直さない
+            if (!(switch_pending && pending_toggle_off)) {
+                adv_enable_pending = true;
+                adv_enable_at_us = time_us_64() + 200000ULL;
+            }
             uint8_t reason = hci_event_disconnection_complete_get_reason(packet);
             printf("[BT] Disconnected (reason=0x%02X)\r\n", reason);
             health_disc++;
@@ -1582,6 +1584,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                 if (pending_toggle_off) {
                     pending_toggle_off = false;
                     is_pairing_mode = false;
+                    adv_enable_pending = false; // 予約済みの広告有効化も取り消す
                     adv_set(0);
                     current_state = BLE_STATE_STANDBY_SILENT;
                     update_ui_for_state(current_state);
