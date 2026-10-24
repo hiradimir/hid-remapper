@@ -425,7 +425,8 @@ static void reconnect_timeout_handler(btstack_timer_source_t *ts) {
         printf("[BT] Reconnection timeout (30s expired). Radio OFF.\r\n");
         remote_log_eventf("RECONN-TO radio-off (dormant; retry on input)");
         adv_set(0);
-        dormant_retry = true; // 入力があれば接続を再試行する
+        dormant_retry = true;
+        oled_set_radio_off(true); // 「Connecting...(Ns)」のまま固まらないようにする // 入力があれば接続を再試行する
         current_state = BLE_STATE_STANDBY_SILENT;
         update_ui_for_state(current_state);
         oled_set_status("Ready");
@@ -445,6 +446,23 @@ static void conn_stabilize_timer_handler(btstack_timer_source_t *ts) {
     if (con_handle != HCI_CON_HANDLE_INVALID && ble_kbd_ready && ble_encrypted) {
         printf("[BT] Connection stabilized -> CONNECTED (Ready to send)\r\n");
         dormant_retry = false;
+        // 再接続時にホスト側の押下状態が残っていることがある (マウス左ボタン固着等)。
+        // 接続直後に全離下を 1 回送って状態を揃える
+        {
+            uint8_t z_kbd[16] = {0};
+            uint8_t z_mouse[9] = {0};
+            uint8_t z_consumer[1] = {0};
+            if (ble_kbd_ready) {
+                hids_device_send_input_report_for_id(con_handle, 2, z_kbd, sizeof(z_kbd));
+            }
+            if (ble_mouse_ready) {
+                hids_device_send_input_report_for_id(con_handle, 1, z_mouse, sizeof(z_mouse));
+            }
+            if (ble_consumer_ready) {
+                hids_device_send_input_report_for_id(con_handle, 3, z_consumer, sizeof(z_consumer));
+            }
+            remote_log_eventf("BT RELEASE-ALL on connect");
+        }
         remote_log_eventf("CONNECTED slot=%d", current_slot + 1);
         btstack_run_loop_remove_timer(&conn_handshake_timeout_timer);
         current_state = BLE_STATE_CONNECTED;
@@ -1869,6 +1887,7 @@ void ble_hid_wake_from_dormant(void) {
     dormant_last_try_us = now_us;
     dormant_retry = false; // 1 回だけ試す (失敗すればタイムアウトで再度休眠に入る)
     btstack_run_loop_remove_timer(&reconnect_timeout_timer);
+    oled_set_radio_off(false);
     ble_lock();
     current_state = BLE_STATE_RECONNECTING;
     update_ui_for_state(current_state);
@@ -2110,10 +2129,15 @@ static void send_all_release_reports(void) {
     // USB 側にキーボード全離下を送信
     usb_clear_kbd_report();
 
-    // BLE 側にもキーボード全離下を送信
+    // BLE 側にも全離下を送信 (キーボード/マウス/コンシューマ)。
+    // マウスを忘れると「左クリック押しっぱなし」等の固着が残る
     if (ble_hid_is_connected()) {
         uint8_t zero_kbd[16] = {0};
+        uint8_t zero_mouse[9] = {0};
+        uint8_t zero_consumer[1] = {0};
         ble_hid_send_report(2, zero_kbd, sizeof(zero_kbd));
+        ble_hid_send_report(1, zero_mouse, sizeof(zero_mouse));
+        ble_hid_send_report(3, zero_consumer, sizeof(zero_consumer));
     }
 }
 
