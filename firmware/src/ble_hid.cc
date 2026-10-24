@@ -1720,14 +1720,27 @@ static void ble_hid_task_locked(void) {
         static uint32_t last_ok = 0;
         static uint32_t acl_at_last_ok = 0;
         static uint64_t last_ok_us = 0;
+        static bool was_connected = false;
+        static uint64_t cooldown_until_us = 0;
+        // 接続した瞬間は判定の基準を取り直す。前回接続時の経過時間のままだと
+        // 「接続直後に 3 秒停止」と誤判定して再起動を連鎖させる (2026-10-24 朝に実測)
+        bool connected_now = (current_state == BLE_STATE_CONNECTED);
+        if (connected_now && !was_connected) {
+            last_ok = health_ok;
+            acl_at_last_ok = health_acl_full;
+            last_ok_us = now_us;
+        }
+        was_connected = connected_now;
+
         if (health_ok != last_ok) {
             last_ok = health_ok;
             acl_at_last_ok = health_acl_full;
             last_ok_us = now_us;
             health_tx_stalled = false;
-        } else if (current_state == BLE_STATE_CONNECTED && !ctrl_reset_pending &&
+        } else if (connected_now && !ctrl_reset_pending && now_us >= cooldown_until_us &&
                    (health_acl_full - acl_at_last_ok) >= 20 &&
                    (now_us - last_ok_us) > 3000000ULL) {
+            cooldown_until_us = now_us + 10000000ULL; // 再起動の連鎖を防ぐ 10 秒クールダウン
             ctrl_reset_pending = true;
             health_tx_stalled = true; // 以後 USB フォールバックに切り替える
             remote_log_eventf("BT FLOWCTL-RESET ok_stall=%us acl=%u",
