@@ -229,6 +229,11 @@ static volatile bool ctrl_reset_pending = false;
 static volatile bool health_tx_stalled = false;
 // 広告の有効化を遅延させる。disable と enable を同じティックで呼ぶと
 // BTstack が「変化なし」と判定してコマンドを送らないため、時間を離す
+// 再接続タイムアウトで電波を落とした状態 (ユーザー操作の OFF とは区別する)。
+// 入力イベントを契機に、もう一度だけ接続を試みる
+static volatile bool dormant_retry = false;
+static uint64_t dormant_last_try_us = 0;
+
 static volatile bool adv_enable_pending = false;
 static uint64_t adv_enable_at_us = 0;
 
@@ -418,8 +423,9 @@ static void can_send_timeout_handler(btstack_timer_source_t *ts) {
 static void reconnect_timeout_handler(btstack_timer_source_t *ts) {
     if (con_handle == HCI_CON_HANDLE_INVALID && current_state == BLE_STATE_RECONNECTING) {
         printf("[BT] Reconnection timeout (30s expired). Radio OFF.\r\n");
-        remote_log_eventf("RECONN-TO radio-off");
+        remote_log_eventf("RECONN-TO radio-off (dormant; retry on input)");
         adv_set(0);
+        dormant_retry = true; // 入力があれば接続を再試行する
         current_state = BLE_STATE_STANDBY_SILENT;
         update_ui_for_state(current_state);
         oled_set_status("Ready");
@@ -438,6 +444,7 @@ static void conn_stabilize_timer_handler(btstack_timer_source_t *ts) {
     conn_stabilize_active = false;
     if (con_handle != HCI_CON_HANDLE_INVALID && ble_kbd_ready && ble_encrypted) {
         printf("[BT] Connection stabilized -> CONNECTED (Ready to send)\r\n");
+        dormant_retry = false;
         remote_log_eventf("CONNECTED slot=%d", current_slot + 1);
         btstack_run_loop_remove_timer(&conn_handshake_timeout_timer);
         current_state = BLE_STATE_CONNECTED;
@@ -1032,6 +1039,7 @@ static void ble_switch_slot_locked(int slot) {
             adv_set(0);
             btstack_run_loop_remove_timer(&reconnect_timeout_timer);
             btstack_run_loop_remove_timer(&pairing_timeout_timer);
+            dormant_retry = false; // ユーザー操作の OFF は自動復帰しない
             current_state = BLE_STATE_STANDBY_SILENT;
             update_ui_for_state(current_state);
             oled_set_radio_off(true);
@@ -1842,6 +1850,26 @@ bool ble_hid_is_tx_stalled(void) {
     return health_tx_stalled;
 }
 
+bool ble_hid_is_dormant(void) {
+    return dormant_retry;
+}
+
+// 休眠 (再接続タイムアウト後の電波OFF) から、入力イベントを契機に接続を試みる。
+// 連続入力で叩かれ続けないよう 5 秒間隔に制限する
+void ble_hid_wake_from_dormant(void) {
+    if (!dormant_retry) return;
+    uint64_t now_us = time_us_64();
+    if (now_us - dormant_last_try_us < 5000000ULL) return;
+    dormant_last_try_us = now_us;
+    btstack_run_loop_remove_timer(&reconnect_timeout_timer);
+    ble_lock();
+    current_state = BLE_STATE_RECONNECTING;
+    update_ui_for_state(current_state);
+    apply_slot_identity(current_slot); // 広告を張り直し、30 秒タイマも再武装される
+    ble_unlock();
+    remote_log_eventf("BT WAKE-RETRY slot=%d", current_slot + 1);
+}
+
 bool ble_hid_is_pairing(void) {
     return is_pairing_mode || (current_state == BLE_STATE_PAIRING);
 }
@@ -2224,6 +2252,10 @@ static bool do_send_report_ble(uint8_t interface, const uint8_t* report_with_id,
 }
 
 void ble_transport_task(ble_send_report_fn_t do_send_usb) {
+    // 休眠中でも、入力があれば BLE 接続を試みる (USB 転送はそのまま続ける)
+    if (or_items > 0 && dormant_retry) {
+        ble_hid_wake_from_dormant();
+    }
     static bool prev_ble_connected = false;
     bool curr_ble_connected = ble_hid_is_connected() && !ble_hid_is_tx_stalled();
     if (curr_ble_connected != prev_ble_connected) {

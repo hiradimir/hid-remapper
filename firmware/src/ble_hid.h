@@ -32,6 +32,10 @@ void ble_hid_task(void);
 bool ble_hid_is_connected(void);
 // 接続中でも 0x57 枯渇で送信が死んでいる場合は true (USB フォールバック判断用)
 bool ble_hid_is_tx_stalled(void);
+// 再接続タイムアウトで電波OFF (休眠) 中か
+bool ble_hid_is_dormant(void);
+// 休眠から入力契機で接続を試みる
+void ble_hid_wake_from_dormant(void);
 // ペアリングモード (広告中/待機) かどうか。Wi-Fi の一時停止判断に使う
 bool ble_hid_is_pairing(void);
 bool ble_hid_can_send(void);
@@ -69,6 +73,8 @@ static inline void ble_hid_init(void) {}
 static inline void ble_hid_task(void) {}
 static inline bool ble_hid_is_connected(void) { return false; }
 static inline bool ble_hid_is_tx_stalled(void) { return false; }
+static inline bool ble_hid_is_dormant(void) { return false; }
+static inline void ble_hid_wake_from_dormant(void) {}
 static inline bool ble_hid_is_pairing(void) { return false; }
 static inline bool ble_hid_can_send(void) { return false; }
 static inline void ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len) {
