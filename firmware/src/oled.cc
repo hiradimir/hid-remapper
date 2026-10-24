@@ -167,10 +167,18 @@ static volatile bool ui_radio_off = false;
 static volatile int ui_rem_pairing_sec = 0;
 static volatile int ui_rem_reconnect_sec = 0;
 
+// I2C 書き込みが失敗したら立てる。次の描画前に SSD1306 を再初期化して復帰する
+// (表示が部分的に崩れる / 砂嵐になる症状の回復用)
+static volatile bool oled_bus_error = false;
+
 static bool ssd1306_cmd(uint8_t cmd) {
     uint8_t buf[2] = {0x00, cmd};
     int res = i2c_write_timeout_us(I2C_PORT, SSD1306_I2C_ADDR, buf, 2, false, I2C_TIMEOUT_US);
-    return res == 2;
+    if (res != 2) {
+        oled_bus_error = true;
+        return false;
+    }
+    return true;
 }
 
 static void ssd1306_set_contrast(uint8_t contrast) {
@@ -186,6 +194,7 @@ static bool ssd1306_data(const uint8_t* data, size_t len) {
         memcpy(buf + 1, data, chunk);
         int res = i2c_write_timeout_us(I2C_PORT, SSD1306_I2C_ADDR, buf, chunk + 1, false, I2C_TIMEOUT_US);
         if (res != (int)(chunk + 1)) {
+            oled_bus_error = true;
             return false;
         }
         data += chunk;
@@ -226,6 +235,8 @@ static void draw_string_6x8(uint8_t x, uint8_t y, const char* str) {
     }
 }
 
+static void ssd1306_apply_init(void);
+
 void oled_init(void) {
     i2c_init(I2C_PORT, I2C_BAUDRATE);
     gpio_set_function(I2C_SDA_PIN, GPIO_FUNC_I2C);
@@ -243,6 +254,12 @@ void oled_init(void) {
     }
     oled_present = true;
 
+    ssd1306_apply_init();
+}
+
+// SSD1306 の初期化コマンド列 (電源投入時と、I2C エラーからの復帰で使う)
+static void ssd1306_apply_init(void) {
+    ssd1306_cmd(0xAE);                   // Display OFF (再初期化を確実にする)
     ssd1306_cmd(0x20); ssd1306_cmd(0x00); // Horizontal addressing mode
     ssd1306_cmd(0xA8); ssd1306_cmd(SSD1306_HEIGHT - 1); // Multiplex ratio (0x1F for 32)
     ssd1306_cmd(0xD3); ssd1306_cmd(0x00); // Display offset
@@ -411,6 +428,17 @@ void oled_task(void) {
     // 約 25 FPS (40ms) または 状態変更時に描画
     if (!need_redraw && (now_us - last_refresh_us < 40000)) {
         return;
+    }
+
+    // I2C エラーで表示が崩れたら、パネルを再初期化して次のフレームで描き直す。
+    // バスが完全に死んでいると毎フレーム繰り返すため 1 秒間隔に制限する
+    static uint64_t last_reinit_us = 0;
+    if (oled_bus_error && (now_us - last_reinit_us) > 1000000ULL) {
+        oled_bus_error = false;
+        last_reinit_us = now_us;
+        ssd1306_apply_init();
+        need_redraw = true;
+        printf("[OLED] I2C error -> re-init\r\n");
     }
 
     need_redraw = false;
