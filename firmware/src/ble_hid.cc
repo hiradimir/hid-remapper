@@ -1858,9 +1858,13 @@ bool ble_hid_is_dormant(void) {
 // 連続入力で叩かれ続けないよう 5 秒間隔に制限する
 void ble_hid_wake_from_dormant(void) {
     if (!dormant_retry) return;
+    // すでに広告を出している (RECONNECTING) なら触らない。
+    // 毎回 apply すると広告が点滅してホストが接続できない (2026-10-24 実測)
+    if (current_state != BLE_STATE_STANDBY_SILENT) return;
     uint64_t now_us = time_us_64();
     if (now_us - dormant_last_try_us < 5000000ULL) return;
     dormant_last_try_us = now_us;
+    dormant_retry = false; // 1 回だけ試す (失敗すればタイムアウトで再度休眠に入る)
     btstack_run_loop_remove_timer(&reconnect_timeout_timer);
     ble_lock();
     current_state = BLE_STATE_RECONNECTING;
