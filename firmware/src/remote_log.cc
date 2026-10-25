@@ -976,16 +976,6 @@ void remote_log_task(void) {
         // se == 0 なら従来どおり "*"。非 JOINED の他状態コード (".", "?", "T6" など)
         // は Events 側で設定されるためここでは上書きしない。
         // リング書き込みと同じメインループなので追加ロック不要
-        if (wifi_state == WIFI_JOINED) {
-            char wi_str[4];
-            if (rl_send_errors != 0) {
-                snprintf(wi_str, sizeof(wi_str), "!%02u", (unsigned) (rl_send_errors % 100));
-            } else {
-                snprintf(wi_str, sizeof(wi_str), "*");
-            }
-            oled_set_wifi_state(wi_str);
-        }
-
         // 宛先 ARP 解決の監視 (状態変化時のみ 1 行、開通後のみ)。
         // lwIP は ARP 未解決でも udp_send が ERR_OK を返して ARP キューに積むため、
         // se も OLED も無反応のまま「宛先が間違っていて ARP request だけ出続ける」
@@ -1015,6 +1005,20 @@ void remote_log_task(void) {
                 }
             }
         }
+        if (wifi_state == WIFI_JOINED) {
+            char wi_str[4];
+            if (rl_send_errors != 0) {
+                snprintf(wi_str, sizeof(wi_str), "!%02u", (unsigned) (rl_send_errors % 100));
+            } else if (rl_target_arp_state == 2) {
+                // JOINED だが宛先の ARP が解決できない = 経路が死んでいる
+                // (AP に繋がって見えてもログが届かない状態。2026-10-24 に実際に発生)
+                snprintf(wi_str, sizeof(wi_str), "?");
+            } else {
+                snprintf(wi_str, sizeof(wi_str), "*");
+            }
+            oled_set_wifi_state(wi_str);
+        }
+
     }
 }
 
