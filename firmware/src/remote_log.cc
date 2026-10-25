@@ -181,6 +181,8 @@ static ip_addr_t rl_static_nm;
 static uint64_t next_task_us = 0;       // タスク内部スロットリング
 static uint64_t next_connect_attempt_us = 0;
 static uint64_t connect_started_us = 0;
+// NONET/FAIL (一過性) の短いバックオフ用カウンタ。JOINED で 0 に戻す
+static uint8_t rl_quick_retry = 0;
 static uint64_t next_ping_us = 0;
 
 #define RLOG_CONNECT_TIMEOUT_MS 45000 // 接続試行の滞留検知 (BADAUTH等のイベント無し滞留含む)
@@ -702,6 +704,7 @@ static void wifi_task(uint64_t now_us) {
         case WIFI_CONNECTING:
             if (link == CYW43_LINK_UP) {
                 wifi_state = WIFI_JOINED;
+                rl_quick_retry = 0;
                 udp_open_locked_helper();
                 unsigned joined_t = rlog_upt_s();
                 const ip4_addr_t *ip = netif_ip4_addr(&cyw43_state.netif[CYW43_ITF_STA]);
@@ -721,13 +724,26 @@ static void wifi_task(uint64_t now_us) {
                 oled_set_wifi_state("*");
             } else if (link < 0) {
                 reconnect_count++; // BADAUTH (-3) 等の失敗も再接続系として数える
+                // NONET (-2) / FAIL (-1) は一過性のことが多い。実例: 2026-10-25 は
+                // 起動 4 秒のスキャンが BLE 接続とラジオを奪い合って AP のビーコンを
+                // 取り逃し st=-2 になり、30 秒固定の待ちで復帰が 37 秒まで遅れた。
+                // 短いバックオフで引き直す (2,4,8,16,32 秒)。BADAUTH (-3) は相手側の
+                // 認証問題で連打しても悪化するだけなので従来どおり 30 秒のまま。
+                uint32_t retry_ms = RLOG_CONNECT_RETRY_MS;
+                if (link == CYW43_LINK_NONET || link == CYW43_LINK_FAIL) {
+                    const uint32_t shift = (rl_quick_retry < 4) ? rl_quick_retry : 4;
+                    retry_ms = 2000u << shift;
+                    if (rl_quick_retry < 4) rl_quick_retry++;
+                } else {
+                    rl_quick_retry = 0;
+                }
                 char code[16]; // OLED 用の short code (幅は診断値の桁数変動に任せる)
                 snprintf(code, sizeof(code), "%d", link);
-                remote_log_eventf("WIFI FAIL t=%us st=%s rc=%u (retry in %ds)", rlog_upt_s(), code,
-                                  (unsigned) reconnect_count, RLOG_CONNECT_RETRY_MS / 1000);
+                remote_log_eventf("WIFI FAIL t=%us st=%s rc=%u (retry in %us)", rlog_upt_s(), code,
+                                  (unsigned) reconnect_count, (unsigned) (retry_ms / 1000));
                 oled_set_wifi_state(code);
                 wifi_state = WIFI_IDLE;
-                next_connect_attempt_us = now_us + RLOG_CONNECT_RETRY_MS * 1000ULL;
+                next_connect_attempt_us = now_us + (uint64_t) retry_ms * 1000ULL;
                 udp_close_cleanup();
             } else if (link == CYW43_LINK_NOIP && rl_static_valid) {
                 // DHCP を待たず静的アドレスを置く (再接続後も 0.0.0.0 になったら再適用)
