@@ -286,8 +286,29 @@ static void ssd1306_apply_init(void) {
     need_redraw = true;
 }
 
-void oled_set_mode(bool ble_mode) {
-    if (ui_ble_mode != ble_mode) {
+// 向き・表示設定の再表明 (2026-10-26)。
+// 「I2C の取りこぼしで 0xC8 (COM 走査方向) だけ適用されず、上下反転のまま固まる」
+// 症状が出た。SSD1306 は I2C で読み出せず適用結果を検証できないため、1 秒ごとに
+// 設定に効くコマンドを送り直して静かに自己修復させる。〜30 バイト/秒で負荷は無視できる
+static void ssd1306_reassert_settings(void) {
+    ssd1306_cmd(0x20); ssd1306_cmd(0x00); // 水平アドレッシングモード
+    ssd1306_cmd(0xA8); ssd1306_cmd(SSD1306_HEIGHT - 1); // マルチプレックス比
+    ssd1306_cmd(0xD3); ssd1306_cmd(0x00); // 表示オフセット
+    ssd1306_cmd(0x40);                   // スタートライン 0
+    ssd1306_cmd(0xA1);                   // セグメント再マップ
+    ssd1306_cmd(0xC8);                   // COM 走査方向 (欠けると上下反転する)
+#if SSD1306_HEIGHT == 32
+    ssd1306_cmd(0xDA); ssd1306_cmd(0x02); // COM ピン配置
+#else
+    ssd1306_cmd(0xDA); ssd1306_cmd(0x12);
+#endif
+    ssd1306_cmd(0x8D); ssd1306_cmd(0x14); // チャージポンプ有効
+    ssd1306_cmd(0xA4);                   // RAM 内容を表示
+    ssd1306_cmd(0xA6);                   // 通常表示 (反転モード解除)
+    ssd1306_cmd(0x2E);                   // スクロール停止
+}
+
+void oled_set_mode(bool ble_mode) {    if (ui_ble_mode != ble_mode) {
         ui_ble_mode = ble_mode;
         need_redraw = true;
     }
@@ -443,6 +464,13 @@ void oled_task(void) {
 
     need_redraw = false;
     last_refresh_us = now_us;
+
+    // 設定の再表明 (1 秒ごと)。向きの取りこぼしを自己修復する
+    static uint64_t last_reassert_us = 0;
+    if (now_us - last_reassert_us >= 1000000ULL) {
+        last_reassert_us = now_us;
+        ssd1306_reassert_settings();
+    }
 
     uint32_t now_ms = (uint32_t)(now_us / 1000);
     uint32_t idle_ms = now_ms - last_activity_ms;
