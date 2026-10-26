@@ -853,6 +853,12 @@ static void ble_health_task(uint64_t now_us) {
     }
     if (ok_moved) {
         ble_stall_since_us = 0;
+    } else if (!connected) {
+        // 未接続中の入力は USB 側に流れるのが正常 (BT-OFF 中の USB 使用など)。
+        // ここでタイマーを回すと再接続の瞬間に「2 秒止まってる」と誤検知する
+        // (2026-10-26 実測: OFF 中 718 件の入力 → 再接続 0.3 秒後に BLE STALL)
+        ble_stall_since_us = 0;
+        ble_stall_active = false;
     } else if (in_moved && ble_stall_since_us == 0) {
         ble_stall_since_us = now_us;
         ble_stall_in_start = in_now;
