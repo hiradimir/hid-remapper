@@ -9,6 +9,7 @@
 #include "tusb.h"
 #include "globals.h"
 #include "ble_hid.h"
+#include "remote_log.h"
 
 #define I2C_PORT i2c0
 #define I2C_SDA_PIN 4
@@ -170,6 +171,8 @@ static volatile int ui_rem_reconnect_sec = 0;
 // I2C 書き込みが失敗したら立てる。次の描画前に SSD1306 を再初期化して復帰する
 // (表示が部分的に崩れる / 砂嵐になる症状の回復用)
 static volatile bool oled_bus_error = false;
+// I2C エラーによる再初期化の累計 (診断用)
+static uint32_t oled_reinit_count = 0;
 
 static bool ssd1306_cmd(uint8_t cmd) {
     uint8_t buf[2] = {0x00, cmd};
@@ -459,7 +462,11 @@ void oled_task(void) {
         last_reinit_us = now_us;
         ssd1306_apply_init();
         need_redraw = true;
-        printf("[OLED] I2C error -> re-init\r\n");
+        // 再初期化の回数をログに残す。I2C バスの不安定さ (表示の化け・砂嵐の頻度) を
+        // 数字で見るため。頻発するようならバスクロックを 400k から下げる判断材料になる
+        oled_reinit_count++;
+        printf("[OLED] I2C error -> re-init (#%u)\r\n", (unsigned) oled_reinit_count);
+        remote_log_eventf("OLED REINIT n=%u", (unsigned) oled_reinit_count);
     }
 
     need_redraw = false;
