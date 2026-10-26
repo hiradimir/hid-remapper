@@ -64,7 +64,10 @@ extern "C" {
 #define RLOG_BLE_HB_MS 15000 // BLE ヘルス行の周期 (変化が無ければ接続中のみ)
 #endif
 #ifndef RLOG_BLE_STALL_MS
-#define RLOG_BLE_STALL_MS 5000 // 通知がこれだけ途絶えたら「停止」とみなす
+// 通知がこれだけ途絶えたら「停止」とみなす。5 秒だと「マウスが一瞬止まった」を
+// 取り逃すため 2 秒に短縮 (2026-10-26)。判定は「入力が来たのに送れていない」ときだけ
+// 立ち、入力自体が 2 秒途絶えたら取り下げるので無操作の誤検知はしない
+#define RLOG_BLE_STALL_MS 2000
 #endif
 
 #ifndef RLOG_DATAGRAM_MAX

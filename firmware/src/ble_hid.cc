@@ -1929,8 +1929,18 @@ void ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len) {
     oled_notify_tx();
     uint8_t status = hids_device_send_input_report_for_id(con_handle, report_id, (uint8_t*)data, len);
     if (status == ERROR_CODE_SUCCESS) {
+        // 「放置 → 触った」という遷移のマーカー (2026-10-26 追加)。
+        // 11 時間放置しても切断しない一方で、操作を再開した直後や BT スイッチ後に
+        // 不安定になるという観測があるため、入力再開の時刻を明示的に残す
+        // (直後に DISC が出れば引き金が「再開」だと確定できる)
+        static uint64_t last_send_us = 0;
+        const uint64_t now_us = time_us_64();
+        if (last_send_us != 0 && (now_us - last_send_us) >= 10000000ULL) {
+            remote_log_eventf("BT RESUME gap=%us", (unsigned) ((now_us - last_send_us) / 1000000ULL));
+        }
+        last_send_us = now_us;
         health_ok++;
-        health_last_ok_us = time_us_64();
+        health_last_ok_us = now_us;
     } else if (status == 0x57) { // BTSTACK_ACL_BUFFERS_FULL: 受理されず再要求になる
         health_acl_full++;
     }
