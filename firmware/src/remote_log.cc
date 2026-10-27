@@ -172,6 +172,8 @@ static uint64_t ingest_window_start_us = 0;  // 直近 HB の時刻 (区間外�
 static uint32_t tx_max_ms = 0;               // 区間内で観測した送信経過時間の最大
 static uint64_t last_ihgap_us = 0;           // IHGAP の連発抑止
 static bool ble_recent_input = false;        // 直近 2 秒に入力があったか
+static uint32_t in_per_sec_mark = 0;         // 1 秒判定用の入力数
+static uint64_t dense_until_us = 0;          // 連続操作中とみなす期限
 static uint64_t last_shgap_us = 0;           // SENDGAP の連発抑止
 static uint32_t ingest_gap_max_us = 0;       // 入力レポート間隔の最大値 (途切れ検出)
 
@@ -299,7 +301,7 @@ void remote_log_count_ingest(void) {
         }
         // 100ms 以上の入力の穴は「時刻付き」で残す (15 秒窓の最大値だけでは
         // いつ起きたか分からず、平均にも薄まるため)。操作中のみ、1 秒に 1 回まで
-        if (gap >= 100000u && ble_recent_input && (now - last_ihgap_us) >= 1000000ULL) {
+        if (gap >= 100000u && now < dense_until_us && (now - last_ihgap_us) >= 1000000ULL) {
             last_ihgap_us = now;
             remote_log_eventf("BT IHGAP ms=%u", (unsigned) (gap / 1000u));
         }
@@ -863,6 +865,13 @@ static void ble_health_task(uint64_t now_us) {
     const bool ok_moved = (h.ok != ble_stall_ok_mark);
     ble_stall_in_mark = in_now;
     ble_stall_ok_mark = h.ok;
+    {
+        const uint32_t in_sec = in_now - in_per_sec_mark;
+        in_per_sec_mark = in_now;
+        if (in_sec >= 10) {
+            dense_until_us = now_us + 1500000ULL; // 1.5 秒間は連続操作とみなす
+        }
+    }
     if (in_moved) {
         ble_recent_input = true;
         ble_last_in_us = now_us;
@@ -872,7 +881,7 @@ static void ble_health_task(uint64_t now_us) {
             tx_max_ms = tx_ms;
         }
         // 入力があるのに送信が 100ms 以上空いたら時刻付きで残す
-        if (connected && ever && tx_ms >= 100u && (now_us - last_shgap_us) >= 1000000ULL) {
+        if (connected && ever && tx_ms >= 100u && now_us < dense_until_us && (now_us - last_shgap_us) >= 1000000ULL) {
             last_shgap_us = now_us;
             remote_log_eventf("BT SENDGAP ms=%u", (unsigned) tx_ms);
         }
