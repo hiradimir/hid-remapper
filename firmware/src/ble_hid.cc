@@ -265,30 +265,11 @@ static volatile uint32_t health_err = 0;
 static volatile uint32_t health_burst = 0;
 // 送信→完了レイテンシ: 受理時刻をリングに積み、Number Of Completed Packets で
 // 取り出して遅延を測る。BTstack より下 (コントローラ/エアタイム) はこれでしか見えない
-#define TX_LAT_RING 64
-static volatile uint64_t tx_lat_ring[TX_LAT_RING];
-static volatile uint8_t tx_lat_head = 0;
-static volatile uint8_t tx_lat_tail = 0;
+// 送信レイテンシ: 「CAN_SEND_NOW を要求した時刻 → 許可イベントが来た時刻」。
+// 完了パケットとの突き合わせは ATT 応答など入力以外の ACL が混ざって値が膨らむため、
+// BTstack のスケジューリング待ちそのものを測る (2026-10-27 変更)
+static volatile uint64_t can_send_req_us = 0;
 static volatile uint32_t health_lat_max_ms = 0;
-
-static void tx_lat_push(uint64_t now_us) {
-    uint8_t next = (uint8_t) ((tx_lat_head + 1) % TX_LAT_RING);
-    if (next == tx_lat_tail) { // 溢れたら古い方を捨てる
-        tx_lat_tail = (uint8_t) ((tx_lat_tail + 1) % TX_LAT_RING);
-    }
-    tx_lat_ring[tx_lat_head] = now_us;
-    tx_lat_head = next;
-}
-
-static void tx_lat_pop(uint32_t n, uint64_t now_us) {
-    while (n-- > 0) {
-        if (tx_lat_tail == tx_lat_head) break;
-        uint64_t t = tx_lat_ring[tx_lat_tail];
-        tx_lat_tail = (uint8_t) ((tx_lat_tail + 1) % TX_LAT_RING);
-        uint32_t d = (uint32_t) ((now_us - t) / 1000ULL);
-        if (d > health_lat_max_ms) health_lat_max_ms = d;
-    }
-}
 
 void ble_hid_reset_lat_max(void) { health_lat_max_ms = 0; }
 // コントローラが返した "Number Of Completed Packets" の回数と総数。
@@ -1270,6 +1251,11 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                 case HIDS_SUBEVENT_CAN_SEND_NOW: {
                     consecutive_can_send_timeouts = 0;
                     ble_can_send = true;
+                    if (can_send_req_us != 0) {
+                        uint32_t d = (uint32_t) ((time_us_64() - can_send_req_us) / 1000ULL);
+                        if (d > health_lat_max_ms) health_lat_max_ms = d;
+                        can_send_req_us = 0;
+                    }
                     btstack_run_loop_remove_timer(&can_send_timeout_timer);
                     if (slot_disconnect_after_zero) {
                         if (!zero_sent_waiting_ack) {
@@ -1314,7 +1300,6 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             }
             health_cp_events++;
             health_cp_packets += total;
-            tx_lat_pop(total, time_us_64()); // 完了までの遅延を測る
             break;
         }
 
@@ -1967,7 +1952,6 @@ void ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len) {
         // (直後に DISC が出れば引き金が「再開」だと確定できる)
         static uint64_t last_send_us = 0;
         const uint64_t now_us = time_us_64();
-        tx_lat_push(now_us);
         if (last_send_us != 0 && (now_us - last_send_us) < 2000ULL) {
             health_burst++; // 2ms 未満の連続送信 = 1 接続イベントへの詰め込み
         }
@@ -1986,8 +1970,10 @@ void ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len) {
         btstack_run_loop_set_timer_handler(&can_send_timeout_timer, can_send_timeout_handler);
         btstack_run_loop_set_timer(&can_send_timeout_timer, 2000); // 2秒の安全ウォッチドッグ
         btstack_run_loop_add_timer(&can_send_timeout_timer);
+        can_send_req_us = time_us_64(); // 「いつ許可を求めたか」を残す
         uint8_t req_err = hids_device_request_can_send_now_event(con_handle);
         if (req_err != ERROR_CODE_SUCCESS) {
+            can_send_req_us = 0;
             ble_can_send = true;
             btstack_run_loop_remove_timer(&can_send_timeout_timer);
         }
