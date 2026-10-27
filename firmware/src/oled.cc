@@ -449,8 +449,11 @@ void oled_task(void) {
     static uint64_t last_refresh_us = 0;
     uint64_t now_us = time_us_64();
 
-    // 約 25 FPS (40ms) または 状態変更時に描画
-    if (!need_redraw && (now_us - last_refresh_us < 40000)) {
+    // 約 10 FPS (100ms) または 状態変更時に描画。
+    // 25 FPS だと内容が変わらなくても 12.8 kB/s をバスに流し続け、操作中に
+    // I2C エラー (OLED REINIT) が集中する実測があった (2026-10-27)。
+    // 状態変化は need_redraw で即描画するので、体感の応答は落ちない
+    if (!need_redraw && (now_us - last_refresh_us < 100000)) {
         return;
     }
 
