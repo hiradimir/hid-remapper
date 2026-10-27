@@ -831,6 +831,7 @@ static uint64_t ble_stall_since_us = 0; // 「入力は来たが受理されて�
 static uint32_t ble_stall_in_start = 0; // その開始時点の入力数 (未処理件数の算出用)
 static uint64_t ble_last_in_us = 0;     // 最後に input が動いた時刻
 static uint32_t ble_hb_in = 0;          // 直近 HB 時点の入力数
+static uint32_t ble_hb_burst = 0;       // 直近 HB 時点の詰め込み送信数
 static uint32_t ble_hb_loops = 0;       // 直近 HB 時点のループ周回数
 static uint64_t ble_hb_us = 0;          // 直近 HB の時刻
 
@@ -904,6 +905,7 @@ static void ble_health_task(uint64_t now_us) {
         // かくつきは 5 秒平均の in= では見えないので gmax (最大空白) を持つ。
         // 入力が 1 件も無い区間は gmax を 0 にする (無操作を「空白」と呼ばない)
         const uint32_t in_delta = count_ingest - ble_hb_in;
+        const uint32_t burst_delta = h.burst - ble_hb_burst;
         const uint32_t gmax_ms = (in_delta != 0) ? (ingest_gap_max_us / 1000u) : 0;
         const uint32_t lmax_ms = loop_gap_max_us / 1000u;
         // USB デバイス側の状態 (入力の行き先があるか)
@@ -931,17 +933,19 @@ static void ble_health_task(uint64_t now_us) {
         ingest_window_start_us = now_us;
         ingest_gap_max_us = 0;
         ble_hb_in = count_ingest;
+        ble_hb_burst = h.burst;
         ble_hb_loops = loop_count;
         ble_hb_us = now_us;
         ingest_gap_max_us = 0;
         loop_gap_max_us = 0;
 
         if (ever) {
-            remote_log_eventf("BLE-HB ci=%u ok=%u blk=%u acl=%u err=%u cp=%u/%u disc=%u rs=0x%02X tx=%ums omax=%ums in=%u gmax=%ums lps=%u lmax=%ums rtt=%ums rmax=%ums u=%u/%u sus=%u",
+            remote_log_eventf("BLE-HB ci=%u ok=%u blk=%u acl=%u err=%u cp=%u/%u disc=%u rs=0x%02X tx=%ums omax=%ums burst=%u in=%u gmax=%ums lps=%u lmax=%ums rtt=%ums rmax=%ums u=%u/%u sus=%u",
                               (unsigned) h.ci, (unsigned) h.ok, (unsigned) h.blocked,
                               (unsigned) h.acl_full, (unsigned) h.err, (unsigned) h.cp_events, (unsigned) h.cp_packets, (unsigned) h.disc,
                               (unsigned) h.disc_reason, (unsigned) tx_ms,
                               (unsigned) omax_ms,
+                              (unsigned) burst_delta,
                               (unsigned) in_delta, (unsigned) gmax_ms, (unsigned) lps,
                               (unsigned) lmax_ms, (unsigned) rtt_ms, (unsigned) rmax_ms,
                               (unsigned) usb_mounted, (unsigned) usb_ready,

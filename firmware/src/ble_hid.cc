@@ -262,6 +262,7 @@ static volatile uint32_t health_ok = 0;
 static volatile uint32_t health_acl_full = 0;
 static volatile uint32_t health_blocked = 0;
 static volatile uint32_t health_err = 0;
+static volatile uint32_t health_burst = 0;
 // コントローラが返した "Number Of Completed Packets" の回数と総数。
 // 0x57 膠着時にこれが止まっていれば「コントローラがクレジットを返していない」
 static volatile uint32_t health_cp_events = 0;
@@ -279,6 +280,7 @@ void ble_hid_get_health(ble_hid_health_t* out) {
     out->err = health_err;
     out->cp_events = health_cp_events;
     out->cp_packets = health_cp_packets;
+    out->burst = health_burst;
     out->disc = health_disc;
     out->disc_reason = health_disc_reason;
     out->last_ok_us = health_last_ok_us;
@@ -1935,6 +1937,9 @@ void ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len) {
         // (直後に DISC が出れば引き金が「再開」だと確定できる)
         static uint64_t last_send_us = 0;
         const uint64_t now_us = time_us_64();
+        if (last_send_us != 0 && (now_us - last_send_us) < 2000ULL) {
+            health_burst++; // 2ms 未満の連続送信 = 1 接続イベントへの詰め込み
+        }
         if (last_send_us != 0 && (now_us - last_send_us) >= 10000000ULL) {
             remote_log_eventf("BT RESUME gap=%us", (unsigned) ((now_us - last_send_us) / 1000000ULL));
         }

@@ -21,6 +21,10 @@ typedef struct {
     uint32_t cp_events;  // Number Of Completed Packets イベントの累計
     uint32_t cp_packets; // その中で報告された完了パケット総数
     uint32_t disc;       // 切断イベントの累計
+    // 直前の送信から 2ms 未満で送った回数 (接続イベントへの詰め込み指標)。
+    // 15ms 間隔のリンクで 2 個以上を 1 イベントに入れるとホスト側で
+    // 「止まる→まとめて動く」に見えるため、その発生量を数える
+    uint32_t burst;
     uint8_t disc_reason; // 直近の HCI 切断理由
     uint64_t last_ok_us; // 最後に受理された通知の時刻 (0 = まだ)
 } ble_hid_health_t;
