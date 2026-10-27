@@ -12,6 +12,7 @@
 //   - lwIP は NO_SYS=1 (pico_cyw43_arch_lwip_threadsafe_background) のため、
 //     lwIP API 呼び出しはメインループから cyw43_arch_lwip_begin/end を介して行う
 #include "remote_log.h"
+#include "remapper.h"
 
 #if ENABLE_REMOTE_LOG
 
@@ -173,9 +174,13 @@ static uint32_t tx_max_ms = 0;               // 区間内で観測した送信�
 static uint64_t last_ihgap_us = 0;           // IHGAP の連発抑止
 static bool ble_recent_input = false;        // 直近 2 秒に入力があったか
 static uint32_t in_per_sec_mark = 0;         // 1 秒判定用の入力数
+static uint32_t mouse_ingest_count = 0;      // マウス入力の累計
 static uint64_t dense_until_us = 0;          // 連続操作中とみなす期限
 static uint64_t last_shgap_us = 0;           // SENDGAP の連発抑止
 static uint32_t ingest_gap_max_us = 0;       // 入力レポート間隔の最大値 (途切れ検出)
+// マウスだけの入力間隔 (キーボードの打鍵間隔を「穴」と誤認しないため)
+static uint64_t last_mouse_ingest_us = 0;
+static uint32_t mouse_gap_max_us = 0;
 
 static int wifi_state = WIFI_IDLE;
 static int udp_state = UDP_CLOSED;
@@ -299,12 +304,21 @@ void remote_log_count_ingest(void) {
         if (gap > ingest_gap_max_us) {
             ingest_gap_max_us = gap;
         }
-        // 100ms 以上の入力の穴は「時刻付き」で残す (15 秒窓の最大値だけでは
-        // いつ起きたか分からず、平均にも薄まるため)。操作中のみ、1 秒に 1 回まで
-        if (gap >= 100000u && now < dense_until_us && (now - last_ihgap_us) >= 1000000ULL) {
-            last_ihgap_us = now;
-            remote_log_eventf("BT IHGAP ms=%u", (unsigned) (gap / 1000u));
+    }
+    // マウスの入力間隔だけを「穴」として扱う (キーボードの打鍵間隔は穴ではない)
+    if (last_ingest_protocol == 2 && last_mouse_ingest_us != 0) {
+        uint32_t mgap = (uint32_t) (now - last_mouse_ingest_us);
+        if (mgap > mouse_gap_max_us) {
+            mouse_gap_max_us = mgap;
         }
+        if (mgap >= 100000u && now < dense_until_us && (now - last_ihgap_us) >= 1000000ULL) {
+            last_ihgap_us = now;
+            remote_log_eventf("BT IHGAP ms=%u", (unsigned) (mgap / 1000u));
+        }
+    }
+    if (last_ingest_protocol == 2) {
+        last_mouse_ingest_us = now;
+        mouse_ingest_count++;
     }
     last_ingest_us = now;
     count_ingest++;
@@ -866,8 +880,8 @@ static void ble_health_task(uint64_t now_us) {
     ble_stall_in_mark = in_now;
     ble_stall_ok_mark = h.ok;
     {
-        const uint32_t in_sec = in_now - in_per_sec_mark;
-        in_per_sec_mark = in_now;
+        const uint32_t in_sec = mouse_ingest_count - in_per_sec_mark;
+        in_per_sec_mark = mouse_ingest_count;
         if (in_sec >= 10) {
             dense_until_us = now_us + 1500000ULL; // 1.5 秒間は連続操作とみなす
         }
@@ -933,7 +947,7 @@ static void ble_health_task(uint64_t now_us) {
         // 入力が 1 件も無い区間は gmax を 0 にする (無操作を「空白」と呼ばない)
         const uint32_t in_delta = count_ingest - ble_hb_in;
         const uint32_t burst_delta = h.burst - ble_hb_burst;
-        const uint32_t gmax_ms = (in_delta != 0) ? (ingest_gap_max_us / 1000u) : 0;
+        const uint32_t gmax_ms = mouse_gap_max_us / 1000u;
         const uint32_t lmax_ms = loop_gap_max_us / 1000u;
         // USB デバイス側の状態 (入力の行き先があるか)
 #if defined(ENABLE_BLE) && ENABLE_BLE
@@ -966,6 +980,7 @@ static void ble_health_task(uint64_t now_us) {
         ble_hb_loops = loop_count;
         ble_hb_us = now_us;
         ingest_gap_max_us = 0;
+        mouse_gap_max_us = 0;
         loop_gap_max_us = 0;
 
         if (ever) {

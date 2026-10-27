@@ -57,6 +57,7 @@ uint32_t get_gpio_valid_pins_mask() {
 
 static bool reports_received;
 
+
 void read_report(bool* new_report, bool* tick) {
     *tick = get_and_clear_tick_pending();
 
@@ -111,6 +112,7 @@ void report_received_callback(uint8_t dev_addr, uint8_t instance, uint8_t const*
         handle_received_report(report, len, (uint16_t) (dev_addr << 8) | instance);
 
         reports_received = true;
+        last_ingest_protocol = tuh_hid_interface_protocol(dev_addr, instance);
     }
 }
 

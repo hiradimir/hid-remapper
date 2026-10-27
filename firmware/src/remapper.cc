@@ -79,6 +79,10 @@ uint8_t or_head = 0;
 uint8_t or_tail = 0;
 uint8_t or_items = 0;
 
+// 直近に受け取ったレポートの HID プロトコル (1=Keyboard, 2=Mouse, 0=不明)。
+// 観測側が「マウスの入力だけ」を数えられるようにするための最小の公開
+volatile uint8_t last_ingest_protocol = 0;
+
 std::vector<uint8_t> report_ids;
 
 #define MAX_INPUT_STATES 1024

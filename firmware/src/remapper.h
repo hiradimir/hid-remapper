@@ -29,6 +29,8 @@ void extra_host_ports_init();
 #endif
 
 void read_report(bool* new_report, bool* tick);
+// 直近レポートの HID プロトコル (1=KBD, 2=Mouse, 0=不明)。remote_log の観測用
+extern volatile uint8_t last_ingest_protocol;
 
 void interval_override_updated();
 
