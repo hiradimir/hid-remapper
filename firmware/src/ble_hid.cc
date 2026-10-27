@@ -263,6 +263,34 @@ static volatile uint32_t health_acl_full = 0;
 static volatile uint32_t health_blocked = 0;
 static volatile uint32_t health_err = 0;
 static volatile uint32_t health_burst = 0;
+// 送信→完了レイテンシ: 受理時刻をリングに積み、Number Of Completed Packets で
+// 取り出して遅延を測る。BTstack より下 (コントローラ/エアタイム) はこれでしか見えない
+#define TX_LAT_RING 64
+static volatile uint64_t tx_lat_ring[TX_LAT_RING];
+static volatile uint8_t tx_lat_head = 0;
+static volatile uint8_t tx_lat_tail = 0;
+static volatile uint32_t health_lat_max_ms = 0;
+
+static void tx_lat_push(uint64_t now_us) {
+    uint8_t next = (uint8_t) ((tx_lat_head + 1) % TX_LAT_RING);
+    if (next == tx_lat_tail) { // 溢れたら古い方を捨てる
+        tx_lat_tail = (uint8_t) ((tx_lat_tail + 1) % TX_LAT_RING);
+    }
+    tx_lat_ring[tx_lat_head] = now_us;
+    tx_lat_head = next;
+}
+
+static void tx_lat_pop(uint32_t n, uint64_t now_us) {
+    while (n-- > 0) {
+        if (tx_lat_tail == tx_lat_head) break;
+        uint64_t t = tx_lat_ring[tx_lat_tail];
+        tx_lat_tail = (uint8_t) ((tx_lat_tail + 1) % TX_LAT_RING);
+        uint32_t d = (uint32_t) ((now_us - t) / 1000ULL);
+        if (d > health_lat_max_ms) health_lat_max_ms = d;
+    }
+}
+
+void ble_hid_reset_lat_max(void) { health_lat_max_ms = 0; }
 // コントローラが返した "Number Of Completed Packets" の回数と総数。
 // 0x57 膠着時にこれが止まっていれば「コントローラがクレジットを返していない」
 static volatile uint32_t health_cp_events = 0;
@@ -281,6 +309,7 @@ void ble_hid_get_health(ble_hid_health_t* out) {
     out->cp_events = health_cp_events;
     out->cp_packets = health_cp_packets;
     out->burst = health_burst;
+    out->lat_max_ms = health_lat_max_ms;
     out->disc = health_disc;
     out->disc_reason = health_disc_reason;
     out->last_ok_us = health_last_ok_us;
@@ -1285,6 +1314,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             }
             health_cp_events++;
             health_cp_packets += total;
+            tx_lat_pop(total, time_us_64()); // 完了までの遅延を測る
             break;
         }
 
@@ -1937,6 +1967,7 @@ void ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len) {
         // (直後に DISC が出れば引き金が「再開」だと確定できる)
         static uint64_t last_send_us = 0;
         const uint64_t now_us = time_us_64();
+        tx_lat_push(now_us);
         if (last_send_us != 0 && (now_us - last_send_us) < 2000ULL) {
             health_burst++; // 2ms 未満の連続送信 = 1 接続イベントへの詰め込み
         }

@@ -25,6 +25,9 @@ typedef struct {
     // 15ms 間隔のリンクで 2 個以上を 1 イベントに入れるとホスト側で
     // 「止まる→まとめて動く」に見えるため、その発生量を数える
     uint32_t burst;
+    // 「BTstack に渡してから完了通知が返るまで」の最大値 (ms)。
+    // ここが大きい = 電波に乗るまでの待ちが長い (LL 再送・接続イベント待ち)
+    uint32_t lat_max_ms;
     uint8_t disc_reason; // 直近の HCI 切断理由
     uint64_t last_ok_us; // 最後に受理された通知の時刻 (0 = まだ)
 } ble_hid_health_t;
@@ -42,6 +45,8 @@ bool ble_hid_is_dormant(void);
 void ble_hid_wake_from_dormant(void);
 // ペアリングモード (広告中/待機) かどうか。Wi-Fi の一時停止判断に使う
 bool ble_hid_is_pairing(void);
+// 送信レイテンシ最大値をリセット (観測ウィンドウの区切りで remote_log が呼ぶ)
+void ble_hid_reset_lat_max(void);
 bool ble_hid_can_send(void);
 void ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len);
 void ble_hid_kick_reconnect(void);

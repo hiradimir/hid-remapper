@@ -929,22 +929,25 @@ static void ble_health_task(uint64_t now_us) {
             }
         }
         const uint32_t omax_ms = tx_max_ms; // print 用に退避してからリセット
+        const uint32_t lat_ms = h.lat_max_ms;
         tx_max_ms = 0;
         ingest_window_start_us = now_us;
         ingest_gap_max_us = 0;
         ble_hb_in = count_ingest;
         ble_hb_burst = h.burst;
+        ble_hid_reset_lat_max(); // 次ウィンドウの最大値を測り直す
         ble_hb_loops = loop_count;
         ble_hb_us = now_us;
         ingest_gap_max_us = 0;
         loop_gap_max_us = 0;
 
         if (ever) {
-            remote_log_eventf("BLE-HB ci=%u ok=%u blk=%u acl=%u err=%u cp=%u/%u disc=%u rs=0x%02X tx=%ums omax=%ums burst=%u in=%u gmax=%ums lps=%u lmax=%ums rtt=%ums rmax=%ums u=%u/%u sus=%u",
+            remote_log_eventf("BLE-HB ci=%u ok=%u blk=%u acl=%u err=%u cp=%u/%u disc=%u rs=0x%02X tx=%ums omax=%ums lat=%ums burst=%u in=%u gmax=%ums lps=%u lmax=%ums rtt=%ums rmax=%ums u=%u/%u sus=%u",
                               (unsigned) h.ci, (unsigned) h.ok, (unsigned) h.blocked,
                               (unsigned) h.acl_full, (unsigned) h.err, (unsigned) h.cp_events, (unsigned) h.cp_packets, (unsigned) h.disc,
                               (unsigned) h.disc_reason, (unsigned) tx_ms,
                               (unsigned) omax_ms,
+                              (unsigned) lat_ms,
                               (unsigned) burst_delta,
                               (unsigned) in_delta, (unsigned) gmax_ms, (unsigned) lps,
                               (unsigned) lmax_ms, (unsigned) rtt_ms, (unsigned) rmax_ms,
