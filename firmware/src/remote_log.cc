@@ -170,6 +170,9 @@ static uint32_t loop_gap_max_us = 0;   // ループ間隔の最大値 (ファー
 static uint64_t last_ingest_us = 0;          // 直近の入力時刻
 static uint64_t ingest_window_start_us = 0;  // 直近 HB の時刻 (区間外のギャップを除外)
 static uint32_t tx_max_ms = 0;               // 区間内で観測した送信経過時間の最大
+static uint64_t last_ihgap_us = 0;           // IHGAP の連発抑止
+static bool ble_recent_input = false;        // 直近 2 秒に入力があったか
+static uint64_t last_shgap_us = 0;           // SENDGAP の連発抑止
 static uint32_t ingest_gap_max_us = 0;       // 入力レポート間隔の最大値 (途切れ検出)
 
 static int wifi_state = WIFI_IDLE;
@@ -293,6 +296,12 @@ void remote_log_count_ingest(void) {
         uint32_t gap = (uint32_t) (now - last_ingest_us);
         if (gap > ingest_gap_max_us) {
             ingest_gap_max_us = gap;
+        }
+        // 100ms 以上の入力の穴は「時刻付き」で残す (15 秒窓の最大値だけでは
+        // いつ起きたか分からず、平均にも薄まるため)。操作中のみ、1 秒に 1 回まで
+        if (gap >= 100000u && ble_recent_input && (now - last_ihgap_us) >= 1000000ULL) {
+            last_ihgap_us = now;
+            remote_log_eventf("BT IHGAP ms=%u", (unsigned) (gap / 1000u));
         }
     }
     last_ingest_us = now;
@@ -855,11 +864,17 @@ static void ble_health_task(uint64_t now_us) {
     ble_stall_in_mark = in_now;
     ble_stall_ok_mark = h.ok;
     if (in_moved) {
+        ble_recent_input = true;
         ble_last_in_us = now_us;
         // 入力が来た秒に限り「最後の送信からの経過」を記録する。
         // 無操作の秒を混ぜると意味がなくなるため in_moved で条件付ける
         if (connected && ever && tx_ms != 0xFFFFFFFFu && tx_ms > tx_max_ms) {
             tx_max_ms = tx_ms;
+        }
+        // 入力があるのに送信が 100ms 以上空いたら時刻付きで残す
+        if (connected && ever && tx_ms >= 100u && (now_us - last_shgap_us) >= 1000000ULL) {
+            last_shgap_us = now_us;
+            remote_log_eventf("BT SENDGAP ms=%u", (unsigned) tx_ms);
         }
     }
     if (ok_moved) {
@@ -876,6 +891,9 @@ static void ble_health_task(uint64_t now_us) {
     }
     // 入力自体が途絶えたら「未処理の入力」は存在しない → 判定を取り下げる。
     // これが無いと、入力が 1 件来た直後に操作を止めただけで STALL が立ちっぱなしになる
+    if (ble_last_in_us != 0 && (now_us - ble_last_in_us) > 2000000ULL) {
+        ble_recent_input = false;
+    }
     if (ble_stall_since_us != 0 &&
         (now_us - ble_last_in_us) > (uint64_t) RLOG_BLE_STALL_MS * 1000ULL) {
         ble_stall_since_us = 0;

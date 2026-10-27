@@ -1255,6 +1255,16 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                         uint32_t d = (uint32_t) ((time_us_64() - can_send_req_us) / 1000ULL);
                         if (d > health_lat_max_ms) health_lat_max_ms = d;
                         can_send_req_us = 0;
+                        // 許可待ちが 50ms 以上なら時刻付きで残す (15 秒窓の最大値だけでは
+                        // いつ起きたか分からない)。1 秒に 1 回までに制限する
+                        if (d >= 50u) {
+                            static uint64_t last_latgap_us = 0;
+                            uint64_t t = time_us_64();
+                            if ((t - last_latgap_us) >= 1000000ULL) {
+                                last_latgap_us = t;
+                                remote_log_eventf("BT LATGAP ms=%u", (unsigned) d);
+                            }
+                        }
                     }
                     btstack_run_loop_remove_timer(&can_send_timeout_timer);
                     if (slot_disconnect_after_zero) {
