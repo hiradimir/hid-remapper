@@ -926,6 +926,7 @@ static void ble_health_task(uint64_t now_us) {
                 lps = (uint32_t) (((uint64_t) (loop_count - ble_hb_loops)) * 1000000ULL / dt_us);
             }
         }
+        const uint32_t omax_ms = tx_max_ms; // print 用に退避してからリセット
         tx_max_ms = 0;
         ingest_window_start_us = now_us;
         ingest_gap_max_us = 0;
@@ -940,7 +941,7 @@ static void ble_health_task(uint64_t now_us) {
                               (unsigned) h.ci, (unsigned) h.ok, (unsigned) h.blocked,
                               (unsigned) h.acl_full, (unsigned) h.err, (unsigned) h.cp_events, (unsigned) h.cp_packets, (unsigned) h.disc,
                               (unsigned) h.disc_reason, (unsigned) tx_ms,
-                              (unsigned) tx_max_ms,
+                              (unsigned) omax_ms,
                               (unsigned) in_delta, (unsigned) gmax_ms, (unsigned) lps,
                               (unsigned) lmax_ms, (unsigned) rtt_ms, (unsigned) rmax_ms,
                               (unsigned) usb_mounted, (unsigned) usb_ready,
