@@ -168,6 +168,8 @@ static uint32_t loop_count = 0;        // main ループの周回数 (ループ�
 static uint64_t last_loop_us = 0;      // 直近のループ時刻
 static uint32_t loop_gap_max_us = 0;   // ループ間隔の最大値 (ファーム側スタックの検出)
 static uint64_t last_ingest_us = 0;          // 直近の入力時刻
+static uint64_t ingest_window_start_us = 0;  // 直近 HB の時刻 (区間外のギャップを除外)
+static uint32_t tx_max_ms = 0;               // 区間内で観測した送信経過時間の最大
 static uint32_t ingest_gap_max_us = 0;       // 入力レポート間隔の最大値 (途切れ検出)
 
 static int wifi_state = WIFI_IDLE;
@@ -284,7 +286,10 @@ void remote_log_count_ingest(void) {
     // 入力レポートの「間隔の最大値」を取る。5 秒平均の in= では見えない
     // 数百 ms の飛び (マウスのかくつき) を拾うため。main ループからのみ呼ばれる
     uint64_t now = time_us_64();
-    if (last_ingest_us != 0) {
+    // 直前の入力が HB 区間より前なら、そのギャップは「放置明け」であって
+    // かくつきではないので数えない (2026-10-27: 円を描いても gmax が数秒に
+    // なっていた原因がこれ)
+    if (last_ingest_us != 0 && last_ingest_us >= ingest_window_start_us) {
         uint32_t gap = (uint32_t) (now - last_ingest_us);
         if (gap > ingest_gap_max_us) {
             ingest_gap_max_us = gap;
@@ -850,6 +855,11 @@ static void ble_health_task(uint64_t now_us) {
     ble_stall_ok_mark = h.ok;
     if (in_moved) {
         ble_last_in_us = now_us;
+        // 入力が来た秒に限り「最後の送信からの経過」を記録する。
+        // 無操作の秒を混ぜると意味がなくなるため in_moved で条件付ける
+        if (connected && ever && tx_ms != 0xFFFFFFFFu && tx_ms > tx_max_ms) {
+            tx_max_ms = tx_ms;
+        }
     }
     if (ok_moved) {
         ble_stall_since_us = 0;
@@ -916,6 +926,9 @@ static void ble_health_task(uint64_t now_us) {
                 lps = (uint32_t) (((uint64_t) (loop_count - ble_hb_loops)) * 1000000ULL / dt_us);
             }
         }
+        tx_max_ms = 0;
+        ingest_window_start_us = now_us;
+        ingest_gap_max_us = 0;
         ble_hb_in = count_ingest;
         ble_hb_loops = loop_count;
         ble_hb_us = now_us;
@@ -923,10 +936,11 @@ static void ble_health_task(uint64_t now_us) {
         loop_gap_max_us = 0;
 
         if (ever) {
-            remote_log_eventf("BLE-HB ci=%u ok=%u blk=%u acl=%u err=%u cp=%u/%u disc=%u rs=0x%02X tx=%ums in=%u gmax=%ums lps=%u lmax=%ums rtt=%ums rmax=%ums u=%u/%u sus=%u",
+            remote_log_eventf("BLE-HB ci=%u ok=%u blk=%u acl=%u err=%u cp=%u/%u disc=%u rs=0x%02X tx=%ums omax=%ums in=%u gmax=%ums lps=%u lmax=%ums rtt=%ums rmax=%ums u=%u/%u sus=%u",
                               (unsigned) h.ci, (unsigned) h.ok, (unsigned) h.blocked,
                               (unsigned) h.acl_full, (unsigned) h.err, (unsigned) h.cp_events, (unsigned) h.cp_packets, (unsigned) h.disc,
                               (unsigned) h.disc_reason, (unsigned) tx_ms,
+                              (unsigned) tx_max_ms,
                               (unsigned) in_delta, (unsigned) gmax_ms, (unsigned) lps,
                               (unsigned) lmax_ms, (unsigned) rtt_ms, (unsigned) rmax_ms,
                               (unsigned) usb_mounted, (unsigned) usb_ready,
