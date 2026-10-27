@@ -870,8 +870,12 @@ static void ble_health_task(uint64_t now_us) {
         ble_stall_since_us = 0;
     }
 
+    // 単発の「出力が出なかった入力」(相対移動の集約で 0 になった等) を拾わないため、
+    // 未処理が 3 件以上あることも条件にする。本物の停止なら操作中に溜まるので
+    // 2 秒以内に必ず満たす (2026-10-27: in=1 の単発で鳴ったため追加)
     const bool stalled = connected && ble_stall_since_us != 0 &&
-                         (now_us - ble_stall_since_us) >= (uint64_t) RLOG_BLE_STALL_MS * 1000ULL;
+                         (now_us - ble_stall_since_us) >= (uint64_t) RLOG_BLE_STALL_MS * 1000ULL &&
+                         (in_now - ble_stall_in_start) >= 3;
     if (stalled && !ble_stall_active) {
         ble_stall_active = true;
         remote_log_eventf("BLE STALL in=%u/%us ci=%u ok=%u blk=%u acl=%u err=%u cp=%u/%u disc=%u rs=0x%02X",
