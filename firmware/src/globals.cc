@@ -5,6 +5,7 @@ std::unordered_map<uint16_t, std::unordered_map<uint8_t, std::unordered_map<uint
 std::unordered_map<uint16_t, std::unordered_map<uint8_t, std::unordered_map<uint32_t, usage_def_t>>> their_feature_usages;
 
 std::unordered_map<uint16_t, bool> has_report_id_theirs;
+std::unordered_map<uint16_t, bool> itf_is_pointer_theirs;
 
 std::unordered_map<uint32_t, uint8_t*> out_reports;
 std::unordered_map<uint32_t, uint8_t*> prev_out_reports;

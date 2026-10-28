@@ -308,10 +308,12 @@ void remote_log_count_ingest(void) {
     // マウスの入力間隔だけを「穴」として扱う (キーボードの打鍵間隔は穴ではない)
     if (last_ingest_protocol == 2 && last_mouse_ingest_us != 0) {
         uint32_t mgap = (uint32_t) (now - last_mouse_ingest_us);
-        if (mgap > mouse_gap_max_us) {
+        // 5 秒以上の空白は「使っていない」時間なので穴として数えない
+        // (放置後の最初の 1 レポートで gmax が数百分に跳ねるのを防ぐ)
+        if (mgap < 5000000u && mgap > mouse_gap_max_us) {
             mouse_gap_max_us = mgap;
         }
-        if (mgap >= 100000u && now < dense_until_us && (now - last_ihgap_us) >= 1000000ULL) {
+        if (mgap >= 100000u && mgap < 5000000u && now < dense_until_us && (now - last_ihgap_us) >= 1000000ULL) {
             last_ihgap_us = now;
             remote_log_eventf("BT IHGAP ms=%u", (unsigned) (mgap / 1000u));
         }

@@ -7,6 +7,7 @@
 #include "pico/time.h"
 
 #include "descriptor_parser.h"
+#include "globals.h"
 #include "out_report.h"
 #include "remapper.h"
 #include "tick.h"
@@ -112,7 +113,13 @@ void report_received_callback(uint8_t dev_addr, uint8_t instance, uint8_t const*
         handle_received_report(report, len, (uint16_t) (dev_addr << 8) | instance);
 
         reports_received = true;
-        last_ingest_protocol = tuh_hid_interface_protocol(dev_addr, instance);
+        {
+            // ポインタ判定はデスクリプタ由来 (bInterfaceProtocol=0 のデバイスがあるため)
+            uint16_t itf = (uint16_t) ((dev_addr << 8) | instance);
+            auto it = itf_is_pointer_theirs.find(itf);
+            bool ptr = (it != itf_is_pointer_theirs.end()) && it->second;
+            last_ingest_protocol = (ptr || tuh_hid_interface_protocol(dev_addr, instance) == 2) ? 2 : 1;
+        }
     }
 }
 

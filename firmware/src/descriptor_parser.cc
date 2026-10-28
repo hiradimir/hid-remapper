@@ -6,6 +6,7 @@
 #include "platform.h"
 #include "quirks.h"
 #include "remapper.h"
+#include "remote_log.h"
 
 const uint8_t HID_INPUT = 0x80;
 const uint8_t HID_OUTPUT = 0x90;
@@ -103,6 +104,21 @@ void parse_descriptor(uint16_t vendor_id, uint16_t product_id, const uint8_t* re
     apply_quirks(vendor_id, product_id, their_usages[interface], report_descriptor, len, itf_num);
     assign_interface_index(interface);
     add_synthetic_dpad_usages(their_usages[interface]);
+
+    // ポインタ (マウス) 判定: 入力レポートに Generic Desktop X (0x00010030) を持つか。
+    // bInterfaceProtocol はKensington 等で 0 (NONE) のことがあり、プロトコル値だけでは
+    // マウスを判別できない。観測 (gmax/IHGAP) をマウスだけに絞るためにデスクリプタで判定する
+    {
+        bool pointer = false;
+        for (auto const& [report_id, usage_map] : their_usages[interface]) {
+            if (usage_map.count(0x00010030u) != 0) {
+                pointer = true;
+                break;
+            }
+        }
+        itf_is_pointer_theirs[interface] = pointer;
+        remote_log_eventf("ITF if=%04X ptr=%u", interface, pointer ? 1 : 0);
+    }
 
     for (auto const& [report_id, size] : their_report_sizes_map[ReportType::OUTPUT]) {
         out_report_sizes[(interface << 16) | report_id] = size;
