@@ -28,6 +28,14 @@ typedef struct {
     // 「BTstack に渡してから完了通知が返るまで」の最大値 (ms)。
     // ここが大きい = 電波に乗るまでの待ちが長い (LL 再送・接続イベント待ち)
     uint32_t lat_max_ms;
+    // 送信が「黙って」捨てられた理由の累計。ok が伸びないのに blk/acl/err も
+    // 動かないとき、どの早期 return に落ちているかを特定する
+    uint32_t sk_state; // 接続状態でない
+    uint32_t sk_enc;   // 未暗号化
+    uint32_t sk_ready; // レポート未購読 (CCCD)
+    // bit0 接続 / bit1 暗号化 / bit2 mouse ready / bit3 kbd ready /
+    // bit4 consumer ready / bit5 tx_stalled / bit6 dormant
+    uint8_t flags;
     uint8_t disc_reason; // 直近の HCI 切断理由
     uint64_t last_ok_us; // 最後に受理された通知の時刻 (0 = まだ)
 } ble_hid_health_t;

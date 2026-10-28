@@ -261,6 +261,9 @@ uint32_t ble_hid_get_connected_slot_mask(void) {
 static volatile uint32_t health_ok = 0;
 static volatile uint32_t health_acl_full = 0;
 static volatile uint32_t health_blocked = 0;
+static volatile uint32_t health_skip_state = 0;  // 接続状態でなくて捨てた
+static volatile uint32_t health_skip_enc = 0;    // 未暗号化で捨てた
+static volatile uint32_t health_skip_ready = 0;  // 未購読で捨てた
 static volatile uint32_t health_err = 0;
 static volatile uint32_t health_burst = 0;
 // 送信→完了レイテンシ: 受理時刻をリングに積み、Number Of Completed Packets で
@@ -294,6 +297,16 @@ void ble_hid_get_health(ble_hid_health_t* out) {
     out->disc = health_disc;
     out->disc_reason = health_disc_reason;
     out->last_ok_us = health_last_ok_us;
+    out->sk_state = health_skip_state;
+    out->sk_enc = health_skip_enc;
+    out->sk_ready = health_skip_ready;
+    out->flags = (uint8_t) ((current_state == BLE_STATE_CONNECTED ? 0x01 : 0) |
+                            (ble_encrypted ? 0x02 : 0) |
+                            (ble_mouse_ready ? 0x04 : 0) |
+                            (ble_kbd_ready ? 0x08 : 0) |
+                            (ble_consumer_ready ? 0x10 : 0) |
+                            (health_tx_stalled ? 0x20 : 0) |
+                            (dormant_retry ? 0x40 : 0));
 }
 
 static bool is_pairing_mode = false;
@@ -1936,14 +1949,27 @@ bool ble_hid_can_send(void) {
 
 void ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len) {
     if (current_state != BLE_STATE_CONNECTED || con_handle == HCI_CON_HANDLE_INVALID) {
+        health_skip_state++;
         return;
     }
 
     // 【BL-15】暗号化完了 かつ 該当レポート購読完了を厳密にチェック
-    if (!ble_encrypted) return;
-    if (report_id == 2 && !ble_kbd_ready) return;      // Report ID 2: Keyboard
-    if (report_id == 1 && !ble_mouse_ready) return;    // Report ID 1: Mouse
-    if (report_id == 3 && !ble_consumer_ready) return; // Report ID 3: Consumer (BL-12)
+    if (!ble_encrypted) {
+        health_skip_enc++;
+        return;
+    }
+    if (report_id == 2 && !ble_kbd_ready) {      // Report ID 2: Keyboard
+        health_skip_ready++;
+        return;
+    }
+    if (report_id == 1 && !ble_mouse_ready) {    // Report ID 1: Mouse
+        health_skip_ready++;
+        return;
+    }
+    if (report_id == 3 && !ble_consumer_ready) { // Report ID 3: Consumer (BL-12)
+        health_skip_ready++;
+        return;
+    }
     if (report_id != 1 && report_id != 2 && report_id != 3) return;
 
     if (!ble_can_send) {
@@ -2316,8 +2342,23 @@ static bool do_send_report_ble(uint8_t interface, const uint8_t* report_with_id,
 #endif
 
     if (report_id == 1 && report_len >= 5) {
+        const uint64_t prev_pace_us = last_mouse_pace_us;
         last_mouse_pace_us = time_us_64();
         last_mouse_buttons = report_data[0];
+        // 相対移動は 1 レポートに集約される。停止中に溜まった移動が一気に
+        // 送られると「カーソルが飛ぶ」ので、大きいデルタは時刻付きで残す
+        static uint64_t last_bigdx_us = 0;
+        int32_t dx = (int16_t) (report_data[1] | (report_data[2] << 8));
+        int32_t dy = (int16_t) (report_data[3] | (report_data[4] << 8));
+        const uint64_t now_us = time_us_64();
+        // 「しばらく送れず、溜めた移動を 1 発で送った」瞬間だけを拾う
+        // (速く動かしただけの大きいデルタと区別するため、前回送信から 100ms 以上空いた場合に限る)
+        if ((dx >= 40 || dx <= -40 || dy >= 40 || dy <= -40) &&
+            prev_pace_us != 0 && (now_us - prev_pace_us) >= 100000ULL &&
+            (now_us - last_bigdx_us) >= 1000000ULL) {
+            last_bigdx_us = now_us;
+            remote_log_eventf("BT BIGDX dx=%d dy=%d", (int) dx, (int) dy);
+        }
     }
 
     ble_hid_send_report(report_id, report_data, report_len);
@@ -2334,6 +2375,7 @@ void ble_transport_task(ble_send_report_fn_t do_send_usb) {
     if (curr_ble_connected != prev_ble_connected) {
         prev_ble_connected = curr_ble_connected;
         printf("[BT] Active transport changed: %s\r\n", curr_ble_connected ? "BLE" : "USB");
+        remote_log_eventf("BT XPORT ble=%u", curr_ble_connected ? 1 : 0);
         if (curr_ble_connected) {
             printf("[BT] Switched to BLE priority, clearing USB reports\r\n");
             usb_clear_kbd_report();
