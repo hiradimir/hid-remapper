@@ -9,6 +9,33 @@
 
 ---
 
+## 2026-10-28 夜間 soak は健全 / `gmax` が常に 0 = マウス判定の計器バグを修正
+
+- **夜間 soak（`wake21`、10 時間 26 分・完全放置）**: `disc=0` / `blk=0` / `acl=0` /
+  `dr=0`。`ok` は 6952→6977（放置中のボール微動のみ）。Wi-Fi は 5 回切断しすべて自動復帰
+  （02:03 の 1 回だけ 2/4/8/16/32 秒リトライの末、BSSID 変更で復帰）
+- **Mac のパニックは無関係**（`macreport.log`）: `mds_stores`（Spotlight）+
+  `IOStorageFamily` + `lifs` の NULL 参照。BLE の kext は backtrace に無い。
+  BOOTSEL のマスストレージを索引しようとした筋が濃いので `/Volumes` を
+  Spotlight のプライバシーに追加して様子見（ファーム側の対処なし）
+- **計器のバグ（2 段階で判明）**:
+  - `25a10c4`: `in` がマウスとキーボードを合算していたため、打鍵間隔（100〜200ms）が
+    `IHGAP` / `gmax` に「入力の穴」として出ていた（キーボード入力中にログが増える原因）
+  - `029381c`: 次に「HID プロトコル == 2 (Mouse) ならマウス」で判定したが、この
+    トラックボール (047D:2041) は `bInterfaceProtocol=0` で**一度も成立せず**、
+    `gmax` が一晩中 0 のまま。`dense` も立たないので 3 種のスパイク行
+    （`IHGAP`/`SENDGAP`/`LATGAP`）が全部沈黙していた ＝ **夜間の「スパイク 0」は
+    健全の証拠にならない**
+  - 修正: レポートデスクリプタの **Generic Desktop X (0x00010030)** でポインタ判定。
+    マウント時に `ITF if=XXXX ptr=N` を 1 行出す。**5 秒以上の空白は穴に数えない**
+    （放置後に触った 1 発目で `gmax` が跳ねるのを防ぐ）
+- **`wake22`** (`firmware/artifacts/remapper_anchor_wake22.uf2`, 09:28 ビルド) に反映。
+  検証ビルドは未焼き（帰宅後に焼く）
+- **運用メモ**: Mac のパニック再起動後は `ssh-agent` の鍵が落ちて署名コミットが失敗する。
+  `ssh-add --apple-use-keychain ~/.ssh/id_ed25519` で復帰。シェルに `SSH_AUTH_SOCK` が
+  無い場合は `eval "$(ssh-agent -s)"`（launchd のソケットは
+  `/private/tmp/com.apple.launchd.*/Listeners`、起動ごとに名前が変わる）
+
 ## 2026-10-26 遷移テスト（放置→再開 / BT スイッチ / スロット切替）は全て健全、観測の誤検知を 2 件修正
 
 - **経緯**: 昨夜の一晩 soak（`wake6`、11 時間 40 分・無操作）は `DISC 0` で完走。
