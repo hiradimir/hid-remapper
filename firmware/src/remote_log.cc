@@ -893,7 +893,9 @@ static void ble_health_task(uint64_t now_us) {
         ble_last_in_us = now_us;
         // 入力が来た秒に限り「最後の送信からの経過」を記録する。
         // 無操作の秒を混ぜると意味がなくなるため in_moved で条件付ける
-        if (connected && ever && tx_ms != 0xFFFFFFFFu && tx_ms > tx_max_ms) {
+        // 5 秒以上は「使っていない」時間なので omax に混ぜない (放置後の 1 発目で
+        // omax が数十分に跳ね、本物の停止と区別できなくなる)
+        if (connected && ever && tx_ms != 0xFFFFFFFFu && tx_ms < 5000u && tx_ms > tx_max_ms) {
             tx_max_ms = tx_ms;
         }
         // 入力があるのに送信が 100ms 以上空いたら時刻付きで残す
