@@ -274,7 +274,9 @@ static volatile uint32_t health_burst = 0;
 static volatile uint64_t can_send_req_us = 0;
 static volatile uint32_t health_lat_max_ms = 0;
 
+static volatile uint32_t health_dmax = 0;
 void ble_hid_reset_lat_max(void) { health_lat_max_ms = 0; }
+void ble_hid_reset_dmax(void) { health_dmax = 0; }
 // コントローラが返した "Number Of Completed Packets" の回数と総数。
 // 0x57 膠着時にこれが止まっていれば「コントローラがクレジットを返していない」
 static volatile uint32_t health_cp_events = 0;
@@ -294,6 +296,7 @@ void ble_hid_get_health(ble_hid_health_t* out) {
     out->cp_packets = health_cp_packets;
     out->burst = health_burst;
     out->lat_max_ms = health_lat_max_ms;
+    out->dmax = health_dmax;
     out->disc = health_disc;
     out->disc_reason = health_disc_reason;
     out->last_ok_us = health_last_ok_us;
@@ -2351,6 +2354,10 @@ static bool do_send_report_ble(uint8_t interface, const uint8_t* report_with_id,
         int32_t dx = (int16_t) (report_data[1] | (report_data[2] << 8));
         int32_t dy = (int16_t) (report_data[3] | (report_data[4] << 8));
         const uint64_t now_us = time_us_64();
+        {
+            uint32_t d = (uint32_t) ((dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy));
+            if (d > health_dmax) health_dmax = d;
+        }
         // 「しばらく送れず、溜めた移動を 1 発で送った」瞬間だけを拾う
         // (速く動かしただけの大きいデルタと区別するため、前回送信から 100ms 以上空いた場合に限る)
         if ((dx >= 40 || dx <= -40 || dy >= 40 || dy <= -40) &&

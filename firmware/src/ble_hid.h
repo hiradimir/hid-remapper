@@ -28,6 +28,9 @@ typedef struct {
     // 「BTstack に渡してから完了通知が返るまで」の最大値 (ms)。
     // ここが大きい = 電波に乗るまでの待ちが長い (LL 再送・接続イベント待ち)
     uint32_t lat_max_ms;
+    // 1 レポートに載った移動量の最大値 (|dx|+|dy|)。送信が細切れにならず
+    // 「溜めて 1 発で送った」瞬間はここが跳ねる = カーソルが飛ぶ瞬間
+    uint32_t dmax;
     // 送信が「黙って」捨てられた理由の累計。ok が伸びないのに blk/acl/err も
     // 動かないとき、どの早期 return に落ちているかを特定する
     uint32_t sk_state; // 接続状態でない
@@ -55,6 +58,7 @@ void ble_hid_wake_from_dormant(void);
 bool ble_hid_is_pairing(void);
 // 送信レイテンシ最大値をリセット (観測ウィンドウの区切りで remote_log が呼ぶ)
 void ble_hid_reset_lat_max(void);
+void ble_hid_reset_dmax(void);
 bool ble_hid_can_send(void);
 void ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len);
 void ble_hid_kick_reconnect(void);
