@@ -1828,10 +1828,21 @@ static void ble_hid_task_locked(void) {
             // 「切断 → 通常の再広告」で復帰させる (コントローラは生かしたまま)
             cooldown_until_us = now_us + 60000000ULL; // 連鎖を防ぐ 60 秒クールダウン
             health_tx_stalled = true;                 // 以後 USB フォールバックに切り替える
-            remote_log_eventf("BT FLOWCTL-WEDGE ok_stall=%us acl=%u -> disconnect",
+            remote_log_eventf("BT FLOWCTL-WEDGE ok_stall=%us acl=%u -> btcore-reload",
                               (unsigned) ((now_us - last_ok_us) / 1000000ULL),
                               (unsigned) (health_acl_full - acl_at_last_ok));
-            gap_disconnect(con_handle);
+            // 膠着すると CYW43 は disconnect コマンドすら処理しない (2026-10-30 22:23 実測)。
+            // Wi-Fi を壊さずに BT コアだけ再投入する。bt_loaded=false にすると次の
+            // cyw43_bluetooth_hci_init() が BT ファームを再ダウンロードする
+            ctrl_reset_pending = true;
+            cyw43_arch_lwip_begin(); // CYW43 共有バスの排他 (BT 転送と同じロック)
+            cyw43_state.bt_loaded = false;
+            int btcore_rc = cyw43_bluetooth_hci_init();
+            cyw43_arch_lwip_end();
+            remote_log_eventf("BT BTCORE-RELOAD rc=%d", btcore_rc);
+            // BTstack 側も落として状態を捨てる。BT コアが復活していれば
+            // HCI Reset が完了し HCI_STATE_OFF → 下のハンドラで電源 ON に戻る
+            hci_power_control(HCI_POWER_OFF);
             return;
         }
     }

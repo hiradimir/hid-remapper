@@ -95,14 +95,20 @@ patch(WT + '/firmware/src/ble_hid.cc', [
                    (health_acl_full - acl_at_last_ok) >= 40 &&
                    (now_us - last_ok_us) > 120000000ULL &&
                    (now_us - connected_since_us) > 15000000ULL) {
-            // CYW43 は HCI 電源再投入後にコマンドを受け付けなくなり復旧不能
-            // (2026-10-30 実測 3 回)。切断 → 通常の再広告で復帰させる
+            // 膠着すると CYW43 は disconnect コマンドすら処理しない。
+            // Wi-Fi を壊さずに BT コアだけ再投入する
             cooldown_until_us = now_us + 60000000ULL;
             health_tx_stalled = true;
-            remote_log_eventf("BT FLOWCTL-WEDGE ok_stall=%us acl=%u -> disconnect",
+            remote_log_eventf("BT FLOWCTL-WEDGE ok_stall=%us acl=%u -> btcore-reload",
                               (unsigned) ((now_us - last_ok_us) / 1000000ULL),
                               (unsigned) (health_acl_full - acl_at_last_ok));
-            gap_disconnect(con_handle);
+            ctrl_reset_pending = true;
+            cyw43_arch_lwip_begin();
+            cyw43_state.bt_loaded = false;
+            int btcore_rc = cyw43_bluetooth_hci_init();
+            cyw43_arch_lwip_end();
+            remote_log_eventf("BT BTCORE-RELOAD rc=%d", btcore_rc);
+            hci_power_control(HCI_POWER_OFF);
             return;
         }
     }
