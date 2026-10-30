@@ -9,6 +9,23 @@
 
 ---
 
+## 2026-10-30 夜 CYW43 膠着が再発 / 復旧を「BT コア再投入」へ (`wake34`)
+
+- 22:21:03 に Mac スロットへ接続 → 2 秒後に `CANSEND-TO` と
+  `BIGDX dx=1504 dy=-716`（溜まった移動 2220px）→ `ok` が 139831 で凍結、
+  `acl` が 90 → 696、`cp` も凍結（コントローラが完了通知を返さない）
+- 22:23:03 に新設の `BT FLOWCTL-WEDGE ok_stall=120s acl=696 -> disconnect` が発動したが、
+  **`DISC` が来ない** ＝ チップは disconnect コマンドすら処理しない。
+  22:24:03 に再試行するも同じ。`m=0x1` のまま BLE は死んだ状態が続く
+- ただし `BT XPORT ble=0` により出力は USB へフォールバック（Pico を USB 接続していれば
+  入力だけは通る）
+- **対策**: `cyw43_state.bt_loaded = false` → `cyw43_bluetooth_hci_init()` で
+  **BT ファームだけ再ダウンロード**（Wi-Fi は無傷）→ `hci_power_control(OFF/ON)`。
+  BT コアが作り直されれば HCI Reset が通り、`HCI_STATE_OFF` ハンドラから復帰できる
+  （`wake34` = `firmware/artifacts/remapper_anchor_wake34.uf2`, 22:27 ビルド）
+- **未検証**: 実機で膠着を再現させて `BT BTCORE-RELOAD rc=0` → `APPLY-DONE` → `ADV-EN`
+  まで戻るか。rc≠0 や HCI_STATE_OFF に落ちない場合は次の手を検討
+
 ## 2026-10-30 ログ停止（Wi-Fi が `?` で固まる）— ファームの変更が原因ではない
 
 - **症状**: `wake30` を焼いた直後から UDP ログが 1 通も届かない。OLED の Wi-Fi 欄が
