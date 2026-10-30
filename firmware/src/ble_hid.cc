@@ -1794,13 +1794,15 @@ static void ble_hid_task_locked(void) {
         static uint64_t last_ok_us = 0;
         static bool was_connected = false;
         static uint64_t cooldown_until_us = 0;
+        static uint64_t connected_since_us = 0;
         // 接続した瞬間は判定の基準を取り直す。前回接続時の経過時間のままだと
-        // 「接続直後に 3 秒停止」と誤判定して再起動を連鎖させる (2026-10-24 朝に実測)
+        // 「接続直後に停止」と誤判定して再起動を連鎖させる (2026-10-24 朝に実測)
         bool connected_now = (current_state == BLE_STATE_CONNECTED);
         if (connected_now && !was_connected) {
             last_ok = health_ok;
             acl_at_last_ok = health_acl_full;
             last_ok_us = now_us;
+            connected_since_us = now_us;
         }
         was_connected = connected_now;
 
@@ -1810,9 +1812,17 @@ static void ble_hid_task_locked(void) {
             last_ok_us = now_us;
             health_tx_stalled = false;
         } else if (connected_now && !ctrl_reset_pending && now_us >= cooldown_until_us &&
-                   (health_acl_full - acl_at_last_ok) >= 20 &&
-                   (now_us - last_ok_us) > 3000000ULL) {
-            cooldown_until_us = now_us + 10000000ULL; // 再起動の連鎖を防ぐ 10 秒クールダウン
+                   (health_acl_full - acl_at_last_ok) >= 40 &&
+                   (now_us - last_ok_us) > 120000000ULL &&
+                   (now_us - connected_since_us) > 15000000ULL) {
+            // しきい値の変遷 (2026-10-29〜30 実測):
+            //   3s/20  … Win→Mac 切替直後の初期バーストで誤爆した
+            //   10s/40 … 眠っている Mac に接続した時の 0x57 詰まりでも発動し、
+            //            確立済みリンクを自分で壊してホストが再接続しなくなる (実害 3 回)
+            //   120s   … ホストがスリープ中は「待てば戻る」。実際 3 回とも
+            //            電源再投入では復旧せず、Pico の電源入れ直しが必要だった。
+            //            電源再投入は最後の手段にし、まず待つ
+            cooldown_until_us = now_us + 20000000ULL; // 再起動の連鎖を防ぐ 20 秒クールダウン
             ctrl_reset_pending = true;
             health_tx_stalled = true; // 以後 USB フォールバックに切り替える
             remote_log_eventf("BT FLOWCTL-RESET ok_stall=%us acl=%u",
