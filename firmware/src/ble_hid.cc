@@ -1817,18 +1817,21 @@ static void ble_hid_task_locked(void) {
                    (now_us - connected_since_us) > 15000000ULL) {
             // しきい値の変遷 (2026-10-29〜30 実測):
             //   3s/20  … Win→Mac 切替直後の初期バーストで誤爆した
-            //   10s/40 … 眠っている Mac に接続した時の 0x57 詰まりでも発動し、
-            //            確立済みリンクを自分で壊してホストが再接続しなくなる (実害 3 回)
-            //   120s   … ホストがスリープ中は「待てば戻る」。実際 3 回とも
-            //            電源再投入では復旧せず、Pico の電源入れ直しが必要だった。
-            //            電源再投入は最後の手段にし、まず待つ
-            cooldown_until_us = now_us + 20000000ULL; // 再起動の連鎖を防ぐ 20 秒クールダウン
-            ctrl_reset_pending = true;
-            health_tx_stalled = true; // 以後 USB フォールバックに切り替える
-            remote_log_eventf("BT FLOWCTL-RESET ok_stall=%us acl=%u",
+            //   10s/40 … 眠っている Mac に接続した時の 0x57 詰まりでも発動した
+            //   120s   … ホストのスリープ中は「待てば戻る」ので、まず待つ
+            //
+            // 【重要】2026-10-30: ここで hci_power_control(HCI_POWER_OFF/ON) を
+            // すると、CYW43 は復帰後に HCI コマンドを受け付けなくなる
+            // (BTstack 側は次のコマンドを投げるが ADV-PARAM / ADV-EN の完了が
+            // 一度も返らず、広告が出ないまま復旧不能)。実測 3 回とも復旧は Pico の
+            // 電源入れ直しのみだった。よって電源再投入は廃止し、
+            // 「切断 → 通常の再広告」で復帰させる (コントローラは生かしたまま)
+            cooldown_until_us = now_us + 60000000ULL; // 連鎖を防ぐ 60 秒クールダウン
+            health_tx_stalled = true;                 // 以後 USB フォールバックに切り替える
+            remote_log_eventf("BT FLOWCTL-WEDGE ok_stall=%us acl=%u -> disconnect",
                               (unsigned) ((now_us - last_ok_us) / 1000000ULL),
                               (unsigned) (health_acl_full - acl_at_last_ok));
-            hci_power_control(HCI_POWER_OFF);
+            gap_disconnect(con_handle);
             return;
         }
     }
