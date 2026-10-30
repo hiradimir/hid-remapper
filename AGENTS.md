@@ -133,5 +133,26 @@ Raspberry Pi Pico W (RP2040) による **BLE HID → USB HID リマッパー**
   ホスト picotool、または Web configurator の Flash firmware 経由
 - デバッグ UART: GP16(TX)/GP17(RX), 921600 baud
 - OLED: SSD1306 128x32, I2C0 (GP4 SDA / GP5 SCL)
+
+### soak ビルド（`wakeNN` = アンカー + 観測パッチ）
+
+アンカー `3a8d85b` に観測・修正をまとめて載せる手順。スクリプトは
+**`tools/build_anchor.py`**（2026-10-30 に `.tmp/` から移設・追跡下へ）。
+詳細な使い方はスクリプト冒頭の docstring にある。要点:
+
+1. `git worktree add <WT> 3a8d85b` → `remote_log_net.h` をコピー → `python3 tools/build_anchor.py <WT>`
+2. 4 サブモジュール（pico-sdk / tinyusb / Pico-PIO-USB / usb_midi_host）は本体から symlink
+3. `cmake .. -DPICO_BOARD=pico_w -DPICO_DUAL_PIO_USB_DP_PIN=2 -DENABLE_BLE=ON
+   -DENABLE_OLED=ON -DENABLE_REMOTE_LOG=ON -DBLE_LOCK_DISABLE=ON` → `make remapper`
+4. **焼く前の検算**（今日の取り違えの再発防止）:
+   - `strings build/remapper.uf2 | grep -o "ble_lock=[a-z]*"` → `disabled`
+   - `strings build/remapper.uf2 | grep -c FLOWCTL-WEDGE` → 1 以上
+   - `strings build/remapper.uf2 | grep -c 192.168.215.1` → **0**（送信先の誤設定検出）
+   - `grep PICO_BOARD build/CMakeCache.txt` → `pico_w`
+5. 名前付き UF2 は `firmware/artifacts/`（gitignore）へ。**上書き・削除しない**
+
+**ビルド間で挙動が変わったら、まず `remote_log_net.h` の mtime と、
+バイナリに埋まった IP/SSID を比べる**（2026-10-30 のログ停止は
+`RLOG_TARGET_IP` の誤設定が原因で、ソース diff から secret を除外したため見落とした）
 - 正確な実運用コマンド (ホスト側手順を含む) はルディと合った粒度で
   このファイルに追記していく
