@@ -752,17 +752,29 @@ static void update_usb_ports_status(void) {
         }
     }
 
+    // 物理配線の都合で基板上の P1/P2 が入れ替わっている (2026-10-31 ルディ指示)。
+    // 検出した実ポートと表示ラベルの対応をここで交換する。0 で基板シルク通りに戻る
+#ifndef OLED_USB_LABEL_SWAP
+#define OLED_USB_LABEL_SWAP 1
+#endif
+    const char* disp_p1 = p1_dev;
+    const char* disp_p2 = p2_dev;
+#if OLED_USB_LABEL_SWAP
+    disp_p1 = p2_dev;
+    disp_p2 = p1_dev;
+#endif
+
     static char prev_p1[4] = "";
     static char prev_p2[4] = "";
-    if (strncmp(prev_p1, p1_dev, 3) != 0 || strncmp(prev_p2, p2_dev, 3) != 0) {
-        strncpy(prev_p1, p1_dev, sizeof(prev_p1));
-        strncpy(prev_p2, p2_dev, sizeof(prev_p2));
+    if (strncmp(prev_p1, disp_p1, 3) != 0 || strncmp(prev_p2, disp_p2, 3) != 0) {
+        strncpy(prev_p1, disp_p1, sizeof(prev_p1));
+        strncpy(prev_p2, disp_p2, sizeof(prev_p2));
         printf("[USB] Ports updated -> P1:%s, P2:%s (count=%d, p1_pin=%d, p2_pin=%d)\r\n",
-               p1_dev, p2_dev, mounted_count, port1_phys, port2_phys);
+               disp_p1, disp_p2, mounted_count, port1_phys, port2_phys);
     }
 
-    oled_set_usb_port(0, p1_dev);
-    oled_set_usb_port(1, p2_dev);
+    oled_set_usb_port(0, disp_p1);
+    oled_set_usb_port(1, disp_p2);
 }
 
 void oled_update_usb_ports(void) {

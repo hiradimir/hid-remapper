@@ -1052,4 +1052,10 @@ patch(WT + '/firmware/src/remote_log.cc', [
      '        const uint32_t in_delta = count_ingest - ble_hb_in;\n        const uint32_t burst_delta = h.burst - ble_hb_burst;\n        // クレジット返却 (Completed Packets) の増分。0 のままならコントローラが\n        // 完了通知を返していない = 膠着の直接証拠 (2026-10-31)\n        static uint32_t ble_hb_cp_packets = 0;\n        const uint32_t cp_packets_delta = h.cp_packets - ble_hb_cp_packets;\n        ble_hb_cp_packets = h.cp_packets;'),
 ])
 
+# --- 2026-10-31: P1/P2 表示の入れ替え (物理配線) ---
+patch(WT + '/firmware/src/oled.cc', [
+    ('    static char prev_p1[4] = "";\n    static char prev_p2[4] = "";\n    if (strncmp(prev_p1, p1_dev, 3) != 0 || strncmp(prev_p2, p2_dev, 3) != 0) {\n        strncpy(prev_p1, p1_dev, sizeof(prev_p1));\n        strncpy(prev_p2, p2_dev, sizeof(prev_p2));\n        printf("[USB] Ports updated -> P1:%s, P2:%s (count=%d, p1_pin=%d, p2_pin=%d)\\r\\n",\n               p1_dev, p2_dev, mounted_count, port1_phys, port2_phys);\n    }\n\n    oled_set_usb_port(0, p1_dev);\n    oled_set_usb_port(1, p2_dev);',
+     '    // 物理配線の都合で基板上の P1/P2 が入れ替わっている (2026-10-31 ルディ指示)。\n    // 検出した実ポートと表示ラベルの対応をここで交換する。0 で基板シルク通りに戻る\n#ifndef OLED_USB_LABEL_SWAP\n#define OLED_USB_LABEL_SWAP 1\n#endif\n    const char* disp_p1 = p1_dev;\n    const char* disp_p2 = p2_dev;\n#if OLED_USB_LABEL_SWAP\n    disp_p1 = p2_dev;\n    disp_p2 = p1_dev;\n#endif\n\n    static char prev_p1[4] = "";\n    static char prev_p2[4] = "";\n    if (strncmp(prev_p1, disp_p1, 3) != 0 || strncmp(prev_p2, disp_p2, 3) != 0) {\n        strncpy(prev_p1, disp_p1, sizeof(prev_p1));\n        strncpy(prev_p2, disp_p2, sizeof(prev_p2));\n        printf("[USB] Ports updated -> P1:%s, P2:%s (count=%d, p1_pin=%d, p2_pin=%d)\\r\\n",\n               disp_p1, disp_p2, mounted_count, port1_phys, port2_phys);\n    }\n\n    oled_set_usb_port(0, disp_p1);\n    oled_set_usb_port(1, disp_p2);'),
+])
+
 print("patched:", WT)
