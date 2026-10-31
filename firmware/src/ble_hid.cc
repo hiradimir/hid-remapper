@@ -1445,6 +1445,9 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                 conn_update_count++;
                 printf("[BT] Connection parameters updated: interval=%.2fms, latency=%d, timeout=%dms\r\n",
                        interval * 1.25f, latency, timeout * 10);
+                remote_log_eventf("BT PARAM ci=%u lat=%u st=%u n=%u",
+                                  (unsigned) interval, (unsigned) latency,
+                                  (unsigned) timeout, (unsigned) conn_update_count);
 
                 // 【BL-04】OS自動判別（接続パラメータ・レイテンシ・タイムアウト）
                 if (latency > 0) {
@@ -1456,14 +1459,23 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     update_detected_os('A');
                 }
 
-                // ホスト側が省電力（スレーブラテンシ > 0）を適用してきた場合、
-                // マウス操作の追従性を保つために低遅延パラメータ (latency=0) の再適用を要求
+                // 【2026-10-31 変更】要求値を Apple の一般則に合わせる。
+                // 旧値 (9, 12, 0, 400) は Min + 15 > Max で規則違反のため macOS に
+                // 丸ごと無視され、ホスト既定の (12, 4, 100) = interval 15ms /
+                // latency 4 / supervision timeout 1 秒 を押し付けられていた。
+                // timeout 1 秒は電波の乱れで rs=0x08 (接続監視タイムアウト) 切断に
+                // なる主因 (2026-10-31 実測: st=100)。Min = Max = 15ms で出し直す。
+                // 要求は 30 秒間隔に制限する (10 秒周期でホストを刺激しない)
                 static uint32_t last_param_reassert_ms = 0;
                 uint32_t now = to_ms_since_boot(get_absolute_time());
-                if (latency > 0 && (now - last_param_reassert_ms > 10000)) {
+                if ((latency > 0 || ble_conn_timeout < 400) &&
+                    (now - last_param_reassert_ms > 30000)) {
                     last_param_reassert_ms = now;
-                    printf("[BT] Host set latency=%d. Re-requesting low-latency parameters (latency=0)...\r\n", latency);
-                    gap_request_connection_parameter_update(con_handle, 9, 12, 0, 400);
+                    printf("[BT] Host set latency=%d timeout=%dms. Re-requesting 15ms/0/4s...\r\n",
+                           latency, ble_conn_timeout * 10);
+                    remote_log_eventf("BT PARAM-REQ ci=12 lat=0 to=4000 (host lat=%d to=%dms)",
+                                      latency, ble_conn_timeout * 10);
+                    gap_request_connection_parameter_update(con_handle, 12, 12, 0, 400);
                 }
             }
             break;
