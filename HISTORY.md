@@ -9,6 +9,23 @@
 
 ---
 
+## 2026-10-31 `wake37`: P0 観測 + 0x57 監視の作り直し
+
+- **観測追加** (`BLE-HB` の末尾): `clat=`（実際の connection latency）/ `st=`（supervision
+  timeout）/ `cu=`（Connection Update Complete の回数）/ `aclrun=`（連続 0x57 回数）/
+  `cpd=`（Completed Packets の増分）。`cpd=0` が続くのが膠着の直接証拠
+- **0x57 監視の再設計**:
+  - 2 回連続で `gap_disconnect` する挙動を**廃止**（膠着時は切断コマンド自体が
+    届かず、生きているリンクを壊すだけだった）
+  - 3 回目（6 秒）で `BT CREDIT-STALL start` を出し、**送信を 1 秒 1 回のプローブに絞る**
+    （0x57 の洪水を止めてチップとホストに休ませる）
+  - クレジットが戻る（送信成功）と自動解除
+  - 120 秒の `power-cycle+reload`（`wake36` の BT コア再投入）は据え置き
+- `ble_hid_health_t` に `clat`/`st`/`cu`/`acl_run` を追加
+- ビルド: `firmware/artifacts/remapper_anchor_wake37.uf2`（12:00）
+- **次**: 1〜2 時間の円軌道テストで `clat`/`cpd`/`ok/s` の相関を見る →
+  送信結果の伝播 → 接続パラメータ A/B
+
 ## 2026-10-31 静的解析レビュー受領 (docs/BLE-REVIEW-2026-10-31.md)
 
 - 別セッションで静的解析した結果を `docs/BLE-REVIEW-2026-10-31.md` に保管
