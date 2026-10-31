@@ -951,6 +951,11 @@ static void ble_health_task(uint64_t now_us) {
         // 入力が 1 件も無い区間は gmax を 0 にする (無操作を「空白」と呼ばない)
         const uint32_t in_delta = count_ingest - ble_hb_in;
         const uint32_t burst_delta = h.burst - ble_hb_burst;
+        // クレジット返却 (Completed Packets) の増分。0 のままならコントローラが
+        // 完了通知を返していない = 膠着の直接証拠 (2026-10-31)
+        static uint32_t ble_hb_cp_packets = 0;
+        const uint32_t cp_packets_delta = h.cp_packets - ble_hb_cp_packets;
+        ble_hb_cp_packets = h.cp_packets;
         const uint32_t gmax_ms = mouse_gap_max_us / 1000u;
         const uint32_t lmax_ms = loop_gap_max_us / 1000u;
         // USB デバイス側の状態 (入力の行き先があるか)
@@ -989,7 +994,7 @@ static void ble_health_task(uint64_t now_us) {
         loop_gap_max_us = 0;
 
         if (ever) {
-            remote_log_eventf("BLE-HB ci=%u ok=%u blk=%u acl=%u err=%u cp=%u/%u disc=%u rs=0x%02X tx=%ums omax=%ums lat=%ums burst=%u in=%u gmax=%ums dmax=%u sk=%u/%u/%u fl=0x%02X lps=%u lmax=%ums rtt=%ums rmax=%ums u=%u/%u sus=%u",
+            remote_log_eventf("BLE-HB ci=%u ok=%u blk=%u acl=%u err=%u cp=%u/%u disc=%u rs=0x%02X tx=%ums omax=%ums lat=%ums burst=%u in=%u gmax=%ums dmax=%u sk=%u/%u/%u fl=0x%02X lps=%u lmax=%ums rtt=%ums rmax=%ums u=%u/%u sus=%u clat=%u st=%u cu=%u aclrun=%u cpd=%u",
                               (unsigned) h.ci, (unsigned) h.ok, (unsigned) h.blocked,
                               (unsigned) h.acl_full, (unsigned) h.err, (unsigned) h.cp_events, (unsigned) h.cp_packets, (unsigned) h.disc,
                               (unsigned) h.disc_reason, (unsigned) tx_ms,
@@ -1001,7 +1006,10 @@ static void ble_health_task(uint64_t now_us) {
                               (unsigned) h.flags, (unsigned) lps,
                               (unsigned) lmax_ms, (unsigned) rtt_ms, (unsigned) rmax_ms,
                               (unsigned) usb_mounted, (unsigned) usb_ready,
-                              (unsigned) usb_susp);
+                              (unsigned) usb_susp,
+                              // 2026-10-31: レート低下の原因を数値で見る
+                              (unsigned) h.clat, (unsigned) h.st, (unsigned) h.cu,
+                              (unsigned) h.acl_run, (unsigned) cp_packets_delta);
         } else {
             remote_log_eventf("BLE-HB ci=%u ok=0 blk=%u acl=%u err=%u cp=%u/%u disc=%u rs=0x%02X tx=none in=%u gmax=%ums lps=%u lmax=%ums rtt=%ums rmax=%ums u=%u/%u sus=%u",
                               (unsigned) h.ci, (unsigned) h.blocked,

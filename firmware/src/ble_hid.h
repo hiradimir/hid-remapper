@@ -40,6 +40,11 @@ typedef struct {
     // bit4 consumer ready / bit5 tx_stalled / bit6 dormant
     uint8_t flags;
     uint8_t disc_reason; // 直近の HCI 切断理由
+    // 2026-10-31 追加: 「送信レートが落ちる」原因を推測でなく数値で見るため
+    uint16_t clat;       // 実際に適用されている connection latency
+    uint16_t st;         // supervision timeout (10ms 単位)
+    uint32_t cu;         // Connection Update Complete の受信回数 (再要求のフラップ検出)
+    uint32_t acl_run;    // 連続 0x57 の回数 (成功で 0 に戻る)
     uint64_t last_ok_us; // 最後に受理された通知の時刻 (0 = まだ)
 } ble_hid_health_t;
 

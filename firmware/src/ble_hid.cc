@@ -229,6 +229,13 @@ static volatile bool ctrl_reload_btcore = false;
 // 接続中だが 0x57 が連発して通知が成功しない状態 (トランスポートとしては死んでいる)。
 // USB フォールバックの判断に使う
 static volatile bool health_tx_stalled = false;
+// 連続 0x57 の回数 (送信成功で 0 に戻す)。タイマー再アームに依存せず膠着を数える
+static volatile uint16_t health_acl_run = 0;
+// 「クレジットが返らない」と判断して送信を絞っている状態 (1 秒に 1 回だけ試す)
+static volatile bool credit_stall = false;
+static uint64_t credit_stall_next_probe_us = 0;
+// Connection Update Complete の受信回数
+static volatile uint32_t conn_update_count = 0;
 // 広告の有効化を遅延させる。disable と enable を同じティックで呼ぶと
 // BTstack が「変化なし」と判定してコマンドを送らないため、時間を離す
 // 再接続タイムアウトで電波を落とした状態 (ユーザー操作の OFF とは区別する)。
@@ -297,6 +304,10 @@ void ble_hid_get_health(ble_hid_health_t* out) {
     out->cp_events = health_cp_events;
     out->cp_packets = health_cp_packets;
     out->burst = health_burst;
+    out->clat = ble_conn_latency;
+    out->st = ble_conn_timeout;
+    out->cu = conn_update_count;
+    out->acl_run = health_acl_run;
     out->lat_max_ms = health_lat_max_ms;
     out->dmax = health_dmax;
     out->disc = health_disc;
@@ -434,15 +445,16 @@ static void can_send_timeout_handler(btstack_timer_source_t *ts) {
                consecutive_can_send_timeouts);
         remote_log_eventf("CANSEND-TO n=%d", consecutive_can_send_timeouts);
 
-        // 2回連続（4秒間）完了通知が途絶えた場合はBTstack/CYW43バッファの完全膠着と判定
-        // ゾンビ状態での永久停止を防ぎ、クリーンに切断して自動再接続シーケンスへ移行
-        if (consecutive_can_send_timeouts >= 2) {
-            printf("[BT] CRITICAL: BLE transmission deadlocked for 4000ms. Forcing link disconnect & clean recovery.\r\n");
-            remote_log_eventf("FLOWCTL-DEADLOCK force-disc");
-            consecutive_can_send_timeouts = 0;
-            ble_can_send = true;
-            gap_disconnect(con_handle);
-            return;
+        // 【2026-10-31 変更】以前は 2 回連続 (4 秒) で gap_disconnect していたが、
+        // 膠着時は切断コマンド自体がチップに届かず、生きているリンクを壊すだけだった。
+        // ホストのスリープ中も同じ症状になるため、切断はしない。
+        // 3 回目 (6 秒) で「クレジットが返らない」と判断し、送信を 1 秒 1 回の
+        // プローブに絞る (0x57 の洪水を止めてチップとホストに休ませる)
+        if (consecutive_can_send_timeouts >= 3 && !credit_stall) {
+            credit_stall = true;
+            credit_stall_next_probe_us = time_us_64() + 1000000ULL;
+            remote_log_eventf("BT CREDIT-STALL start aclrun=%u acl=%u",
+                              (unsigned) health_acl_run, (unsigned) health_acl_full);
         }
 
         ble_can_send = true;
@@ -1430,6 +1442,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                 ble_conn_interval = interval;
                 ble_conn_latency = latency;
                 ble_conn_timeout = timeout;
+                conn_update_count++;
                 printf("[BT] Connection parameters updated: interval=%.2fms, latency=%d, timeout=%dms\r\n",
                        interval * 1.25f, latency, timeout * 10);
 
@@ -1814,6 +1827,8 @@ static void ble_hid_task_locked(void) {
             acl_at_last_ok = health_acl_full;
             last_ok_us = now_us;
             connected_since_us = now_us;
+            credit_stall = false;
+            consecutive_can_send_timeouts = 0;
         }
         was_connected = connected_now;
 
@@ -1822,6 +1837,7 @@ static void ble_hid_task_locked(void) {
             acl_at_last_ok = health_acl_full;
             last_ok_us = now_us;
             health_tx_stalled = false;
+            credit_stall = false; // クレジットが戻った
         } else if (connected_now && !ctrl_reset_pending && now_us >= cooldown_until_us &&
                    (health_acl_full - acl_at_last_ok) >= 40 &&
                    (now_us - last_ok_us) > 120000000ULL &&
@@ -2009,6 +2025,15 @@ void ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len) {
         health_blocked++; // フロー制御待ちで捨てた (ウェッジ時に増える)
         return;
     }
+    if (credit_stall) {
+        // クレジットが返らない間は 1 秒に 1 回だけ試す。0x57 の連打を止める
+        uint64_t nowp = time_us_64();
+        if (nowp < credit_stall_next_probe_us) {
+            health_blocked++;
+            return;
+        }
+        credit_stall_next_probe_us = nowp + 1000000ULL;
+    }
 
     ble_lock();
 
@@ -2030,8 +2055,10 @@ void ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len) {
         last_send_us = now_us;
         health_ok++;
         health_last_ok_us = now_us;
+        health_acl_run = 0; // 通ったので連続 0x57 は途切れた
     } else if (status == 0x57) { // BTSTACK_ACL_BUFFERS_FULL: 受理されず再要求になる
         health_acl_full++;
+        if (health_acl_run < 0xFFFF) health_acl_run++;
     }
     if (status == ERROR_CODE_SUCCESS || status == 0x57) { // 0x57: BTSTACK_ACL_BUFFERS_FULL
         ble_can_send = false;

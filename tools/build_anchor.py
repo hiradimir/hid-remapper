@@ -1017,4 +1017,39 @@ patch(WT + '/firmware/src/oled.cc', [
      '        in_screensaver = false;\n'),
 ])
 
+
+# --- 2026-10-31: P0 観測 (clat/st/cu/aclrun/cpd) + 0x57 監視の作り直し ---
+patch(WT + '/firmware/src/ble_hid.h', [
+    ('    uint8_t disc_reason; // 直近の HCI 切断理由\n    uint64_t last_ok_us; // 最後に受理された通知の時刻 (0 = まだ)',
+     '    uint8_t disc_reason; // 直近の HCI 切断理由\n    // 2026-10-31 追加: 「送信レートが落ちる」原因を推測でなく数値で見るため\n    uint16_t clat;       // 実際に適用されている connection latency\n    uint16_t st;         // supervision timeout (10ms 単位)\n    uint32_t cu;         // Connection Update Complete の受信回数\n    uint32_t acl_run;    // 連続 0x57 の回数 (成功で 0 に戻る)\n    uint64_t last_ok_us; // 最後に受理された通知の時刻 (0 = まだ)'),
+])
+
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ('static volatile bool health_tx_stalled = false;',
+     'static volatile bool health_tx_stalled = false;\n// 連続 0x57 の回数 (送信成功で 0 に戻す)。タイマー再アームに依存せず膠着を数える\nstatic volatile uint16_t health_acl_run = 0;\n// 「クレジットが返らない」と判断して送信を絞っている状態 (1 秒に 1 回だけ試す)\nstatic volatile bool credit_stall = false;\nstatic uint64_t credit_stall_next_probe_us = 0;\n// Connection Update Complete の受信回数\nstatic volatile uint32_t conn_update_count = 0;'),
+    ('    out->burst = health_burst;\n    out->lat_max_ms = health_lat_max_ms;',
+     '    out->burst = health_burst;\n    out->clat = ble_conn_latency;\n    out->st = ble_conn_timeout;\n    out->cu = conn_update_count;\n    out->acl_run = health_acl_run;\n    out->lat_max_ms = health_lat_max_ms;'),
+    ('                ble_conn_interval = interval;\n                ble_conn_latency = latency;\n                ble_conn_timeout = timeout;',
+     '                ble_conn_interval = interval;\n                ble_conn_latency = latency;\n                ble_conn_timeout = timeout;\n                conn_update_count++;'),
+    ('        // 2回連続（4秒間）完了通知が途絶えた場合はBTstack/CYW43バッファの完全膠着と判定\n        // ゾンビ状態での永久停止を防ぎ、クリーンに切断して自動再接続シーケンスへ移行\n        if (consecutive_can_send_timeouts >= 2) {\n            printf("[BT] CRITICAL: BLE transmission deadlocked for 4000ms. Forcing link disconnect & clean recovery.\\r\\n");\n            remote_log_eventf("FLOWCTL-DEADLOCK force-disc");\n            consecutive_can_send_timeouts = 0;\n            ble_can_send = true;\n            gap_disconnect(con_handle);\n            return;\n        }\n\n        ble_can_send = true;\n        hids_device_request_can_send_now_event(con_handle);',
+     '        // 【2026-10-31 変更】以前は 2 回連続 (4 秒) で gap_disconnect していたが、\n        // 膠着時は切断コマンド自体がチップに届かず、生きているリンクを壊すだけだった。\n        // ホストのスリープ中も同じ症状になるため、切断はしない。\n        // 3 回目 (6 秒) で「クレジットが返らない」と判断し、送信を 1 秒 1 回の\n        // プローブに絞る (0x57 の洪水を止めてチップとホストに休ませる)\n        if (consecutive_can_send_timeouts >= 3 && !credit_stall) {\n            credit_stall = true;\n            credit_stall_next_probe_us = time_us_64() + 1000000ULL;\n            remote_log_eventf("BT CREDIT-STALL start aclrun=%u acl=%u",\n                              (unsigned) health_acl_run, (unsigned) health_acl_full);\n        }\n\n        ble_can_send = true;\n        hids_device_request_can_send_now_event(con_handle);'),
+    ('    if (!ble_can_send) {\n        health_blocked++; // フロー制御待ちで捨てた (ウェッジ時に増える)\n        return;\n    }',
+     '    if (!ble_can_send) {\n        health_blocked++; // フロー制御待ちで捨てた (ウェッジ時に増える)\n        return;\n    }\n    if (credit_stall) {\n        // クレジットが返らない間は 1 秒に 1 回だけ試す。0x57 の連打を止める\n        uint64_t nowp = time_us_64();\n        if (nowp < credit_stall_next_probe_us) {\n            health_blocked++;\n            return;\n        }\n        credit_stall_next_probe_us = nowp + 1000000ULL;\n    }'),
+    ('        last_send_us = now_us;\n        health_ok++;\n        health_last_ok_us = now_us;',
+     '        last_send_us = now_us;\n        health_ok++;\n        health_last_ok_us = now_us;\n        health_acl_run = 0; // 通ったので連続 0x57 は途切れた'),
+    ('            health_tx_stalled = false;\n        } else if (connected_now',
+     '            health_tx_stalled = false;\n            credit_stall = false; // クレジットが戻った\n        } else if (connected_now'),
+    ('            connected_since_us = now_us;\n        }',
+     '            connected_since_us = now_us;\n            credit_stall = false;\n            consecutive_can_send_timeouts = 0;\n        }'),
+])
+
+patch(WT + '/firmware/src/remote_log.cc', [
+    ('BLE-HB ci=%u ok=%u blk=%u acl=%u cp=%u/%u disc=%u rs=0x%02X tx=%ums omax=%ums lat=%ums burst=%u in=%u gmax=%ums dmax=%u sk=%u/%u/%u fl=0x%02X lps=%u lmax=%ums rtt=%ums rmax=%ums u=%u/%u sus=%u",',
+     'BLE-HB ci=%u ok=%u blk=%u acl=%u cp=%u/%u disc=%u rs=0x%02X tx=%ums omax=%ums lat=%ums burst=%u in=%u gmax=%ums dmax=%u sk=%u/%u/%u fl=0x%02X lps=%u lmax=%ums rtt=%ums rmax=%ums u=%u/%u sus=%u clat=%u st=%u cu=%u aclrun=%u cpd=%u",'),
+    ('                              (unsigned) h.flags, (unsigned) lps,\n                              (unsigned) lmax_ms, (unsigned) rtt_ms, (unsigned) rmax_ms,\n                              (unsigned) usb_mounted, (unsigned) usb_ready, (unsigned) usb_susp);',
+     '                              (unsigned) h.flags, (unsigned) lps,\n                              (unsigned) lmax_ms, (unsigned) rtt_ms, (unsigned) rmax_ms,\n                              (unsigned) usb_mounted, (unsigned) usb_ready, (unsigned) usb_susp,\n                              // 2026-10-31: レート低下の原因を数値で見る\n                              (unsigned) h.clat, (unsigned) h.st, (unsigned) h.cu,\n                              (unsigned) h.acl_run, (unsigned) cp_packets_delta);'),
+    ('        const uint32_t in_delta = count_ingest - ble_hb_in;\n        const uint32_t burst_delta = h.burst - ble_hb_burst;',
+     '        const uint32_t in_delta = count_ingest - ble_hb_in;\n        const uint32_t burst_delta = h.burst - ble_hb_burst;\n        // クレジット返却 (Completed Packets) の増分。0 のままならコントローラが\n        // 完了通知を返していない = 膠着の直接証拠 (2026-10-31)\n        static uint32_t ble_hb_cp_packets = 0;\n        const uint32_t cp_packets_delta = h.cp_packets - ble_hb_cp_packets;\n        ble_hb_cp_packets = h.cp_packets;'),
+])
+
 print("patched:", WT)
