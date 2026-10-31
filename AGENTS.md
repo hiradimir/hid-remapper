@@ -145,10 +145,14 @@ Raspberry Pi Pico W (RP2040) による **BLE HID → USB HID リマッパー**
 3. `cmake .. -DPICO_BOARD=pico_w -DPICO_DUAL_PIO_USB_DP_PIN=2 -DENABLE_BLE=ON
    -DENABLE_OLED=ON -DENABLE_REMOTE_LOG=ON -DBLE_LOCK_DISABLE=ON` → `make remapper`
 4. **焼く前の検算**（今日の取り違えの再発防止）:
-   - `strings build/remapper.uf2 | grep -o "ble_lock=[a-z]*"` → `disabled`
-   - `strings build/remapper.uf2 | grep -c FLOWCTL-WEDGE` → 1 以上
-   - `strings build/remapper.uf2 | grep -c 192.168.215.1` → **0**（送信先の誤設定検出）
+   - **`python3 tools/uf2_check.py build/remapper.uf2`** で一括チェック（rc=0 で合格）
+     - `ble_lock=disabled` / `CREDIT-STALL` / `PARAM-REQ n=%u` / `power-cycle+reload`
+     - `192.168.215.1` が **0 件**（送信先の誤設定検出）
    - `grep PICO_BOARD build/CMakeCache.txt` → `pico_w`
+   - **注意**: `strings remapper.uf2 | grep ...` は **境界で見落とす**。UF2 は
+     512 バイトブロックごとに 32 バイトのヘッダを持つため、文字列が 256 バイトの
+     ペイロード境界をまたぐと分断されて 0 件になる（2026-10-31、パッチ未適用と
+     誤判定した）。文字列検算は必ずペイロードを連結する `tools/uf2_check.py` を使う
 5. 名前付き UF2 は `firmware/artifacts/`（gitignore）へ。**上書き・削除しない**
 
 **ビルド間で挙動が変わったら、まず `remote_log_net.h` の mtime と、
