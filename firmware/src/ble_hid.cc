@@ -1459,24 +1459,10 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     update_detected_os('A');
                 }
 
-                // 【2026-10-31 変更】要求値を Apple の一般則に合わせる。
-                // 旧値 (9, 12, 0, 400) は Min + 15 > Max で規則違反のため macOS に
-                // 丸ごと無視され、ホスト既定の (12, 4, 100) = interval 15ms /
-                // latency 4 / supervision timeout 1 秒 を押し付けられていた。
-                // timeout 1 秒は電波の乱れで rs=0x08 (接続監視タイムアウト) 切断に
-                // なる主因 (2026-10-31 実測: st=100)。Min = Max = 15ms で出し直す。
-                // 要求は 30 秒間隔に制限する (10 秒周期でホストを刺激しない)
-                static uint32_t last_param_reassert_ms = 0;
-                uint32_t now = to_ms_since_boot(get_absolute_time());
-                if ((latency > 0 || ble_conn_timeout < 400) &&
-                    (now - last_param_reassert_ms > 30000)) {
-                    last_param_reassert_ms = now;
-                    printf("[BT] Host set latency=%d timeout=%dms. Re-requesting 15ms/0/4s...\r\n",
-                           latency, ble_conn_timeout * 10);
-                    remote_log_eventf("BT PARAM-REQ ci=12 lat=0 to=4000 (host lat=%d to=%dms)",
-                                      latency, ble_conn_timeout * 10);
-                    gap_request_connection_parameter_update(con_handle, 12, 12, 0, 400);
-                }
+                // 【2026-10-31】ここでは要求しない。このハンドラは「更新が来た時」しか
+                // 走らないため、ホストが既定値を押し付けた直後に 1 回試すだけで、
+                // 以後は二度と機会が無い (実測: wake39 で PARAM-REQ が 0 件)。
+                // 再要求は周期側 (ble_hid_poll) に移した。ここは結果の記録のみ
             }
             break;
         }
@@ -1831,6 +1817,8 @@ static void ble_hid_task_locked(void) {
         static bool was_connected = false;
         static uint64_t cooldown_until_us = 0;
         static uint64_t connected_since_us = 0;
+        static uint8_t param_req_count = 0;
+        static uint64_t last_param_req_us = 0;
         // 接続した瞬間は判定の基準を取り直す。前回接続時の経過時間のままだと
         // 「接続直後に停止」と誤判定して再起動を連鎖させる (2026-10-24 朝に実測)
         bool connected_now = (current_state == BLE_STATE_CONNECTED);
@@ -1841,6 +1829,8 @@ static void ble_hid_task_locked(void) {
             connected_since_us = now_us;
             credit_stall = false;
             consecutive_can_send_timeouts = 0;
+            param_req_count = 0;
+            last_param_req_us = now_us;
         }
         was_connected = connected_now;
 
@@ -1878,6 +1868,26 @@ static void ble_hid_task_locked(void) {
             ctrl_reload_btcore = true;
             hci_power_control(HCI_POWER_OFF);
             return;
+        }
+
+        // 【2026-10-31】接続パラメータの再要求。ホスト (macOS) は既定の
+        // (12, 4, 100) = 15ms / latency 4 / supervision timeout 1.0 秒 を押し付ける。
+        // timeout 1 秒は取りこぼし 13 回で切断 (rs=0x08) になるため、
+        // Apple 準拠の値で出し直せるか試す。1 回目は 15ms、2 回目以降は
+        // 11.25ms (Apple が HID 向けに許す下限)。30 秒間隔で最大 3 回。
+        // 受理されたかは BT PARAM (更新完了ログ) の st= で判定する
+        if (connected_now && ble_conn_latency > 0 && param_req_count < 3 &&
+            (now_us - last_param_req_us) >= 30000000ULL) {
+            last_param_req_us = now_us;
+            param_req_count++;
+            uint16_t req_ci = (param_req_count == 1) ? 12 : 9;
+            printf("[BT] Re-requesting connection params n=%u ci=%u (now lat=%u st=%u)\r\n",
+                   (unsigned) param_req_count, (unsigned) req_ci,
+                   (unsigned) ble_conn_latency, (unsigned) ble_conn_timeout);
+            remote_log_eventf("BT PARAM-REQ n=%u ci=%u lat=0 to=4000 (now lat=%u st=%u)",
+                              (unsigned) param_req_count, (unsigned) req_ci,
+                              (unsigned) ble_conn_latency, (unsigned) ble_conn_timeout);
+            gap_request_connection_parameter_update(con_handle, req_ci, req_ci, 0, 400);
         }
     }
 

@@ -486,7 +486,14 @@ void oled_task(void) {
     }
 
     uint32_t now_ms = (uint32_t)(now_us / 1000);
-    uint32_t idle_ms = now_ms - last_activity_ms;
+    // last_activity_ms は Core 0 (入力・USB 送信・BLE 送信) が更新する。Core 1 で
+    // 動くこのタスクが now_us を取った後に更新されると差分が負になり、
+    // 4,294,967 秒という巨大な idle になる。するとスクリーンセーバーが誤発動し、
+    // 1 秒ごとに「減光/アニメ → 通常 → 減光」を繰り返して画面がちらつく
+    // (2026-10-31 実機: OLED SS stage=2 idle=4294967s と stage=0 の交互出力)。
+    // 負は「たった今操作された」として 0 に丸める
+    int32_t idle_signed_ms = (int32_t)(now_ms - last_activity_ms);
+    uint32_t idle_ms = (idle_signed_ms < 0) ? 0u : (uint32_t) idle_signed_ms;
 
     // 【BL-34 スクリーンセーバー】
     if (idle_ms >= 120000) {
