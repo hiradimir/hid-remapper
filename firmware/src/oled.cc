@@ -552,7 +552,12 @@ void oled_task(void) {
     }
 
     // Line 0: トランスポート & 通信ヘルス (21 chars)
-    bool is_bt_mode = (ui_bt_state == OLED_BT_CONNECTED) ? true : ui_ble_mode;
+    // BLE が繋がっていても、送信が膠着して USB フォールバックに切り替わっている
+    // 間は「BLE で出ている」ように見せない (2026-10-31: 実際は USB 経路なのに
+    // BLE-FAST と表示され、フォールバックが死んでいることも分からなかった)
+    bool is_bt_mode = (ui_bt_state == OLED_BT_CONNECTED && !ble_hid_is_tx_stalled())
+                          ? true
+                          : ui_ble_mode;
     const char* mode_icon = is_bt_mode ? "\x7F" : "\x86";
     // 500ms ごとに点滅するドット。BT 接続状態などの条件は付けない — この描画は
     // main ループから呼ばれるので、点滅が続いていれば「生きている」ことが分かる

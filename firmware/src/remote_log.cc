@@ -961,6 +961,16 @@ static void ble_health_task(uint64_t now_us) {
         // USB デバイス側の状態 (入力の行き先があるか)
 #if defined(ENABLE_BLE) && ENABLE_BLE
         const bool usb_mounted = usb_is_mounted();
+        // USB デバイス側 (PC から見たリマッパー) の状態変化を残す。
+        // 2026-10-31: フラッシュ直後に macOS が configure に失敗し、12 時間
+        // u=0/0 のまま「USB モードなのに無反応」になった。ここで気づけるようにする
+        {
+            static bool prev_usb_mounted = false;
+            if (usb_mounted != prev_usb_mounted) {
+                prev_usb_mounted = usb_mounted;
+                remote_log_eventf("USB DEV %s", usb_mounted ? "configured" : "unconfigured");
+            }
+        }
         const bool usb_ready = usb_is_ready();
         const bool usb_susp = usb_is_suspended();
 #else

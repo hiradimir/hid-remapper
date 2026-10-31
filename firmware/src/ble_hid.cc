@@ -252,6 +252,12 @@ static volatile bool adv_enabled_ok = false;
 // 再要求すると、アドレス/パラメータ設定の途中で広告が立ち、以後の設定が
 // 反映されないレースになる)
 static volatile bool adv_retry_pending = false;
+// 【2026-10-31 00:44 実測】BT コア再投入で STACK は WORKING (st=2) まで戻るのに、
+// 広告有効化 (LE_SET_ADVERTISE_ENABLE) の完了通知が返らず広告が出ないまま
+// 「復旧した」と判断して休眠に入った。再投入後は広告が本当に出たか確認する
+static bool post_reload = false;
+static uint64_t adv_verify_deadline_us = 0;
+static uint8_t adv_verify_count = 0;
 static uint64_t adv_retry_next_us = 0;
 
 static void adv_set(int enable) {
@@ -1232,6 +1238,8 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     cyw43_arch_lwip_end();
                 }
                 remote_log_eventf("BT FLOWCTL-RESET ctrl power-on reload=%d", reload ? 1 : 0);
+                post_reload = reload;
+                adv_verify_deadline_us = 0;
                 hci_power_control(HCI_POWER_ON);
                 return;
             }
@@ -1254,6 +1262,12 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     ble_led(0);
                 } else {
                     apply_slot_identity(current_slot);
+                }
+                if (post_reload) {
+                    post_reload = false;
+                    adv_verify_count = 0;
+                    adv_verify_deadline_us = time_us_64() + 1500000ULL;
+                    remote_log_eventf("BT ADV-VERIFY armed");
                 }
             }
             break;
@@ -1808,6 +1822,28 @@ static void ble_hid_task_locked(void) {
         adv_set(1);
     }
 
+    // コントローラ再投入後に「広告が本当に出たか」を確認する。
+    // ADV-EN の完了通知が返らないまま WORKING 到達 = 復旧と判断して休眠に入り、
+    // 実際には何も飛んでいない事故があった (2026-10-31 00:44)。1.5 秒待って
+    // ADV-EN が無ければ張り直し、3 回失敗したら諦めて電源再投入を促す
+    if (adv_verify_deadline_us != 0 && now_us >= adv_verify_deadline_us) {
+        if (adv_enabled_ok) {
+            adv_verify_deadline_us = 0;
+            remote_log_eventf("BT ADV-VERIFY ok n=%u", (unsigned) adv_verify_count);
+        } else if (adv_verify_count < 3) {
+            adv_verify_count++;
+            adv_verify_deadline_us = now_us + 1500000ULL;
+            gap_advertisements_enable(0);
+            adv_set(1);
+            remote_log_eventf("BT ADV-RETRY n=%u", (unsigned) adv_verify_count);
+        } else {
+            adv_verify_deadline_us = 0;
+            remote_log_eventf("BT CTRL-DEAD adv never enabled -> power cycle needed");
+            oled_set_status("Power Cycle!");
+            oled_show_toast("POWER CYCLE", 6000);
+        }
+    }
+
     // 【BL-43 系】ACL バッファ満杯 (0x57) の連発で通知が止まったらコントローラを再起動する。
     // 再接続ではクレジットが戻らないため、HCI 電源の入れ直しだけが回復手段
     {
@@ -1819,6 +1855,9 @@ static void ble_hid_task_locked(void) {
         static uint64_t connected_since_us = 0;
         static uint8_t param_req_count = 0;
         static uint64_t last_param_req_us = 0;
+        // 接続した瞬間の Completed Packets。ここから動かなければクレジットが
+        // 返っていない = 壊れた再接続 (2026-10-31 00:42 実測)
+        static uint32_t cp_at_connect = 0;
         // 接続した瞬間は判定の基準を取り直す。前回接続時の経過時間のままだと
         // 「接続直後に停止」と誤判定して再起動を連鎖させる (2026-10-24 朝に実測)
         bool connected_now = (current_state == BLE_STATE_CONNECTED);
@@ -1831,8 +1870,22 @@ static void ble_hid_task_locked(void) {
             consecutive_can_send_timeouts = 0;
             param_req_count = 0;
             last_param_req_us = now_us;
+            cp_at_connect = health_cp_packets;
         }
         was_connected = connected_now;
+
+        // 【2026-10-31 00:42 実測】接続直後に 0x57 が連続し cp が凍結する
+        // 「壊れた再接続」では CAN_SEND_NOW は届き続けるため、タイマー側の
+        // credit_stall 判定が発動しなかった (1261 回の 0x57 を撒いた)。
+        // 0x57 の連続数 (aclrun) で直接検出して送信を 1 秒 1 回に絞る
+        if (connected_now && !credit_stall && health_acl_run >= 50) {
+            credit_stall = true;
+            credit_stall_next_probe_us = now_us + 1000000ULL;
+            remote_log_eventf("BT CREDIT-STALL start (storm aclrun=%u acl=%u cpd=%u)",
+                              (unsigned) health_acl_run,
+                              (unsigned) (health_acl_full - acl_at_last_ok),
+                              (unsigned) (health_cp_packets - cp_at_connect));
+        }
 
         if (health_ok != last_ok) {
             last_ok = health_ok;
@@ -1841,9 +1894,15 @@ static void ble_hid_task_locked(void) {
             health_tx_stalled = false;
             credit_stall = false; // クレジットが戻った
         } else if (connected_now && !ctrl_reset_pending && now_us >= cooldown_until_us &&
-                   (health_acl_full - acl_at_last_ok) >= 40 &&
-                   (now_us - last_ok_us) > 120000000ULL &&
-                   (now_us - connected_since_us) > 15000000ULL) {
+                   (now_us - connected_since_us) > 15000000ULL &&
+                   (((health_acl_full - acl_at_last_ok) >= 40 &&
+                     (now_us - last_ok_us) > 120000000ULL) ||
+                    // 絞っても (1 秒 1 回のプローブでも) クレジットが返らないまま
+                    // 20 秒 = 壊れた再接続。0x57 を撒き続ける前にコントローラを
+                    // 入れ直す (2026-10-31 00:42 は 120 秒待つ間に 1261 回撒いて
+                    // コントローラが広告コマンドを受け付けなくなった)
+                    (credit_stall && health_cp_packets == cp_at_connect &&
+                     (now_us - connected_since_us) > 20000000ULL))) {
             // しきい値の変遷 (2026-10-29〜30 実測):
             //   3s/20  … Win→Mac 切替直後の初期バーストで誤爆した
             //   10s/40 … 眠っている Mac に接続した時の 0x57 詰まりでも発動した
@@ -1857,9 +1916,14 @@ static void ble_hid_task_locked(void) {
             // 「切断 → 通常の再広告」で復帰させる (コントローラは生かしたまま)
             cooldown_until_us = now_us + 60000000ULL; // 連鎖を防ぐ 60 秒クールダウン
             health_tx_stalled = true;                 // 以後 USB フォールバックに切り替える
-            remote_log_eventf("BT FLOWCTL-WEDGE ok_stall=%us acl=%u -> btcore-reload",
-                              (unsigned) ((now_us - last_ok_us) / 1000000ULL),
-                              (unsigned) (health_acl_full - acl_at_last_ok));
+            if (health_cp_packets == cp_at_connect) {
+                remote_log_eventf("BT NORESTORE cp frozen 20s acl=%u -> btcore-reload",
+                                  (unsigned) (health_acl_full - acl_at_last_ok));
+            } else {
+                remote_log_eventf("BT FLOWCTL-WEDGE ok_stall=%us acl=%u -> btcore-reload",
+                                  (unsigned) ((now_us - last_ok_us) / 1000000ULL),
+                                  (unsigned) (health_acl_full - acl_at_last_ok));
+            }
             // 膠着すると CYW43 は HCI コマンドを受け付けなくなる。
             // BTstack を一度落とし (HCI_STATE_OFF)、その状態で BT コアのファームを
             // 再投入してから電源 ON に戻す。トランスポートが閉じている間に
