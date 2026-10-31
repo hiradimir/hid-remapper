@@ -9,6 +9,14 @@
 
 ---
 
+## 2026-10-31 `wake38`: OLED の USB ポート表示 P1/P2 を入れ替え（物理配線の都合）
+
+- ルディの配線で P1/P2 の表示が物理ポートと逆になっているため、`update_usb_ports_status()`
+  で検出結果と表示ラベルを交換する。`OLED_USB_LABEL_SWAP`（既定 1）で切り替え可能、
+  0 にすると基板シルク通りに戻る
+- 検知ロジック（GP0/1 = Host 1、GP2/3 = Host 2）はそのまま。表示とログのみ入れ替え
+- ビルド: `firmware/artifacts/remapper_anchor_wake38.uf2`（12:32、`wake37` の全内容を含む）
+
 ## 2026-10-31 `wake37`: P0 観測 + 0x57 監視の作り直し
 
 - **観測追加** (`BLE-HB` の末尾): `clat=`（実際の connection latency）/ `st=`（supervision
