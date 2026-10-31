@@ -9,6 +9,23 @@
 
 ---
 
+## 2026-10-31 11:44 膠着で「BT コア再投入」を実機検証 → 順序が悪く半復旧 (`wake36`)
+
+- 11:44:23 に `rs=0x08`（接続監視タイムアウト）→ 再接続 → 2 秒後に `CANSEND-TO` と
+  `BIGDX dx=616 dy=584` → `ok` 18130 で凍結、`acl` 880 まで増加（0x57 膠着）
+- 11:46:24 に `wake34` の復旧が発動: `BT BTCORE-RELOAD rc=0`（再ダウンロード成功）→
+  `STACK st=3/0` → `DISC rs=0x16` が**返ってきた**（＝チップがコマンドを受け付ける状態に戻った）。
+  しかし電源 ON 後 `STACK st=2 (WORKING)` に到達せず `ADV-*` も出ないまま
+  11:46:56 に `RECONN-TO` で dormant。以降 USB 出力モード
+- **原因（推定）**: トランスポートを開いたまま（BTstack のデータソースがポーリング中に）
+  `cyw43_bluetooth_hci_init()` でファームを再投入したため、その後の初期化シーケンスが
+  完了しなかった
+- **`wake36`**: 順序を修正。(1) 膠着時は `hci_power_control(HCI_POWER_OFF)` だけ投げる、
+  (2) `HCI_STATE_OFF`（トランスポートが閉じた状態）で `cyw43_state.bt_loaded=false` にし、
+  (3) `HCI_POWER_ON` → transport open がファームを再ダウンロード。
+  ログは `BT FLOWCTL-RESET ctrl power-on reload=1`
+  （`firmware/artifacts/remapper_anchor_wake36.uf2`, 11:48 ビルド）
+
 ## 2026-10-31 11:38 の BLE 断続切断は Mac のスリープ明け / OLED 段階ログを追加
 
 - 10/30 22:28 に `wake34` を起動してから 13.2 時間、**切断は 2 回だけ**（11:38:12 と
