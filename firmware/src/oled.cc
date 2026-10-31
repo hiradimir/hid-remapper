@@ -155,6 +155,9 @@ static char ui_peer_addr[24] = "";
 static volatile int ui_tx_timer = 0;
 
 static uint32_t last_activity_ms = 0;
+// スクリーンセーバーの段階 (0=通常 1=減光 2=ロゴ)。遷移した瞬間だけログに出す。
+// 「操作中に一瞬 1 行だけになる」の切り分け用 (2026-10-31 ルディ報告)
+static int oled_ss_stage = -1;
 static uint8_t current_contrast = 0x8F;
 static bool in_screensaver = false;
 static int16_t ss_x = 10;
@@ -493,6 +496,10 @@ void oled_task(void) {
             ssd1306_set_contrast(current_contrast);
         }
         in_screensaver = true;
+        if (oled_ss_stage != 2) {
+            oled_ss_stage = 2;
+            remote_log_eventf("OLED SS stage=2 idle=%us", (unsigned) (idle_ms / 1000));
+        }
 
         // 10 FPS (100ms) でバウンシングロゴを描画
         static uint64_t last_ss_step_us = 0;
@@ -519,12 +526,20 @@ void oled_task(void) {
             current_contrast = 0x30;
             ssd1306_set_contrast(current_contrast);
         }
+        if (oled_ss_stage != 1) {
+            oled_ss_stage = 1;
+            remote_log_eventf("OLED SS stage=1 idle=%us", (unsigned) (idle_ms / 1000));
+        }
         in_screensaver = false;
     } else {
         // Stage 0: 通常輝度 (Contrast: 0x8F)
         if (current_contrast != 0x8F) {
             current_contrast = 0x8F;
             ssd1306_set_contrast(current_contrast);
+        }
+        if (oled_ss_stage != 0) {
+            oled_ss_stage = 0;
+            remote_log_eventf("OLED SS stage=0 idle=%us", (unsigned) (idle_ms / 1000));
         }
         in_screensaver = false;
     }

@@ -975,4 +975,44 @@ patch(WT + '/firmware/src/remote_log.cc', [
      "        ble_hid_reset_lat_max();\n        ble_hid_reset_dmax();"),
 ])
 
+# --- oled.cc: スクリーンセーバー段階のログ (2026-10-31) ---------------------
+# 「操作中に一瞬 1 行だけの表示になる」報告の切り分け用。
+# 段階 (0=通常 1=減光 2=ロゴ) が変わった瞬間だけログに出す
+patch(WT + '/firmware/src/oled.cc', [
+    ('static uint32_t last_activity_ms = 0;',
+     'static uint32_t last_activity_ms = 0;\n'
+     '// スクリーンセーバーの段階 (0=通常 1=減光 2=ロゴ)。遷移した瞬間だけログに出す\n'
+     'static int oled_ss_stage = -1;'),
+    ('        in_screensaver = true;\n',
+     '        in_screensaver = true;\n'
+     '        if (oled_ss_stage != 2) {\n'
+     '            oled_ss_stage = 2;\n'
+     '            remote_log_eventf("OLED SS stage=2 idle=%us", (unsigned) (idle_ms / 1000));\n'
+     '        }\n'),
+    ('        in_screensaver = false;\n'
+     '    } else {\n'
+     '        // Stage 0: 通常輝度 (Contrast: 0x8F)\n'
+     '        if (current_contrast != 0x8F) {\n'
+     '            current_contrast = 0x8F;\n'
+     '            ssd1306_set_contrast(current_contrast);\n'
+     '        }\n'
+     '        in_screensaver = false;\n',
+     '        if (oled_ss_stage != 1) {\n'
+     '            oled_ss_stage = 1;\n'
+     '            remote_log_eventf("OLED SS stage=1 idle=%us", (unsigned) (idle_ms / 1000));\n'
+     '        }\n'
+     '        in_screensaver = false;\n'
+     '    } else {\n'
+     '        // Stage 0: 通常輝度 (Contrast: 0x8F)\n'
+     '        if (current_contrast != 0x8F) {\n'
+     '            current_contrast = 0x8F;\n'
+     '            ssd1306_set_contrast(current_contrast);\n'
+     '        }\n'
+     '        if (oled_ss_stage != 0) {\n'
+     '            oled_ss_stage = 0;\n'
+     '            remote_log_eventf("OLED SS stage=0 idle=%us", (unsigned) (idle_ms / 1000));\n'
+     '        }\n'
+     '        in_screensaver = false;\n'),
+])
+
 print("patched:", WT)
