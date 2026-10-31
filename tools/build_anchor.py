@@ -41,6 +41,7 @@ patch(WT + '/firmware/src/ble_hid.cc', [
     # 状態変数
     ("static volatile int adv_enable_req = 0;",
      "static volatile bool ctrl_reset_pending = false;   // 0x57 膠着からの復旧\n"
+     "static volatile bool ctrl_reload_btcore = false;   // 膠着時に BT コア再投入\n"
      "static volatile bool health_tx_stalled = false;   // 接続中だが送信不能\n"
      "static volatile bool adv_enable_pending = false;  // 遅延させる広告有効化\n"
      "static uint64_t adv_enable_at_us = 0;\n"
@@ -95,19 +96,13 @@ patch(WT + '/firmware/src/ble_hid.cc', [
                    (health_acl_full - acl_at_last_ok) >= 40 &&
                    (now_us - last_ok_us) > 120000000ULL &&
                    (now_us - connected_since_us) > 15000000ULL) {
-            // 膠着すると CYW43 は disconnect コマンドすら処理しない。
-            // Wi-Fi を壊さずに BT コアだけ再投入する
             cooldown_until_us = now_us + 60000000ULL;
             health_tx_stalled = true;
-            remote_log_eventf("BT FLOWCTL-WEDGE ok_stall=%us acl=%u -> btcore-reload",
+            remote_log_eventf("BT FLOWCTL-WEDGE ok_stall=%us acl=%u -> power-cycle+reload",
                               (unsigned) ((now_us - last_ok_us) / 1000000ULL),
                               (unsigned) (health_acl_full - acl_at_last_ok));
             ctrl_reset_pending = true;
-            cyw43_arch_lwip_begin();
-            cyw43_state.bt_loaded = false;
-            int btcore_rc = cyw43_bluetooth_hci_init();
-            cyw43_arch_lwip_end();
-            remote_log_eventf("BT BTCORE-RELOAD rc=%d", btcore_rc);
+            ctrl_reload_btcore = true;
             hci_power_control(HCI_POWER_OFF);
             return;
         }
@@ -194,8 +189,15 @@ void ble_hid_wake_from_dormant(void) {
     ('            remote_log_eventf("STACK st=%d", state);',
      """            remote_log_eventf("STACK st=%d", state);
             if (state == HCI_STATE_OFF && ctrl_reset_pending) {
-                remote_log_eventf("BT FLOWCTL-RESET ctrl power-on");
                 ctrl_reset_pending = false;
+                bool reload = ctrl_reload_btcore;
+                ctrl_reload_btcore = false;
+                if (reload) {
+                    cyw43_arch_lwip_begin();
+                    cyw43_state.bt_loaded = false;
+                    cyw43_arch_lwip_end();
+                }
+                remote_log_eventf("BT FLOWCTL-RESET ctrl power-on reload=%d", reload ? 1 : 0);
                 hci_power_control(HCI_POWER_ON);
                 return;
             }"""),

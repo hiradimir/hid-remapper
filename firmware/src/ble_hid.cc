@@ -224,6 +224,8 @@ static bool resolving_list_loaded = false;
 // 0x57 (ACL バッファ満杯) が続いて通知が成功しない状態からの復旧用。
 // 再接続では直らず、コントローラの再起動だけが効く (2026-10-23 01:48 の実測)
 static volatile bool ctrl_reset_pending = false;
+// 膠着復旧時に BT コアのファームを再投入するか (2026-10-31)
+static volatile bool ctrl_reload_btcore = false;
 // 接続中だが 0x57 が連発して通知が成功しない状態 (トランスポートとしては死んでいる)。
 // USB フォールバックの判断に使う
 static volatile bool health_tx_stalled = false;
@@ -1207,8 +1209,17 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             remote_log_eventf("STACK st=%d", state);
             if (state == HCI_STATE_OFF && ctrl_reset_pending) {
                 // クレジット会計ごとリセットする。アドレスは固定なので再設定不要
-                remote_log_eventf("BT FLOWCTL-RESET ctrl power-on");
                 ctrl_reset_pending = false;
+                bool reload = ctrl_reload_btcore;
+                ctrl_reload_btcore = false;
+                if (reload) {
+                    // トランスポートは閉じている。次の open で BT ファームが
+                    // 再ダウンロードされるよう bt_loaded を落としておく
+                    cyw43_arch_lwip_begin();
+                    cyw43_state.bt_loaded = false;
+                    cyw43_arch_lwip_end();
+                }
+                remote_log_eventf("BT FLOWCTL-RESET ctrl power-on reload=%d", reload ? 1 : 0);
                 hci_power_control(HCI_POWER_ON);
                 return;
             }
@@ -1831,17 +1842,12 @@ static void ble_hid_task_locked(void) {
             remote_log_eventf("BT FLOWCTL-WEDGE ok_stall=%us acl=%u -> btcore-reload",
                               (unsigned) ((now_us - last_ok_us) / 1000000ULL),
                               (unsigned) (health_acl_full - acl_at_last_ok));
-            // 膠着すると CYW43 は disconnect コマンドすら処理しない (2026-10-30 22:23 実測)。
-            // Wi-Fi を壊さずに BT コアだけ再投入する。bt_loaded=false にすると次の
-            // cyw43_bluetooth_hci_init() が BT ファームを再ダウンロードする
+            // 膠着すると CYW43 は HCI コマンドを受け付けなくなる。
+            // BTstack を一度落とし (HCI_STATE_OFF)、その状態で BT コアのファームを
+            // 再投入してから電源 ON に戻す。トランスポートが閉じている間に
+            // 再ダウンロードさせるのが肝 (開いたまま触ると初期化が完了しなかった)
             ctrl_reset_pending = true;
-            cyw43_arch_lwip_begin(); // CYW43 共有バスの排他 (BT 転送と同じロック)
-            cyw43_state.bt_loaded = false;
-            int btcore_rc = cyw43_bluetooth_hci_init();
-            cyw43_arch_lwip_end();
-            remote_log_eventf("BT BTCORE-RELOAD rc=%d", btcore_rc);
-            // BTstack 側も落として状態を捨てる。BT コアが復活していれば
-            // HCI Reset が完了し HCI_STATE_OFF → 下のハンドラで電源 ON に戻る
+            ctrl_reload_btcore = true;
             hci_power_control(HCI_POWER_OFF);
             return;
         }
