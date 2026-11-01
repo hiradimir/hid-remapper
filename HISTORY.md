@@ -9,6 +9,39 @@
 
 ---
 
+## 2026-11-01 `wake42`: `aclrun` 欠落の修正 / 復帰直後の PARAM-REQ 抑制 / ビルド自己検算
+
+### 発覚した不具合（自分のミス）
+
+`wake41` の実機 soak で 13:23 に膠着したが、**`aclrun=0` のまま `acl` だけが 511 まで
+増えた**。原因は `wake37` で `health_acl_run++` を `build_anchor.py` にミラーし忘れて
+いたこと（ツリー側には入っていた）。その結果:
+
+- `aclrun=` は **wake37〜wake41 まで常に 0**（HB の観測値が嘘だった）
+- `wake41` の「0x57 が 50 連続したら送信を絞る」は **一度も発動しない**
+- 13:23 の膠着は 120 秒待つ既存経路まで進み、0x57 を 511 回撒いた
+
+**対策**: `build_anchor.py` の末尾に **生成物の自己検算**を追加。必須マーカー
+（`health_acl_run < 0xFFFF` / `BT CREDIT-STALL start (storm` / `BT NORESTORE` /
+`BT ADV-VERIFY armed` / `BT CTRL-DEAD` / `last_resume_us` / `USB DEV %s` /
+`clat=%u st=%u`）が生成物に無ければ **ビルドを中断**する。
+
+### 13:20 の Mac 復帰で観測したこと
+
+- **12 時間のスリープを無切断で跨いだ**（`ok=6930` のまま、`tx=43,343,693ms`）
+- 復帰直後に約 3 秒の詰まり → `CANSEND-TO` → `DISC rs=0x08` → 0.8 秒で再接続（正常復帰）
+- ただし復帰後 40 秒で **0x08 が 3 回**。うち 2 回は `PARAM-REQ`/パラメータ適用の
+  直後だった（因果は断定できないが、復帰直後は不安定）
+- → **RESUME 後 60 秒は `PARAM-REQ` を撃たない**（`last_resume_us`）
+
+### 13:23 の膠着で分かった復旧経路の限界
+
+`FLOWCTL-WEDGE` → BT コア再投入で **`STACK st=1` から 32 秒以上進まない**（前回 00:44 は
+`st=2` まで到達して広告で失敗）。HCI 層の再投入では戻らない領域があることが確定。
+次段は `cyw43_deinit()` + `cyw43_arch_init()`（WL チップ丸ごと再初期化）。
+
+- ビルド: `firmware/artifacts/remapper_anchor_wake42.uf2`（11/1 13:26）
+
 ## 2026-11-01 `wake41`: 0x57 ストーム検知 / 早期再投入 / 再投入後の広告検証 / USB 可視化
 
 **引き金**: 2026-10-31 00:42 に `DISC rs=0x08` → 即再接続 → その接続は
