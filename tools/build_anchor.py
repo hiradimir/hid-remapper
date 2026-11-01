@@ -1113,4 +1113,35 @@ patch(WT + '/firmware/src/remote_log.cc', [
      '        const bool usb_mounted = usb_is_mounted();\n        // USB デバイス側 (PC から見たリマッパー) の状態変化を残す。\n        // 2026-10-31: フラッシュ直後に macOS が configure に失敗し、12 時間\n        // u=0/0 のまま「USB モードなのに無反応」になった。ここで気づけるようにする\n        {\n            static bool prev_usb_mounted = false;\n            if (usb_mounted != prev_usb_mounted) {\n                prev_usb_mounted = usb_mounted;\n                remote_log_eventf("USB DEV %s", usb_mounted ? "configured" : "unconfigured");\n            }\n        }'),
 ])
 
+# --- 2026-11-01: aclrun カウントの欠落修正 + 復帰直後の PARAM-REQ 抑制 ---
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ('    } else if (status == 0x57) { // BTSTACK_ACL_BUFFERS_FULL: 受理されず再要求になる\n        health_acl_full++;\n    }',
+     '    } else if (status == 0x57) { // BTSTACK_ACL_BUFFERS_FULL: 受理されず再要求になる\n        health_acl_full++;\n        // 2026-11-01 修正: この 1 行が wake37 のミラーで欠けており、aclrun が\n        // 常に 0 のまま = 0x57 ストーム検知が一度も動かなかった\n        if (health_acl_run < 0xFFFF) health_acl_run++;\n    }'),
+    ('static volatile uint16_t health_acl_run = 0;',
+     'static volatile uint16_t health_acl_run = 0;\n// 最後に「長時間の無送信から復帰した」時刻。復帰直後はホスト側が不安定なので\n// 接続パラメータの再要求を 60 秒控える (2026-11-01 13:20 の連続切断への配慮)\nstatic volatile uint64_t last_resume_us = 0;'),
+    ('            remote_log_eventf("BT RESUME gap=%us", (unsigned) ((now_us - last_send_us) / 1000000ULL));',
+     '            remote_log_eventf("BT RESUME gap=%us", (unsigned) ((now_us - last_send_us) / 1000000ULL));\n            last_resume_us = now_us;'),
+    ('        if (connected_now && ble_conn_latency > 0 && param_req_count < 3 &&\n            (now_us - last_param_req_us) >= 30000000ULL) {',
+     '        // 復帰直後 (60 秒) は撃たない。スリープ明けはリンクが不安定で、\n        // パラメータ更新要求の直後に rs=0x08 が続いた実測がある (2026-11-01 13:20)\n        if (connected_now && ble_conn_latency > 0 && param_req_count < 3 &&\n            (now_us - last_param_req_us) >= 30000000ULL &&\n            (last_resume_us == 0 || (now_us - last_resume_us) >= 60000000ULL)) {'),
+])
+
+# --- 生成物の自己検算 (2026-11-01 追加) -------------------------------------
+# 「パッチは当たったように見えるが実は欠けている」事故を防ぐ。
+# 実際に wake37 の health_acl_run++ が欠け、aclrun が常に 0 のまま
+# 0x57 ストーム検知が一度も動かなかった (2026-11-01 13:23 の膠着で発覚)。
+REQUIRED_MARKERS = [
+    ('firmware/src/ble_hid.cc', 'health_acl_run < 0xFFFF'),
+    ('firmware/src/ble_hid.cc', 'BT CREDIT-STALL start (storm'),
+    ('firmware/src/ble_hid.cc', 'BT NORESTORE'),
+    ('firmware/src/ble_hid.cc', 'BT ADV-VERIFY armed'),
+    ('firmware/src/ble_hid.cc', 'BT CTRL-DEAD'),
+    ('firmware/src/ble_hid.cc', 'last_resume_us'),
+    ('firmware/src/remote_log.cc', 'USB DEV %s'),
+    ('firmware/src/remote_log.cc', 'clat=%u st=%u'),
+]
+for _rel, _needle in REQUIRED_MARKERS:
+    _txt = open(WT + '/' + _rel).read()
+    assert _txt.count(_needle) >= 1, ('MARKER MISSING', _rel, _needle)
+print('self-check ok: %d markers' % len(REQUIRED_MARKERS))
+
 print("patched:", WT)

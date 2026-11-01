@@ -231,6 +231,9 @@ static volatile bool ctrl_reload_btcore = false;
 static volatile bool health_tx_stalled = false;
 // 連続 0x57 の回数 (送信成功で 0 に戻す)。タイマー再アームに依存せず膠着を数える
 static volatile uint16_t health_acl_run = 0;
+// 最後に「長時間の無送信から復帰した」時刻。復帰直後はホスト側が不安定なので
+// 接続パラメータの再要求を 60 秒控える (2026-11-01 13:20 の連続切断への配慮)
+static volatile uint64_t last_resume_us = 0;
 // 「クレジットが返らない」と判断して送信を絞っている状態 (1 秒に 1 回だけ試す)
 static volatile bool credit_stall = false;
 static uint64_t credit_stall_next_probe_us = 0;
@@ -1940,8 +1943,11 @@ static void ble_hid_task_locked(void) {
         // Apple 準拠の値で出し直せるか試す。1 回目は 15ms、2 回目以降は
         // 11.25ms (Apple が HID 向けに許す下限)。30 秒間隔で最大 3 回。
         // 受理されたかは BT PARAM (更新完了ログ) の st= で判定する
+        // 復帰直後 (60 秒) は撃たない。スリープ明けはリンクが不安定で、
+        // パラメータ更新要求の直後に rs=0x08 が続いた実測がある (2026-11-01 13:20)
         if (connected_now && ble_conn_latency > 0 && param_req_count < 3 &&
-            (now_us - last_param_req_us) >= 30000000ULL) {
+            (now_us - last_param_req_us) >= 30000000ULL &&
+            (last_resume_us == 0 || (now_us - last_resume_us) >= 60000000ULL)) {
             last_param_req_us = now_us;
             param_req_count++;
             uint16_t req_ci = (param_req_count == 1) ? 12 : 9;
@@ -2137,6 +2143,7 @@ void ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len) {
         }
         if (last_send_us != 0 && (now_us - last_send_us) >= 10000000ULL) {
             remote_log_eventf("BT RESUME gap=%us", (unsigned) ((now_us - last_send_us) / 1000000ULL));
+            last_resume_us = now_us;
         }
         last_send_us = now_us;
         health_ok++;
