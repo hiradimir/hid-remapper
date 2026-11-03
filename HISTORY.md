@@ -9,6 +9,28 @@
 
 ---
 
+## 2026-11-03 `wake43`: lat 高止まりを前兆として自発再接続
+
+**15:26 の膠着** (`bl39_1101_1455.log`, 稼働 48 時間時点):
+
+- 15:26:26 に `cp` が凍結 → 15:26:33 `BT CREDIT-STALL start (storm aclrun=50 acl=50)`
+  → **`acl` は 50→66 で停止**（修正前の 00:42 は 1261 回）。洪水を止める対策は成功
+- 15:28:29 の 120 秒 `FLOWCTL-WEDGE` → BT コア再投入は `STACK st=1` → `st=2` まで
+  進むが **`ADV-ADDR`/`ADV-PARAM`/`ADV-EN` が 1 つも出ず**、30 秒後に休眠。
+  `wake36`〜`wake41` と同じ「HCI 再投入では広告機能が戻らない」= 復旧は未達
+- USB フォールバックは正常（`fwd` 増加、OLED は `USB-OUT`）
+- **前兆を発見**: 膠着の 6 分前（15:20:39）から `lat`（CAN_SEND_NOW 待ち）が
+  36〜50ms に上昇し続けていた。正常時は 0ms
+
+**対策 (`wake43`)**: `lat` の 10 秒窓最大値が **30ms 以上で 60 秒継続**したら、
+チップが固まる前に `gap_disconnect` で**自発的に切断 → 再広告**する。
+`BLE_LAT_WATCH_ENABLE=0` で無効化、`BLE_LAT_HIGH_MS` / `BLE_LAT_HIGH_WINDOWS` で
+しきい値を変更できる。ログは `BT LAT-HIGH <ms> x6 -> proactive reconnect`
+
+- ビルド: `firmware/artifacts/remapper_anchor_wake43.uf2`（11/3 15:35）
+- 未着手: `cyw43_deinit()` + `cyw43_arch_init()`（チップ丸ごと再初期化）。
+  Wi-Fi/ログ/BTstack を巻き込むため、`wake43` で前兆検知が効かなかった場合の次段
+
 ## 2026-11-01 `wake42`: `aclrun` 欠落の修正 / 復帰直後の PARAM-REQ 抑制 / ビルド自己検算
 
 ### 発覚した不具合（自分のミス）
