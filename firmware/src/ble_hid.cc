@@ -234,6 +234,18 @@ static volatile uint16_t health_acl_run = 0;
 // 最後に「長時間の無送信から復帰した」時刻。復帰直後はホスト側が不安定なので
 // 接続パラメータの再要求を 60 秒控える (2026-11-01 13:20 の連続切断への配慮)
 static volatile uint64_t last_resume_us = 0;
+// 【2026-11-03】送信スロット待ちが高い状態は膠着の前兆 (15:26 の膠着では
+// 6 分前から 36〜50ms が続いていた)。30ms 以上が 60 秒続いたら、チップが
+// 固まる前に自分から切断して張り直す。0 にすると無効化できる
+#ifndef BLE_LAT_HIGH_MS
+#define BLE_LAT_HIGH_MS 30
+#endif
+#ifndef BLE_LAT_HIGH_WINDOWS
+#define BLE_LAT_HIGH_WINDOWS 6   // 10 秒窓 × 6 = 60 秒
+#endif
+#ifndef BLE_LAT_WATCH_ENABLE
+#define BLE_LAT_WATCH_ENABLE 1
+#endif
 // 「クレジットが返らない」と判断して送信を絞っている状態 (1 秒に 1 回だけ試す)
 static volatile bool credit_stall = false;
 static uint64_t credit_stall_next_probe_us = 0;
@@ -291,6 +303,9 @@ static volatile uint32_t health_burst = 0;
 // BTstack のスケジューリング待ちそのものを測る (2026-10-27 変更)
 static volatile uint64_t can_send_req_us = 0;
 static volatile uint32_t health_lat_max_ms = 0;
+// 【2026-11-03】膠着の前兆検知用。remote_log は health_lat_max_ms を HB ごとに
+// リセットするため、こちらで 10 秒窓の最大値を別に持つ
+static volatile uint32_t health_lat_win_max_ms = 0;
 
 static volatile uint32_t health_dmax = 0;
 void ble_hid_reset_lat_max(void) { health_lat_max_ms = 0; }
@@ -1310,6 +1325,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     if (can_send_req_us != 0) {
                         uint32_t d = (uint32_t) ((time_us_64() - can_send_req_us) / 1000ULL);
                         if (d > health_lat_max_ms) health_lat_max_ms = d;
+                        if (d > health_lat_win_max_ms) health_lat_win_max_ms = d;
                         can_send_req_us = 0;
                         // 許可待ちが 50ms 以上なら時刻付きで残す (15 秒窓の最大値だけでは
                         // いつ起きたか分からない)。1 秒に 1 回までに制限する
@@ -1936,6 +1952,42 @@ static void ble_hid_task_locked(void) {
             hci_power_control(HCI_POWER_OFF);
             return;
         }
+
+        // 【2026-11-03】lat 高止まりでの自発再接続。
+        // CAN_SEND_NOW 待ち (lat) が 30ms 以上で 60 秒続くのは、コントローラが
+        // 送信スロットを回せなくなってきた合図 (15:26 の膠着では 6 分前から
+        // 36〜50ms が続いていた)。固まりきる前に一度きれいに切断して張り直す
+#if BLE_LAT_WATCH_ENABLE
+        {
+            static uint64_t lat_win_us = 0;
+            static uint8_t lat_high_windows = 0;
+            if (connected_now && !ctrl_reset_pending &&
+                (now_us - connected_since_us) > 30000000ULL) {
+                if (lat_win_us == 0) lat_win_us = now_us;
+                if ((now_us - lat_win_us) >= 10000000ULL) {
+                    uint32_t win_max = health_lat_win_max_ms;
+                    health_lat_win_max_ms = 0;
+                    lat_win_us = now_us;
+                    if (win_max >= BLE_LAT_HIGH_MS) {
+                        if (lat_high_windows < 0xFF) lat_high_windows++;
+                    } else {
+                        lat_high_windows = 0;
+                    }
+                    if (lat_high_windows >= BLE_LAT_HIGH_WINDOWS) {
+                        lat_high_windows = 0;
+                        remote_log_eventf("BT LAT-HIGH %ums x%u -> proactive reconnect",
+                                          (unsigned) win_max,
+                                          (unsigned) BLE_LAT_HIGH_WINDOWS);
+                        gap_disconnect(con_handle);
+                        return;
+                    }
+                }
+            } else {
+                lat_win_us = 0;
+                lat_high_windows = 0;
+            }
+        }
+#endif
 
         // 【2026-10-31】接続パラメータの再要求。ホスト (macOS) は既定の
         // (12, 4, 100) = 15ms / latency 4 / supervision timeout 1.0 秒 を押し付ける。

@@ -1125,6 +1125,18 @@ patch(WT + '/firmware/src/ble_hid.cc', [
      '        // 復帰直後 (60 秒) は撃たない。スリープ明けはリンクが不安定で、\n        // パラメータ更新要求の直後に rs=0x08 が続いた実測がある (2026-11-01 13:20)\n        if (connected_now && ble_conn_latency > 0 && param_req_count < 3 &&\n            (now_us - last_param_req_us) >= 30000000ULL &&\n            (last_resume_us == 0 || (now_us - last_resume_us) >= 60000000ULL)) {'),
 ])
 
+# --- 2026-11-03: lat 高止まり検知による自発再接続 ---
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ('static volatile uint32_t health_lat_max_ms = 0;',
+     'static volatile uint32_t health_lat_max_ms = 0;\n// 【2026-11-03】膠着の前兆検知用。remote_log は health_lat_max_ms を HB ごとに\n// リセットするため、こちらで 10 秒窓の最大値を別に持つ\nstatic volatile uint32_t health_lat_win_max_ms = 0;'),
+    ('                        if (d > health_lat_max_ms) health_lat_max_ms = d;',
+     '                        if (d > health_lat_max_ms) health_lat_max_ms = d;\n                        if (d > health_lat_win_max_ms) health_lat_win_max_ms = d;'),
+    ('static volatile uint64_t last_resume_us = 0;',
+     'static volatile uint64_t last_resume_us = 0;\n// 【2026-11-03】送信スロット待ちが高い状態は膠着の前兆 (15:26 の膠着では\n// 6 分前から 36〜50ms が続いていた)。30ms 以上が 60 秒続いたら、チップが\n// 固まる前に自分から切断して張り直す。0 にすると無効化できる\n#ifndef BLE_LAT_HIGH_MS\n#define BLE_LAT_HIGH_MS 30\n#endif\n#ifndef BLE_LAT_HIGH_WINDOWS\n#define BLE_LAT_HIGH_WINDOWS 6   // 10 秒窓 × 6 = 60 秒\n#endif\n#ifndef BLE_LAT_WATCH_ENABLE\n#define BLE_LAT_WATCH_ENABLE 1\n#endif'),
+    ('        // 【2026-10-31】接続パラメータの再要求。ホスト (macOS) は既定の',
+     '        // 【2026-11-03】lat 高止まりでの自発再接続。\n        // CAN_SEND_NOW 待ち (lat) が 30ms 以上で 60 秒続くのは、コントローラが\n        // 送信スロットを回せなくなってきた合図 (15:26 の膠着では 6 分前から\n        // 36〜50ms が続いていた)。固まりきる前に一度きれいに切断して張り直す\n#if BLE_LAT_WATCH_ENABLE\n        {\n            static uint64_t lat_win_us = 0;\n            static uint8_t lat_high_windows = 0;\n            if (connected_now && !ctrl_reset_pending &&\n                (now_us - connected_since_us) > 30000000ULL) {\n                if (lat_win_us == 0) lat_win_us = now_us;\n                if ((now_us - lat_win_us) >= 10000000ULL) {\n                    uint32_t win_max = health_lat_win_max_ms;\n                    health_lat_win_max_ms = 0;\n                    lat_win_us = now_us;\n                    if (win_max >= BLE_LAT_HIGH_MS) {\n                        if (lat_high_windows < 0xFF) lat_high_windows++;\n                    } else {\n                        lat_high_windows = 0;\n                    }\n                    if (lat_high_windows >= BLE_LAT_HIGH_WINDOWS) {\n                        lat_high_windows = 0;\n                        remote_log_eventf("BT LAT-HIGH %ums x%u -> proactive reconnect",\n                                          (unsigned) win_max,\n                                          (unsigned) BLE_LAT_HIGH_WINDOWS);\n                        gap_disconnect(con_handle);\n                        return;\n                    }\n                }\n            } else {\n                lat_win_us = 0;\n                lat_high_windows = 0;\n            }\n        }\n#endif\n\n        // 【2026-10-31】接続パラメータの再要求。ホスト (macOS) は既定の'),
+])
+
 # --- 生成物の自己検算 (2026-11-01 追加) -------------------------------------
 # 「パッチは当たったように見えるが実は欠けている」事故を防ぐ。
 # 実際に wake37 の health_acl_run++ が欠け、aclrun が常に 0 のまま
@@ -1136,6 +1148,7 @@ REQUIRED_MARKERS = [
     ('firmware/src/ble_hid.cc', 'BT ADV-VERIFY armed'),
     ('firmware/src/ble_hid.cc', 'BT CTRL-DEAD'),
     ('firmware/src/ble_hid.cc', 'last_resume_us'),
+    ('firmware/src/ble_hid.cc', 'BT LAT-HIGH'),
     ('firmware/src/remote_log.cc', 'USB DEV %s'),
     ('firmware/src/remote_log.cc', 'clat=%u st=%u'),
 ]
