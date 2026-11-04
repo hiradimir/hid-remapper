@@ -1743,6 +1743,12 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                 } else if (current_state != BLE_STATE_STANDBY_SILENT) {
                     schedule_slot_transition(current_slot, is_pairing_mode);
                 } else {
+                    // 【2026-11-04】未ボンド (ボンド消去直後など) は広告を出さない。
+                    // 以前は切断直後に予約した「200ms 後の広告有効化」がそのまま
+                    // 発火し、ボンドを消した直後に旧ホストが再接続して暗号化まで
+                    // 通っていた (「Slot Cleared なのにすぐ slot4 で繋がる」)。
+                    // 予約を取り消して静音を維持する
+                    adv_enable_pending = false;
                     adv_set(0);
                 }
             }

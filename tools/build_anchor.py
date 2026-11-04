@@ -1137,6 +1137,13 @@ patch(WT + '/firmware/src/ble_hid.cc', [
      '        // 【2026-11-03】lat 高止まりでの自発再接続。\n        // CAN_SEND_NOW 待ち (lat) が 30ms 以上で 60 秒続くのは、コントローラが\n        // 送信スロットを回せなくなってきた合図 (15:26 の膠着では 6 分前から\n        // 36〜50ms が続いていた)。固まりきる前に一度きれいに切断して張り直す\n#if BLE_LAT_WATCH_ENABLE\n        {\n            static uint64_t lat_win_us = 0;\n            static uint8_t lat_high_windows = 0;\n            if (connected_now && !ctrl_reset_pending &&\n                (now_us - connected_since_us) > 30000000ULL) {\n                if (lat_win_us == 0) lat_win_us = now_us;\n                if ((now_us - lat_win_us) >= 10000000ULL) {\n                    uint32_t win_max = health_lat_win_max_ms;\n                    health_lat_win_max_ms = 0;\n                    lat_win_us = now_us;\n                    if (win_max >= BLE_LAT_HIGH_MS) {\n                        if (lat_high_windows < 0xFF) lat_high_windows++;\n                    } else {\n                        lat_high_windows = 0;\n                    }\n                    if (lat_high_windows >= BLE_LAT_HIGH_WINDOWS) {\n                        lat_high_windows = 0;\n                        remote_log_eventf("BT LAT-HIGH %ums x%u -> proactive reconnect",\n                                          (unsigned) win_max,\n                                          (unsigned) BLE_LAT_HIGH_WINDOWS);\n                        gap_disconnect(con_handle);\n                        return;\n                    }\n                }\n            } else {\n                lat_win_us = 0;\n                lat_high_windows = 0;\n            }\n        }\n#endif\n\n        // 【2026-10-31】接続パラメータの再要求。ホスト (macOS) は既定の'),
 ])
 
+# --- 2026-11-04: ボンド消去後に予約済みの広告有効化を取り消す ---
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ('                } else if (current_state != BLE_STATE_STANDBY_SILENT) {\n                    schedule_slot_transition(current_slot, is_pairing_mode);\n                } else {\n                    adv_set(0);\n                }',
+     '                } else if (current_state != BLE_STATE_STANDBY_SILENT) {\n                    schedule_slot_transition(current_slot, is_pairing_mode);\n                } else {\n                    // 【2026-11-04】未ボンド (ボンド消去直後など) は広告を出さない。\n                    // 以前は切断直後に予約した「200ms 後の広告有効化」がそのまま\n                    // 発火し、ボンドを消した直後に旧ホストが再接続して暗号化まで\n                    // 通っていた (「Slot Cleared なのにすぐ slot4 で繋がる」)。\n                    // 予約を取り消して静音を維持する\n                    adv_enable_pending = false;\n                    adv_set(0);\n                }'),
+])
+
+
 # --- 生成物の自己検算 (2026-11-01 追加) -------------------------------------
 # 「パッチは当たったように見えるが実は欠けている」事故を防ぐ。
 # 実際に wake37 の health_acl_run++ が欠け、aclrun が常に 0 のまま
@@ -1149,6 +1156,7 @@ REQUIRED_MARKERS = [
     ('firmware/src/ble_hid.cc', 'BT CTRL-DEAD'),
     ('firmware/src/ble_hid.cc', 'last_resume_us'),
     ('firmware/src/ble_hid.cc', 'BT LAT-HIGH'),
+    ('firmware/src/ble_hid.cc', 'ボンド消去直後など'),
     ('firmware/src/remote_log.cc', 'USB DEV %s'),
     ('firmware/src/remote_log.cc', 'clat=%u st=%u'),
 ]
