@@ -1144,6 +1144,19 @@ patch(WT + '/firmware/src/ble_hid.cc', [
 ])
 
 
+# --- 2026-11-05: cp 停滞を膠着判定に使う / 再接続時に aclrun を戻す ---
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ('        static uint32_t cp_at_connect = 0;',
+     '        static uint32_t cp_at_connect = 0;\n        // 【2026-11-05】Completed Packets が最後に動いた時刻。0x57 のストームを\n        // 絞ると acl (0x57 回数) が伸びなくなり、acl 依存の膠着判定が飢えて\n        // 11 分間復旧しなかった。cp の停滞そのものを判定に使う\n        static uint32_t cp_last = 0;\n        static uint64_t cp_last_change_us = 0;'),
+    ('            cp_at_connect = health_cp_packets;\n        }\n        was_connected = connected_now;',
+     '            cp_at_connect = health_cp_packets;\n            cp_last = health_cp_packets;\n            cp_last_change_us = now_us;\n            // 再接続直後に前の接続の連続 0x57 を引きずらない\n            // (2026-11-05: 再接続 20ms 後に stale な aclrun=51 で誤って絞った)\n            health_acl_run = 0;\n        }\n        was_connected = connected_now;\n\n        if (health_cp_packets != cp_last) {\n            cp_last = health_cp_packets;\n            cp_last_change_us = now_us;\n        }'),
+    ('                    (credit_stall && health_cp_packets == cp_at_connect &&\n                     (now_us - connected_since_us) > 20000000ULL))) {',
+     '                    (credit_stall && (now_us - cp_last_change_us) > 20000000ULL))) {'),
+    ('            if (health_cp_packets == cp_at_connect) {\n                remote_log_eventf("BT NORESTORE cp frozen 20s acl=%u -> reload",\n                                  (unsigned) (health_acl_full - acl_at_last_ok));',
+     '            if ((now_us - cp_last_change_us) > 20000000ULL) {\n                remote_log_eventf("BT NORESTORE cp frozen %us acl=%u -> reload",\n                                  (unsigned) ((now_us - cp_last_change_us) / 1000000ULL),\n                                  (unsigned) (health_acl_full - acl_at_last_ok));'),
+])
+
+
 # --- 生成物の自己検算 (2026-11-01 追加) -------------------------------------
 # 「パッチは当たったように見えるが実は欠けている」事故を防ぐ。
 # 実際に wake37 の health_acl_run++ が欠け、aclrun が常に 0 のまま
@@ -1157,6 +1170,7 @@ REQUIRED_MARKERS = [
     ('firmware/src/ble_hid.cc', 'last_resume_us'),
     ('firmware/src/ble_hid.cc', 'BT LAT-HIGH'),
     ('firmware/src/ble_hid.cc', 'ボンド消去直後など'),
+    ('firmware/src/ble_hid.cc', 'cp_last_change_us'),
     ('firmware/src/remote_log.cc', 'USB DEV %s'),
     ('firmware/src/remote_log.cc', 'clat=%u st=%u'),
 ]

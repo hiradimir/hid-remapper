@@ -1883,6 +1883,11 @@ static void ble_hid_task_locked(void) {
         // 接続した瞬間の Completed Packets。ここから動かなければクレジットが
         // 返っていない = 壊れた再接続 (2026-10-31 00:42 実測)
         static uint32_t cp_at_connect = 0;
+        // 【2026-11-05】Completed Packets が最後に動いた時刻。0x57 のストームを
+        // 絞ると acl (0x57 回数) が伸びなくなり、acl 依存の膠着判定が飢えて
+        // 11 分間復旧しなかった。cp の停滞そのものを判定に使う
+        static uint32_t cp_last = 0;
+        static uint64_t cp_last_change_us = 0;
         // 接続した瞬間は判定の基準を取り直す。前回接続時の経過時間のままだと
         // 「接続直後に停止」と誤判定して再起動を連鎖させる (2026-10-24 朝に実測)
         bool connected_now = (current_state == BLE_STATE_CONNECTED);
@@ -1896,8 +1901,18 @@ static void ble_hid_task_locked(void) {
             param_req_count = 0;
             last_param_req_us = now_us;
             cp_at_connect = health_cp_packets;
+            cp_last = health_cp_packets;
+            cp_last_change_us = now_us;
+            // 再接続直後に前の接続の連続 0x57 を引きずらない
+            // (2026-11-05: 再接続 20ms 後に stale な aclrun=51 で誤って絞った)
+            health_acl_run = 0;
         }
         was_connected = connected_now;
+
+        if (health_cp_packets != cp_last) {
+            cp_last = health_cp_packets;
+            cp_last_change_us = now_us;
+        }
 
         // 【2026-10-31 00:42 実測】接続直後に 0x57 が連続し cp が凍結する
         // 「壊れた再接続」では CAN_SEND_NOW は届き続けるため、タイマー側の
@@ -1926,8 +1941,7 @@ static void ble_hid_task_locked(void) {
                     // 20 秒 = 壊れた再接続。0x57 を撒き続ける前にコントローラを
                     // 入れ直す (2026-10-31 00:42 は 120 秒待つ間に 1261 回撒いて
                     // コントローラが広告コマンドを受け付けなくなった)
-                    (credit_stall && health_cp_packets == cp_at_connect &&
-                     (now_us - connected_since_us) > 20000000ULL))) {
+                    (credit_stall && (now_us - cp_last_change_us) > 20000000ULL))) {
             // しきい値の変遷 (2026-10-29〜30 実測):
             //   3s/20  … Win→Mac 切替直後の初期バーストで誤爆した
             //   10s/40 … 眠っている Mac に接続した時の 0x57 詰まりでも発動した
@@ -1941,8 +1955,9 @@ static void ble_hid_task_locked(void) {
             // 「切断 → 通常の再広告」で復帰させる (コントローラは生かしたまま)
             cooldown_until_us = now_us + 60000000ULL; // 連鎖を防ぐ 60 秒クールダウン
             health_tx_stalled = true;                 // 以後 USB フォールバックに切り替える
-            if (health_cp_packets == cp_at_connect) {
-                remote_log_eventf("BT NORESTORE cp frozen 20s acl=%u -> btcore-reload",
+            if ((now_us - cp_last_change_us) > 20000000ULL) {
+                remote_log_eventf("BT NORESTORE cp frozen %us acl=%u -> btcore-reload",
+                                  (unsigned) ((now_us - cp_last_change_us) / 1000000ULL),
                                   (unsigned) (health_acl_full - acl_at_last_ok));
             } else {
                 remote_log_eventf("BT FLOWCTL-WEDGE ok_stall=%us acl=%u -> btcore-reload",
