@@ -1157,6 +1157,13 @@ patch(WT + '/firmware/src/ble_hid.cc', [
 ])
 
 
+# --- 2026-11-06: CAN_SEND_NOW 2 秒不通で自発切断 ---
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ('        // 【2026-10-31 変更】以前は 2 回連続 (4 秒) で gap_disconnect していたが、',
+     '        // 【2026-11-06】2 秒間 CAN_SEND_NOW が来ない = リンクが詰まり始めた最初の合図。\n        // 09:19 も 01:38 も 12:31 も、この「2 秒待ち」が最初の症状で、そこから\n        // 数十秒でクレジットが凍結し、チップが固まって再投入でも戻らなくなった。\n        // 固まる前に自分から切断 → 再広告すれば、0.5 秒程度で張り直せる見込み。\n        // 誤発動の連鎖を防ぐため 30 秒に 1 回まで\n#ifndef BLE_CANSEND_PROACT_ENABLE\n#define BLE_CANSEND_PROACT_ENABLE 1\n#endif\n#if BLE_CANSEND_PROACT_ENABLE\n        if (consecutive_can_send_timeouts == 1) {\n            static uint64_t last_proact_us = 0;\n            uint64_t now_p = time_us_64();\n            if ((now_p - last_proact_us) >= 30000000ULL) {\n                last_proact_us = now_p;\n                remote_log_eventf("BT CANSEND-PROACT 2s no grant -> disconnect");\n                gap_disconnect(con_handle);\n                return;\n            }\n        }\n#endif\n\n        // 【2026-10-31 変更】以前は 2 回連続 (4 秒) で gap_disconnect していたが、'),
+])
+
+
 # --- 生成物の自己検算 (2026-11-01 追加) -------------------------------------
 # 「パッチは当たったように見えるが実は欠けている」事故を防ぐ。
 # 実際に wake37 の health_acl_run++ が欠け、aclrun が常に 0 のまま
@@ -1171,6 +1178,7 @@ REQUIRED_MARKERS = [
     ('firmware/src/ble_hid.cc', 'BT LAT-HIGH'),
     ('firmware/src/ble_hid.cc', 'ボンド消去直後など'),
     ('firmware/src/ble_hid.cc', 'cp_last_change_us'),
+    ('firmware/src/ble_hid.cc', 'BT CANSEND-PROACT'),
     ('firmware/src/remote_log.cc', 'USB DEV %s'),
     ('firmware/src/remote_log.cc', 'clat=%u st=%u'),
 ]

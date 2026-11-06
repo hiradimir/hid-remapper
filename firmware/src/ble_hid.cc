@@ -469,6 +469,27 @@ static void can_send_timeout_handler(btstack_timer_source_t *ts) {
                consecutive_can_send_timeouts);
         remote_log_eventf("CANSEND-TO n=%d", consecutive_can_send_timeouts);
 
+        // 【2026-11-06】2 秒間 CAN_SEND_NOW が来ない = リンクが詰まり始めた最初の合図。
+        // 09:19 も 01:38 も 12:31 も、この「2 秒待ち」が最初の症状で、そこから
+        // 数十秒でクレジットが凍結し、チップが固まって再投入でも戻らなくなった。
+        // 固まる前に自分から切断 → 再広告すれば、0.5 秒程度で張り直せる見込み。
+        // 誤発動の連鎖を防ぐため 30 秒に 1 回まで
+#ifndef BLE_CANSEND_PROACT_ENABLE
+#define BLE_CANSEND_PROACT_ENABLE 1
+#endif
+#if BLE_CANSEND_PROACT_ENABLE
+        if (consecutive_can_send_timeouts == 1) {
+            static uint64_t last_proact_us = 0;
+            uint64_t now_p = time_us_64();
+            if ((now_p - last_proact_us) >= 30000000ULL) {
+                last_proact_us = now_p;
+                remote_log_eventf("BT CANSEND-PROACT 2s no grant -> disconnect");
+                gap_disconnect(con_handle);
+                return;
+            }
+        }
+#endif
+
         // 【2026-10-31 変更】以前は 2 回連続 (4 秒) で gap_disconnect していたが、
         // 膠着時は切断コマンド自体がチップに届かず、生きているリンクを壊すだけだった。
         // ホストのスリープ中も同じ症状になるため、切断はしない。
