@@ -9,6 +9,46 @@
 
 ---
 
+## 2026-11-07 `wake47`: 膠着の切り分け情報を追加 / `wake46` の初成功
+
+### `wake46` の成果（2026-11-07 21:48）
+
+```
+21:48:26  LATGAP ms=180
+21:48:28.431  CANSEND-TO n=1
+21:48:28.451  BT CANSEND-PROACT 2s no grant -> disconnect   ← 先に逃げた
+21:48:30.244  DISC rs=0x08                                  ← ホストは 1.8 秒後にタイムアウト
+21:48:32.642  CONNECTED                                     ← 4.2 秒で復帰
+```
+
+**電源再投入なしで自動復帰した初のケース**。以前は「膠着 → 数分無反応 → 抜き差し」
+だったのが 4 秒で戻る。当日の `CANSEND-TO` はこの 1 回のみ。
+
+### 追加した観測（挙動は変えない）
+
+`CANSEND-TO` の行に、その瞬間の状態を付けた:
+
+```
+CANSEND-TO n=1 hci_idle=12ms cp_idle=2041ms rlog_age=3800ms rssi=-42
+```
+
+| 項目 | 判定 |
+|---|---|
+| `hci_idle` が大きい | **チップ/ドライバが停止**（CYW43 内部・バス） |
+| `hci_idle` は小さいが `cp_idle` が大きい | **電波/相手が応答しない**（ホストが ACK を返さない） |
+| `rlog_age` が小さい | **Wi-Fi 共存**（UDP 送信と重なった） |
+
+`remote_log_tx_age_ms()` / `remote_log_last_rssi()` を新設（`ENABLE_REMOTE_LOG=OFF`
+時はインラインでダミー値を返す）。
+
+### `HAVE_ASSERT` は見送り
+
+参考プロジェクト（`picow_ble_hid_keyboard`）は `HAVE_ASSERT` を定義しているが、
+Pico では `assert()` → panic で停止し、**UART 未接続の現運用では何も残らない**。
+導入するなら UART (GP16/17) を繋いだ検証時。
+
+- ビルド: `firmware/artifacts/remapper_anchor_wake47.uf2`（11/7 22:00）
+
 ## 2026-11-06 `wake46`: CAN_SEND_NOW 2 秒不通で自発切断（膠着の入口で逃げる）
 
 **観測**: 11/6 01:38 と 09:19 で同じ形の膠着。どちらも **最初の症状が `CANSEND-TO`
