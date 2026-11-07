@@ -34,6 +34,8 @@ void remote_log_count_forward(void);
 // メインループ 1 周ごとに呼ぶ (ループ速度・最大停止時間の観測用)
 // ENABLE_REMOTE_LOG=0 では空インライン
 void remote_log_count_loop(void);
+uint32_t remote_log_tx_age_ms(void);
+int remote_log_last_rssi(void);
 
 #else
 // インラインスタブ (ENABLE_REMOTE_LOG=0 でもビルドが通る形を維持)
@@ -43,6 +45,8 @@ static inline void remote_log_eventf(const char *fmt, ...) { (void)fmt; }
 static inline void remote_log_count_ingest(void) {}
 static inline void remote_log_count_forward(void) {}
 static inline void remote_log_count_loop(void) {}
+static inline uint32_t remote_log_tx_age_ms(void) { return 0xFFFFFFFFu; }
+static inline int remote_log_last_rssi(void) { return -127; }
 #endif
 
 #endif // REMOTE_LOG_H

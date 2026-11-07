@@ -149,6 +149,10 @@ static volatile uint64_t rl_mirror_abs = 0; // UART ミラー用カーソル (RL
 static volatile uint32_t rl_drops = 0;      // Drop-Oldest による破棄行数
 static volatile uint32_t rl_datagrams = 0;  // UDP 送信成功数
 static volatile uint32_t rl_send_errors = 0;
+// 【2026-11-07】膠着時の切り分け用: 最後に UDP を送った時刻と最後の RSSI。
+// 「CANSEND が来ない瞬間に Wi-Fi 送信が重なっていたか」を見る
+static volatile uint64_t rl_last_tx_us = 0;
+static volatile int32_t rl_last_rssi = -127;
 static volatile uint32_t rl_seq = 0;      // 送信済みデータグラム通番 (送信成功ごとに +1)
 static volatile uint32_t reconnect_count = 0; // WIFI LOST 検出回数 (BADAUTH 頻度の指標)
 static int rl_last_err = 0; // 直近の udp_send エラーコード (err_t: -1=ERR_MEM -3=ERR_TIMEOUT -4=ERR_RTE)
@@ -326,6 +330,14 @@ void remote_log_count_ingest(void) {
     count_ingest++;
 }
 void remote_log_count_forward(void) { count_forward++; }
+
+// 【2026-11-07】膠着時の切り分け用 (CANSEND-TO の付加情報)
+uint32_t remote_log_tx_age_ms(void) {
+    if (rl_last_tx_us == 0) return 0xFFFFFFFFu;
+    return (uint32_t) ((time_us_64() - rl_last_tx_us) / 1000ULL);
+}
+
+int remote_log_last_rssi(void) { return (int) rl_last_rssi; }
 
 void remote_log_count_loop(void) {
     // ループ間隔の最大値を取る。ここが跳ねれば「ファームが止まった」ので、
@@ -524,6 +536,7 @@ static void udp_flush_pending(void) {
         err_t err = rl_udp_send_seq(inflight_seq, rchunk, rlen);
         if (err == ERR_OK) {
             rl_datagrams++;
+            rl_last_tx_us = time_us_64();
             inflight_sent_us = time_us_64();
             rtx_count++;
             return;
@@ -553,6 +566,7 @@ static void udp_flush_pending(void) {
     err_t err = rl_udp_send_seq(seq, chunk, clen);
     if (err == ERR_OK) {
         rl_datagrams++;
+        rl_last_tx_us = time_us_64();
         rl_seq = seq;
         if (RLOG_ACK_ENABLE && !ack_mode_off) {
             // stop-and-wait: ここではカーソルを前進させない。
@@ -1054,6 +1068,7 @@ void remote_log_task(void) {
         int dhcp_state = -1;
         int dhcp_tries = 0;
         int32_t rssi = -127; // STA 非稼働・読み取り失敗時のセンチネル
+        (void) 0;
         const char *ip_str = "0.0.0.0";
         static char ip_buf[16];
         cyw43_arch_lwip_begin();
@@ -1074,6 +1089,7 @@ void remote_log_task(void) {
         int32_t rssi_val = -127;
         if (cyw43_wifi_get_rssi(&cyw43_state, &rssi_val) == 0) {
             rssi = rssi_val;
+            rl_last_rssi = rssi_val;
         }
 
         remote_log_eventf(

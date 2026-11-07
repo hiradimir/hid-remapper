@@ -48,6 +48,8 @@ def main(argv):
         (b'CREDIT-STALL', 1, '0x57 監視の再設計 / ストーム検知'),
         (b'NORESTORE', 1, 'クレジット凍結の早期検知 (wake41)'),
         (b'BT LAT-HIGH', 1, 'lat 高止まりの自発再接続 (wake43)'),
+        (b'BT CANSEND-PROACT', 1, 'CANSEND 2 秒不通で自発切断 (wake46)'),
+        (b'hci_idle=%ums', 1, '膠着の切り分け情報 (wake47)'),
         (b'ADV-VERIFY', 1, '再投入後の広告検証 (wake41)'),
         (b'CTRL-DEAD', 1, '復旧不能の検出 (wake41)'),
         (b'USB DEV ', 1, 'USB configure 状態のログ (wake41)'),

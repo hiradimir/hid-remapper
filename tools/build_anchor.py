@@ -1164,6 +1164,39 @@ patch(WT + '/firmware/src/ble_hid.cc', [
 ])
 
 
+# --- 2026-11-07: 膠着の切り分け用の付加情報 (hci_idle/cp_idle/rlog_age/rssi) ---
+patch(WT + '/firmware/src/remote_log.cc', [
+    ('static volatile uint32_t rl_send_errors = 0;',
+     'static volatile uint32_t rl_send_errors = 0;\n// 【2026-11-07】膠着時の切り分け用: 最後に UDP を送った時刻と最後の RSSI。\n// 「CANSEND が来ない瞬間に Wi-Fi 送信が重なっていたか」を見る\nstatic volatile uint64_t rl_last_tx_us = 0;\nstatic volatile int32_t rl_last_rssi = -127;'),
+    ('        err_t err = rl_udp_send_seq(inflight_seq, rchunk, rlen);\n        if (err == ERR_OK) {\n            rl_datagrams++;\n            inflight_sent_us = time_us_64();',
+     '        err_t err = rl_udp_send_seq(inflight_seq, rchunk, rlen);\n        if (err == ERR_OK) {\n            rl_datagrams++;\n            rl_last_tx_us = time_us_64();\n            inflight_sent_us = time_us_64();'),
+    ('    err_t err = rl_udp_send_seq(seq, chunk, clen);\n    if (err == ERR_OK) {\n        rl_datagrams++;\n        rl_seq = seq;',
+     '    err_t err = rl_udp_send_seq(seq, chunk, clen);\n    if (err == ERR_OK) {\n        rl_datagrams++;\n        rl_last_tx_us = time_us_64();\n        rl_seq = seq;'),
+    ('        if (cyw43_wifi_get_rssi(&cyw43_state, &rssi_val) == 0) {\n            rssi = rssi_val;',
+     '        if (cyw43_wifi_get_rssi(&cyw43_state, &rssi_val) == 0) {\n            rssi = rssi_val;\n            rl_last_rssi = rssi_val;'),
+    ('void remote_log_count_forward(void) { count_forward++; }',
+     'void remote_log_count_forward(void) { count_forward++; }\n\n// 【2026-11-07】膠着時の切り分け用 (CANSEND-TO の付加情報)\nuint32_t remote_log_tx_age_ms(void) {\n    if (rl_last_tx_us == 0) return 0xFFFFFFFFu;\n    return (uint32_t) ((time_us_64() - rl_last_tx_us) / 1000ULL);\n}\n\nint remote_log_last_rssi(void) { return (int) rl_last_rssi; }'),
+])
+
+patch(WT + '/firmware/src/remote_log.h', [
+    ('void remote_log_count_loop(void);',
+     'void remote_log_count_loop(void);\nuint32_t remote_log_tx_age_ms(void);\nint remote_log_last_rssi(void);'),
+    ('static inline void remote_log_count_loop(void) {}',
+     'static inline void remote_log_count_loop(void) {}\nstatic inline uint32_t remote_log_tx_age_ms(void) { return 0xFFFFFFFFu; }\nstatic inline int remote_log_last_rssi(void) { return -127; }'),
+])
+
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ('static volatile uint32_t health_cp_events = 0;',
+     'static volatile uint32_t health_cp_events = 0;\n// 【2026-11-07】膠着の切り分け用。最後に HCI イベントを受けた時刻と、最後に\n// Completed Packets を受けた時刻。CANSEND が来ない瞬間のこの 2 つで\n// 「チップが止まった (hci_idle 大)」か「電波/相手が応答しない (cp_idle だけ大)」を分ける\nstatic volatile uint64_t health_last_hci_us = 0;\nstatic volatile uint64_t health_last_cp_us = 0;'),
+    ('            health_cp_events++;\n            health_cp_packets += total;',
+     '            health_cp_events++;\n            health_cp_packets += total;\n            health_last_cp_us = time_us_64();'),
+    ('static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size) {',
+     'static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size) {\n    // 【2026-11-07】HCI イベントが来ているか (チップ/ドライバ生存確認)\n    if (packet_type == HCI_EVENT_PACKET) health_last_hci_us = time_us_64();'),
+    ('        remote_log_eventf("CANSEND-TO n=%d", consecutive_can_send_timeouts);',
+     '        {\n            // 膠着の切り分け: チップは生きているか / Wi-Fi 送信と重なったか\n            uint64_t now_d = time_us_64();\n            uint32_t hci_idle = (health_last_hci_us != 0)\n                                    ? (uint32_t) ((now_d - health_last_hci_us) / 1000ULL)\n                                    : 0xFFFFFFFFu;\n            uint32_t cp_idle = (health_last_cp_us != 0)\n                                   ? (uint32_t) ((now_d - health_last_cp_us) / 1000ULL)\n                                   : 0xFFFFFFFFu;\n            remote_log_eventf("CANSEND-TO n=%d hci_idle=%ums cp_idle=%ums rlog_age=%ums rssi=%d",\n                              consecutive_can_send_timeouts, (unsigned) hci_idle,\n                              (unsigned) cp_idle, (unsigned) remote_log_tx_age_ms(),\n                              remote_log_last_rssi());\n        }'),
+])
+
+
 # --- 生成物の自己検算 (2026-11-01 追加) -------------------------------------
 # 「パッチは当たったように見えるが実は欠けている」事故を防ぐ。
 # 実際に wake37 の health_acl_run++ が欠け、aclrun が常に 0 のまま
@@ -1179,6 +1212,8 @@ REQUIRED_MARKERS = [
     ('firmware/src/ble_hid.cc', 'ボンド消去直後など'),
     ('firmware/src/ble_hid.cc', 'cp_last_change_us'),
     ('firmware/src/ble_hid.cc', 'BT CANSEND-PROACT'),
+    ('firmware/src/ble_hid.cc', 'hci_idle=%ums'),
+    ('firmware/src/remote_log.cc', 'remote_log_tx_age_ms'),
     ('firmware/src/remote_log.cc', 'USB DEV %s'),
     ('firmware/src/remote_log.cc', 'clat=%u st=%u'),
 ]

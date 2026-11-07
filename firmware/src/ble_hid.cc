@@ -313,6 +313,11 @@ void ble_hid_reset_dmax(void) { health_dmax = 0; }
 // コントローラが返した "Number Of Completed Packets" の回数と総数。
 // 0x57 膠着時にこれが止まっていれば「コントローラがクレジットを返していない」
 static volatile uint32_t health_cp_events = 0;
+// 【2026-11-07】膠着の切り分け用。最後に HCI イベントを受けた時刻と、最後に
+// Completed Packets を受けた時刻。CANSEND が来ない瞬間のこの 2 つで
+// 「チップが止まった (hci_idle 大)」か「電波/相手が応答しない (cp_idle だけ大)」を分ける
+static volatile uint64_t health_last_hci_us = 0;
+static volatile uint64_t health_last_cp_us = 0;
 static volatile uint32_t health_cp_packets = 0;   // 0x57 以外の送信エラー (ok が伸びない原因の切り分け)
 static volatile uint32_t health_disc = 0;
 static volatile uint8_t health_disc_reason = 0;
@@ -467,7 +472,20 @@ static void can_send_timeout_handler(btstack_timer_source_t *ts) {
         consecutive_can_send_timeouts++;
         printf("[BT] WARNING: CAN_SEND_NOW watchdog timed out (2000ms, count=%d). Resetting flow control.\r\n",
                consecutive_can_send_timeouts);
-        remote_log_eventf("CANSEND-TO n=%d", consecutive_can_send_timeouts);
+        {
+            // 膠着の切り分け: チップは生きているか / Wi-Fi 送信と重なったか
+            uint64_t now_d = time_us_64();
+            uint32_t hci_idle = (health_last_hci_us != 0)
+                                    ? (uint32_t) ((now_d - health_last_hci_us) / 1000ULL)
+                                    : 0xFFFFFFFFu;
+            uint32_t cp_idle = (health_last_cp_us != 0)
+                                   ? (uint32_t) ((now_d - health_last_cp_us) / 1000ULL)
+                                   : 0xFFFFFFFFu;
+            remote_log_eventf("CANSEND-TO n=%d hci_idle=%ums cp_idle=%ums rlog_age=%ums rssi=%d",
+                              consecutive_can_send_timeouts, (unsigned) hci_idle,
+                              (unsigned) cp_idle, (unsigned) remote_log_tx_age_ms(),
+                              remote_log_last_rssi());
+        }
 
         // 【2026-11-06】2 秒間 CAN_SEND_NOW が来ない = リンクが詰まり始めた最初の合図。
         // 09:19 も 01:38 も 12:31 も、この「2 秒待ち」が最初の症状で、そこから
@@ -1255,6 +1273,8 @@ static void ble_enter_pairing_mode_locked(int slot) {
     update_ui_for_state(current_state);
 }
 static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size) {
+    // 【2026-11-07】HCI イベントが来ているか (チップ/ドライバ生存確認)
+    if (packet_type == HCI_EVENT_PACKET) health_last_hci_us = time_us_64();
     if (packet_type != HCI_EVENT_PACKET) return;
 
     uint8_t event = hci_event_packet_get_type(packet);
@@ -1403,6 +1423,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             }
             health_cp_events++;
             health_cp_packets += total;
+            health_last_cp_us = time_us_64();
             break;
         }
 
