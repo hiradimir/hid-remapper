@@ -1197,6 +1197,13 @@ patch(WT + '/firmware/src/ble_hid.cc', [
 ])
 
 
+# --- 2026-11-07: 接続直後 2 秒で接続パラメータを再要求 ---
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ('            param_req_count = 0;\n            last_param_req_us = now_us;\n            cp_at_connect = health_cp_packets;',
+     '            param_req_count = 0;\n            // 【2026-11-07】接続直後はホスト既定 (st=1 秒) に戻っているので、\n            // 30 秒待たず **2 秒後** に 1 回目の再要求を出す。30 秒待つ間に\n            // 1 秒の監視窓で切れて再接続…を繰り返す「弱い状態のループ」に\n            // 入っていた (21:57 実測: 再接続 → 0.5〜2 秒で rs=0x08)\n            if (now_us > 28000000ULL) {\n                last_param_req_us = now_us - 28000000ULL;\n            } else {\n                last_param_req_us = 0;\n            }\n            cp_at_connect = health_cp_packets;'),
+])
+
+
 # --- 生成物の自己検算 (2026-11-01 追加) -------------------------------------
 # 「パッチは当たったように見えるが実は欠けている」事故を防ぐ。
 # 実際に wake37 の health_acl_run++ が欠け、aclrun が常に 0 のまま
@@ -1213,6 +1220,7 @@ REQUIRED_MARKERS = [
     ('firmware/src/ble_hid.cc', 'cp_last_change_us'),
     ('firmware/src/ble_hid.cc', 'BT CANSEND-PROACT'),
     ('firmware/src/ble_hid.cc', 'hci_idle=%ums'),
+    ('firmware/src/ble_hid.cc', 'now_us - 28000000ULL'),
     ('firmware/src/remote_log.cc', 'remote_log_tx_age_ms'),
     ('firmware/src/remote_log.cc', 'USB DEV %s'),
     ('firmware/src/remote_log.cc', 'clat=%u st=%u'),

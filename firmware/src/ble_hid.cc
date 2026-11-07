@@ -1941,7 +1941,15 @@ static void ble_hid_task_locked(void) {
             credit_stall = false;
             consecutive_can_send_timeouts = 0;
             param_req_count = 0;
-            last_param_req_us = now_us;
+            // 【2026-11-07】接続直後はホスト既定 (st=1 秒) に戻っているので、
+            // 30 秒待たず **2 秒後** に 1 回目の再要求を出す。30 秒待つ間に
+            // 1 秒の監視窓で切れて再接続…を繰り返す「弱い状態のループ」に
+            // 入っていた (21:57 実測: 再接続 → 0.5〜2 秒で rs=0x08)
+            if (now_us > 28000000ULL) {
+                last_param_req_us = now_us - 28000000ULL;
+            } else {
+                last_param_req_us = 0;
+            }
             cp_at_connect = health_cp_packets;
             cp_last = health_cp_packets;
             cp_last_change_us = now_us;
