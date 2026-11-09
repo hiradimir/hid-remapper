@@ -1204,6 +1204,13 @@ patch(WT + '/firmware/src/ble_hid.cc', [
 ])
 
 
+# --- 2026-11-09: CANSEND-TO で即 USB フォールバック ---
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ('            remote_log_eventf("CANSEND-TO n=%d hci_idle=%ums cp_idle=%ums rlog_age=%ums rssi=%d",\n                              consecutive_can_send_timeouts, (unsigned) hci_idle,\n                              (unsigned) cp_idle, (unsigned) remote_log_tx_age_ms(),\n                              remote_log_last_rssi());\n        }',
+     '            remote_log_eventf("CANSEND-TO n=%d hci_idle=%ums cp_idle=%ums rlog_age=%ums rssi=%d",\n                              consecutive_can_send_timeouts, (unsigned) hci_idle,\n                              (unsigned) cp_idle, (unsigned) remote_log_tx_age_ms(),\n                              remote_log_last_rssi());\n        }\n        // 【2026-11-09】送信要求が 2 秒通らない = アプリ状態が CONNECTED でも\n        // リンクは実質死んでいる。ここで tx_stalled を立てないと、転送先が\n        // BLE のまま固定されて USB フォールバックが動かず、OLED も\n        // 「繋がっている」表示のままになる (2026-11-09 23:02 実測)。\n        // 送信が 1 回でも成功すれば health_ok が進み、自動で解除される\n        health_tx_stalled = true;'),
+])
+
+
 # --- 生成物の自己検算 (2026-11-01 追加) -------------------------------------
 # 「パッチは当たったように見えるが実は欠けている」事故を防ぐ。
 # 実際に wake37 の health_acl_run++ が欠け、aclrun が常に 0 のまま

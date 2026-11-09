@@ -486,6 +486,12 @@ static void can_send_timeout_handler(btstack_timer_source_t *ts) {
                               (unsigned) cp_idle, (unsigned) remote_log_tx_age_ms(),
                               remote_log_last_rssi());
         }
+        // 【2026-11-09】送信要求が 2 秒通らない = アプリ状態が CONNECTED でも
+        // リンクは実質死んでいる。ここで tx_stalled を立てないと、転送先が
+        // BLE のまま固定されて USB フォールバックが動かず、OLED も
+        // 「繋がっている」表示のままになる (2026-11-09 23:02 実測)。
+        // 送信が 1 回でも成功すれば health_ok が進み、自動で解除される
+        health_tx_stalled = true;
 
         // 【2026-11-06】2 秒間 CAN_SEND_NOW が来ない = リンクが詰まり始めた最初の合図。
         // 09:19 も 01:38 も 12:31 も、この「2 秒待ち」が最初の症状で、そこから
