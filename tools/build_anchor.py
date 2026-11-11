@@ -1211,6 +1211,13 @@ patch(WT + '/firmware/src/ble_hid.cc', [
 ])
 
 
+# --- 2026-11-11: USB 未 configure の再アタッチを諦めない ---
+patch(WT + '/firmware/src/main.cc', [
+    ('            static uint64_t usb_retry_next_us = 0;\n            static uint64_t usb_reconnect_at_us = 0;\n            static int usb_retry_count = 0;\n            uint64_t now_usb = time_us_64();\n            if (tud_mounted()) {\n                usb_retry_count = 0;\n            } else if (usb_reconnect_at_us == 0 && usb_retry_count < 5 &&\n                       now_usb >= usb_retry_next_us) {\n                usb_retry_next_us = now_usb + 3000000ULL;\n                usb_retry_count++;\n                tud_disconnect();\n                usb_reconnect_at_us = now_usb + 100000ULL;\n                printf("[USB] not mounted -> re-attach (%d/5)\\r\\n", usb_retry_count);\n            }',
+     '            static uint64_t usb_retry_next_us = 0;\n            static uint64_t usb_reconnect_at_us = 0;\n            static int usb_retry_count = 0;\n            uint64_t now_usb = time_us_64();\n            // 【2026-11-11】起動直後はホストがまだ列挙中のことがあるので、\n            // 最初の再アタッチは 5 秒待つ\n            if (usb_retry_next_us == 0) {\n                usb_retry_next_us = now_usb + 5000000ULL;\n            }\n            if (tud_mounted()) {\n                usb_retry_count = 0;\n            } else if (usb_reconnect_at_us == 0 && now_usb >= usb_retry_next_us) {\n                // 速い再試行 5 回 → それでも駄目なら 60 秒間隔で**諦めずに**続ける。\n                // 以前は 5 回で打ち切っていたため、フラッシュ直後に macOS が\n                // configure に失敗すると挿し直すまで永久に USB が死んだままだった\n                // (2026-11-09 23:07〜11-11 21:46 の 2 日間、u=0/0 のまま)\n                if (usb_retry_count < 5) {\n                    usb_retry_next_us = now_usb + 3000000ULL;\n                } else {\n                    usb_retry_next_us = now_usb + 60000000ULL;\n                }\n                usb_retry_count++;\n                tud_disconnect();\n                usb_reconnect_at_us = now_usb + 100000ULL;\n                printf("[USB] not mounted -> re-attach (%d)\\r\\n", usb_retry_count);\n                remote_log_eventf("USB DEV re-attach n=%d", usb_retry_count);\n            }'),
+])
+
+
 # --- 生成物の自己検算 (2026-11-01 追加) -------------------------------------
 # 「パッチは当たったように見えるが実は欠けている」事故を防ぐ。
 # 実際に wake37 の health_acl_run++ が欠け、aclrun が常に 0 のまま
@@ -1229,6 +1236,7 @@ REQUIRED_MARKERS = [
     ('firmware/src/ble_hid.cc', 'hci_idle=%ums'),
     ('firmware/src/ble_hid.cc', 'now_us - 28000000ULL'),
     ('firmware/src/remote_log.cc', 'remote_log_tx_age_ms'),
+    ('firmware/src/main.cc', 'USB DEV re-attach'),
     ('firmware/src/remote_log.cc', 'USB DEV %s'),
     ('firmware/src/remote_log.cc', 'clat=%u st=%u'),
 ]

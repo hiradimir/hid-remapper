@@ -415,15 +415,28 @@ int main() {
             static uint64_t usb_reconnect_at_us = 0;
             static int usb_retry_count = 0;
             uint64_t now_usb = time_us_64();
+            // 【2026-11-11】起動直後はホストがまだ列挙中のことがあるので、
+            // 最初の再アタッチは 5 秒待つ
+            if (usb_retry_next_us == 0) {
+                usb_retry_next_us = now_usb + 5000000ULL;
+            }
             if (tud_mounted()) {
                 usb_retry_count = 0;
-            } else if (usb_reconnect_at_us == 0 && usb_retry_count < 5 &&
-                       now_usb >= usb_retry_next_us) {
-                usb_retry_next_us = now_usb + 3000000ULL;
+            } else if (usb_reconnect_at_us == 0 && now_usb >= usb_retry_next_us) {
+                // 速い再試行 5 回 → それでも駄目なら 60 秒間隔で**諦めずに**続ける。
+                // 以前は 5 回で打ち切っていたため、フラッシュ直後に macOS が
+                // configure に失敗すると挿し直すまで永久に USB が死んだままだった
+                // (2026-11-09 23:07〜11-11 21:46 の 2 日間、u=0/0 のまま)
+                if (usb_retry_count < 5) {
+                    usb_retry_next_us = now_usb + 3000000ULL;
+                } else {
+                    usb_retry_next_us = now_usb + 60000000ULL;
+                }
                 usb_retry_count++;
                 tud_disconnect();
                 usb_reconnect_at_us = now_usb + 100000ULL;
-                printf("[USB] not mounted -> re-attach (%d/5)\r\n", usb_retry_count);
+                printf("[USB] not mounted -> re-attach (%d)\r\n", usb_retry_count);
+                remote_log_eventf("USB DEV re-attach n=%d", usb_retry_count);
             }
             if (usb_reconnect_at_us != 0 && now_usb >= usb_reconnect_at_us) {
                 usb_reconnect_at_us = 0;
