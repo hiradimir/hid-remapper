@@ -544,6 +544,9 @@ static void can_send_timeout_handler(btstack_timer_source_t *ts) {
             if ((now_p - last_proact_us) >= 30000000ULL) {
                 last_proact_us = now_p;
                 remote_log_eventf("BT CANSEND-PROACT 2s no grant -> disconnect");
+                // 【2026-11-13】切断要求を出した = 以降は広告が立ち上がるはず。
+                // 切断完了イベントが来ない場合はここから 3 秒で検出する
+                adv_pending_since_us = time_us_64();
                 gap_disconnect(con_handle);
                 return;
             }
@@ -1777,6 +1780,8 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             if (!(switch_pending && pending_toggle_off)) {
                 adv_enable_pending = true;
                 adv_enable_at_us = time_us_64() + 200000ULL;
+                // 【2026-11-13】切断完了 → 広告が立ち上がるまでの監視を開始
+                adv_pending_since_us = time_us_64();
             }
             uint8_t reason = hci_event_disconnection_complete_get_reason(packet);
             printf("[BT] Disconnected (reason=0x%02X)\r\n", reason);
@@ -1946,10 +1951,11 @@ static void ble_hid_task_locked(void) {
     // だけで行う（跨いだ状態は保存しない）
     {
         uint64_t now_d = time_us_64();
-        // 【2026-11-12】接続中は広告しないので、ADV-EN が返らないのは正常。
-        // 未接続のときだけ監視する（接続直後の Command Disallowed で誤検出しないため）
+        // 【2026-11-13】「切断要求を出した後は広告が立ち上がるはず」という期待で
+        // タイマを張る。切断完了イベント自体が来ない（＝チップが固まった）ケースも
+        // 捕まえたいので、未接続かどうかでは判定しない。
+        // 接続が成立すればその時点でクリアされるので、正常な競合では発動しない
         if (!ble_dead_declared && adv_pending_since_us != 0 &&
-            con_handle == HCI_CON_HANDLE_INVALID &&
             (now_d - adv_pending_since_us) > (BLE_DEAD_ADV_TIMEOUT_MS * 1000ULL)) {
             if (adv_fail_count < BLE_DEAD_ADV_RETRIES) {
                 adv_fail_count++;

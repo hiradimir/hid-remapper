@@ -1312,6 +1312,17 @@ patch(WT + '/firmware/src/ble_hid.cc', [
 ])
 
 
+# --- 2026-11-13: 切断完了が来ない膠着も検出する ---
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ('        // 【2026-11-12】接続中は広告しないので、ADV-EN が返らないのは正常。\n        // 未接続のときだけ監視する（接続直後の Command Disallowed で誤検出しないため）\n        if (!ble_dead_declared && adv_pending_since_us != 0 &&\n            con_handle == HCI_CON_HANDLE_INVALID &&\n            (now_d - adv_pending_since_us) > (BLE_DEAD_ADV_TIMEOUT_MS * 1000ULL)) {',
+     '        // 【2026-11-13】「切断要求を出した後は広告が立ち上がるはず」という期待で\n        // タイマを張る。切断完了イベント自体が来ない（＝チップが固まった）ケースも\n        // 捕まえたいので、未接続かどうかでは判定しない。\n        // 接続が成立すればその時点でクリアされるので、正常な競合では発動しない\n        if (!ble_dead_declared && adv_pending_since_us != 0 &&\n            (now_d - adv_pending_since_us) > (BLE_DEAD_ADV_TIMEOUT_MS * 1000ULL)) {'),
+    ('                remote_log_eventf("BT CANSEND-PROACT 2s no grant -> disconnect");',
+     '                remote_log_eventf("BT CANSEND-PROACT 2s no grant -> disconnect");\n                // 【2026-11-13】切断要求を出した = 以降は広告が立ち上がるはず。\n                // 切断完了イベントが来ない場合はここから 3 秒で検出する\n                adv_pending_since_us = time_us_64();'),
+    ('            if (!(switch_pending && pending_toggle_off)) {\n                adv_enable_pending = true;\n                adv_enable_at_us = time_us_64() + 200000ULL;\n            }',
+     '            if (!(switch_pending && pending_toggle_off)) {\n                adv_enable_pending = true;\n                adv_enable_at_us = time_us_64() + 200000ULL;\n                // 【2026-11-13】切断完了 → 広告が立ち上がるまでの監視を開始\n                adv_pending_since_us = time_us_64();\n            }'),
+])
+
+
 # --- 生成物の自己検算 (2026-11-01 追加) -------------------------------------
 # 「パッチは当たったように見えるが実は欠けている」事故を防ぐ。
 # 実際に wake37 の health_acl_run++ が欠け、aclrun が常に 0 のまま
