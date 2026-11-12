@@ -9,6 +9,44 @@
 
 ---
 
+## 2026-11-12 `wake54`: LAT-HIGH（自発再接続）を無効化
+
+**理由**: `wake43` で入れた `LAT-HIGH`（lat 30ms 以上が 60 秒続いたら自発切断）が
+**1 日 8 回**発動していた。しかも 14:08 のケースでは
+
+```
+14:08:49  LAT-HIGH 36ms x6 -> proactive reconnect   ← 自分から切った
+14:08:50  CONNECTED（0.3 秒で再接続）
+14:08:52  CANSEND-TO hci_idle=2008ms -> PROACT     ← 2.5 秒後にはもう詰まった
+```
+
+**逃げた先も死んでいた**。3 件の本物の詰まり（14:08 / 15:18 / 16:12）を
+LAT-HIGH は 1 件も防げておらず、切断チャーンだけを増やしていた。
+ルディの体感「ちょいちょい不安定」の一因。
+
+**対応**: `-DBLE_LAT_WATCH_DISABLE=ON` で `BLE_LAT_WATCH_ENABLE=0` にし、
+LAT-HIGH のブロックごとコンパイルアウト。`PROACT`（2 秒不通で切断）は残す。
+
+### 同日の観測（①②③ の否定）
+
+```
+14:08  CANSEND-TO hci_idle=2008ms cp_idle=2090ms rlog_age=184ms rssi=-46 conn=8  heap=63732 temp=35
+15:18  CANSEND-TO hci_idle=2009ms cp_idle=2080ms rlog_age=76ms  rssi=-55 conn=6  heap=63612 temp=36
+16:12  CANSEND-TO hci_idle=2009ms cp_idle=2083ms rlog_age=830ms rssi=-47 conn=3  heap=63572 temp=35
+```
+
+- `conn` が 3 / 6 / 8 とバラバラ → **① 接続サイクル説は否定**
+- `heap` は起動時 63540 から 6 時間で +192 バイト → **② リーク説も否定**
+- `temp` 35℃ で安定 → **③ 熱説は否定**（密閉筐体でも問題なし）
+- `rssi` は -46 でも発生 → **電波も主因ではない**（iPad を置いても R荒れは変わらず）
+
+残るのは **CYW43 内部の BT 側の状態**のみ。次の一手は `cyw43_deinit()` +
+`cyw43_arch_init()` によるチップ丸ごと再初期化。
+
+- ビルド: `firmware/artifacts/remapper_anchor_wake54_nolat.uf2`（11/12 16:40）
+  - 基準は `wake52_noflow` と同じ（アンカー + BL-43 設定 OFF）
+  - `BUILD VARIANT lat_watch=off` で判別
+
 ## 2026-11-12 `wake53`: ソークの基準をアンカーから HEAD に移す（BL-45 の修正を取り込む）
 
 **症状**: `wake52_noflow` で slot2 に切り替えたら**広告が出ず接続できない**。
