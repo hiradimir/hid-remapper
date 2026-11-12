@@ -318,6 +318,8 @@ static volatile uint32_t health_cp_events = 0;
 // 「チップが止まった (hci_idle 大)」か「電波/相手が応答しない (cp_idle だけ大)」を分ける
 static volatile uint64_t health_last_hci_us = 0;
 static volatile uint64_t health_last_cp_us = 0;
+// 【2026-11-12】起動後の接続成立回数 (寿命仮説①の判定用)
+static volatile uint32_t health_conn_count = 0;
 static volatile uint32_t health_cp_packets = 0;   // 0x57 以外の送信エラー (ok が伸びない原因の切り分け)
 static volatile uint32_t health_disc = 0;
 static volatile uint8_t health_disc_reason = 0;
@@ -337,6 +339,7 @@ void ble_hid_get_health(ble_hid_health_t* out) {
     out->st = ble_conn_timeout;
     out->cu = conn_update_count;
     out->acl_run = health_acl_run;
+    out->conn_count = health_conn_count;
     out->lat_max_ms = health_lat_max_ms;
     out->dmax = health_dmax;
     out->disc = health_disc;
@@ -481,10 +484,11 @@ static void can_send_timeout_handler(btstack_timer_source_t *ts) {
             uint32_t cp_idle = (health_last_cp_us != 0)
                                    ? (uint32_t) ((now_d - health_last_cp_us) / 1000ULL)
                                    : 0xFFFFFFFFu;
-            remote_log_eventf("CANSEND-TO n=%d hci_idle=%ums cp_idle=%ums rlog_age=%ums rssi=%d",
+            remote_log_eventf("CANSEND-TO n=%d hci_idle=%ums cp_idle=%ums rlog_age=%ums rssi=%d conn=%u heap=%u temp=%d",
                               consecutive_can_send_timeouts, (unsigned) hci_idle,
                               (unsigned) cp_idle, (unsigned) remote_log_tx_age_ms(),
-                              remote_log_last_rssi());
+                              remote_log_last_rssi(), (unsigned) health_conn_count,
+                              (unsigned) remote_log_heap_used(), remote_log_chip_temp_c());
         }
         // 【2026-11-09】送信要求が 2 秒通らない = アプリ状態が CONNECTED でも
         // リンクは実質死んでいる。ここで tx_stalled を立てないと、転送先が
@@ -1962,6 +1966,7 @@ static void ble_hid_task_locked(void) {
             // 再接続直後に前の接続の連続 0x57 を引きずらない
             // (2026-11-05: 再接続 20ms 後に stale な aclrun=51 で誤って絞った)
             health_acl_run = 0;
+            health_conn_count++;
         }
         was_connected = connected_now;
 

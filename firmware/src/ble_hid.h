@@ -45,6 +45,8 @@ typedef struct {
     uint16_t st;         // supervision timeout (10ms 単位)
     uint32_t cu;         // Connection Update Complete の受信回数 (再要求のフラップ検出)
     uint32_t acl_run;    // 連続 0x57 の回数 (成功で 0 に戻る)
+    // 【2026-11-12】起動後の接続成立回数。「N 回で死ぬ」仮説の判定用
+    uint32_t conn_count;
     uint64_t last_ok_us; // 最後に受理された通知の時刻 (0 = まだ)
 } ble_hid_health_t;
 

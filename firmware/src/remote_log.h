@@ -36,6 +36,8 @@ void remote_log_count_forward(void);
 void remote_log_count_loop(void);
 uint32_t remote_log_tx_age_ms(void);
 int remote_log_last_rssi(void);
+uint32_t remote_log_heap_used(void);
+int remote_log_chip_temp_c(void);
 
 #else
 // インラインスタブ (ENABLE_REMOTE_LOG=0 でもビルドが通る形を維持)
@@ -47,6 +49,8 @@ static inline void remote_log_count_forward(void) {}
 static inline void remote_log_count_loop(void) {}
 static inline uint32_t remote_log_tx_age_ms(void) { return 0xFFFFFFFFu; }
 static inline int remote_log_last_rssi(void) { return -127; }
+static inline uint32_t remote_log_heap_used(void) { return 0; }
+static inline int remote_log_chip_temp_c(void) { return 0; }
 #endif
 
 #endif // REMOTE_LOG_H

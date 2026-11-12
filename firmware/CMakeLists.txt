@@ -135,6 +135,8 @@ if(ENABLE_BLE)
         hardware_flash
         pico_btstack_flash_bank
         pico_multicore
+        # 【2026-11-12】RP2040 内蔵温度センサの読み出し (寿命仮説の切り分け)
+        hardware_adc
     )
 
     if(ENABLE_REMOTE_LOG)

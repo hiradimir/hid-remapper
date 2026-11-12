@@ -1218,6 +1218,45 @@ patch(WT + '/firmware/src/main.cc', [
 ])
 
 
+# --- 2026-11-12: 寿命仮説の切り分け (conn/heap/temp) ---
+patch(WT + '/firmware/src/remote_log.cc', [
+    ('int remote_log_last_rssi(void) { return (int) rl_last_rssi; }',
+     'int remote_log_last_rssi(void) { return (int) rl_last_rssi; }\n\n// 【2026-11-12】寿命仮説の切り分け用。ヒープ使用量 (newlib の malloc 統計)\n#include <malloc.h>\nuint32_t remote_log_heap_used(void) {\n    struct mallinfo mi = mallinfo();\n    return (uint32_t) mi.uordblks;\n}\n\n// 【2026-11-12】RP2040 内蔵温度センサ (ADC4)。熱で無線部が劣化する仮説の判定用。\n// 15 秒に 1 回しか呼ばないので、初回だけ ADC を初期化する\n#include "hardware/adc.h"\nint remote_log_chip_temp_c(void) {\n    static bool adc_ready = false;\n    if (!adc_ready) {\n        adc_init();\n        adc_set_temp_sensor_enabled(true);\n        adc_ready = true;\n    }\n    adc_select_input(4);\n    uint16_t raw = adc_read();\n    float v = (float) raw * 3.3f / 4096.0f;\n    float t = 27.0f - (v - 0.706f) / 0.001721f;\n    return (int) (t + (t >= 0.0f ? 0.5f : -0.5f));\n}'),
+    ('sus=%u clat=%u st=%u cu=%u aclrun=%u cpd=%u",',
+     'sus=%u clat=%u st=%u cu=%u aclrun=%u cpd=%u conn=%u heap=%u temp=%d",'),
+    ('                              (unsigned) h.acl_run, (unsigned) cp_packets_delta);',
+     '                              (unsigned) h.acl_run, (unsigned) cp_packets_delta,\n                              // 【2026-11-12】寿命仮説の切り分け\n                              (unsigned) h.conn_count, (unsigned) remote_log_heap_used(),\n                              remote_log_chip_temp_c());'),
+])
+
+patch(WT + '/firmware/src/remote_log.h', [
+    ('int remote_log_last_rssi(void);',
+     'int remote_log_last_rssi(void);\nuint32_t remote_log_heap_used(void);\nint remote_log_chip_temp_c(void);'),
+    ('static inline int remote_log_last_rssi(void) { return -127; }',
+     'static inline int remote_log_last_rssi(void) { return -127; }\nstatic inline uint32_t remote_log_heap_used(void) { return 0; }\nstatic inline int remote_log_chip_temp_c(void) { return 0; }'),
+])
+
+patch(WT + '/firmware/src/ble_hid.h', [
+    ('    uint32_t acl_run;    // 連続 0x57 の回数 (成功で 0 に戻る)',
+     '    uint32_t acl_run;    // 連続 0x57 の回数 (成功で 0 に戻る)\n    // 【2026-11-12】起動後の接続成立回数。「N 回で死ぬ」仮説の判定用\n    uint32_t conn_count;'),
+])
+
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ('static volatile uint64_t health_last_cp_us = 0;',
+     'static volatile uint64_t health_last_cp_us = 0;\n// 【2026-11-12】起動後の接続成立回数 (寿命仮説①の判定用)\nstatic volatile uint32_t health_conn_count = 0;'),
+    ('    out->acl_run = health_acl_run;',
+     '    out->acl_run = health_acl_run;\n    out->conn_count = health_conn_count;'),
+    ('            health_acl_run = 0;\n        }\n        was_connected = connected_now;',
+     '            health_acl_run = 0;\n            health_conn_count++;\n        }\n        was_connected = connected_now;'),
+    ('            remote_log_eventf("CANSEND-TO n=%d hci_idle=%ums cp_idle=%ums rlog_age=%ums rssi=%d",\n                              consecutive_can_send_timeouts, (unsigned) hci_idle,\n                              (unsigned) cp_idle, (unsigned) remote_log_tx_age_ms(),\n                              remote_log_last_rssi());',
+     '            remote_log_eventf("CANSEND-TO n=%d hci_idle=%ums cp_idle=%ums rlog_age=%ums rssi=%d conn=%u heap=%u temp=%d",\n                              consecutive_can_send_timeouts, (unsigned) hci_idle,\n                              (unsigned) cp_idle, (unsigned) remote_log_tx_age_ms(),\n                              remote_log_last_rssi(), (unsigned) health_conn_count,\n                              (unsigned) remote_log_heap_used(), remote_log_chip_temp_c());'),
+])
+
+patch(WT + '/firmware/CMakeLists.txt', [
+    ('    target_link_libraries(remapper\n        pico_btstack_ble\n        pico_btstack_cyw43\n        hardware_flash\n        pico_btstack_flash_bank\n        pico_multicore\n    )',
+     '    target_link_libraries(remapper\n        pico_btstack_ble\n        pico_btstack_cyw43\n        hardware_flash\n        pico_btstack_flash_bank\n        pico_multicore\n        # 【2026-11-12】RP2040 内蔵温度センサの読み出し (寿命仮説の切り分け)\n        hardware_adc\n    )'),
+])
+
+
 # --- 生成物の自己検算 (2026-11-01 追加) -------------------------------------
 # 「パッチは当たったように見えるが実は欠けている」事故を防ぐ。
 # 実際に wake37 の health_acl_run++ が欠け、aclrun が常に 0 のまま
@@ -1237,6 +1276,8 @@ REQUIRED_MARKERS = [
     ('firmware/src/ble_hid.cc', 'now_us - 28000000ULL'),
     ('firmware/src/remote_log.cc', 'remote_log_tx_age_ms'),
     ('firmware/src/main.cc', 'USB DEV re-attach'),
+    ('firmware/src/remote_log.cc', 'remote_log_heap_used'),
+    ('firmware/src/ble_hid.cc', 'health_conn_count'),
     ('firmware/src/remote_log.cc', 'USB DEV %s'),
     ('firmware/src/remote_log.cc', 'clat=%u st=%u'),
 ]
