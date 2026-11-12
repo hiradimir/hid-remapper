@@ -7,6 +7,7 @@
 #include "pico/cyw43_arch.h"
 #include "pico/async_context.h"
 #include "pico/unique_id.h"
+#include "hardware/watchdog.h"
 #include "btstack.h"
 #include "btstack_config.h"
 #include "ble/le_device_db.h"
@@ -261,6 +262,31 @@ static uint64_t dormant_last_try_us = 0;
 static volatile bool adv_enable_pending = false;
 static uint64_t adv_enable_at_us = 0;
 
+// 【2026-11-12】広告が出たかどうかの監視。
+// チップが固まると LE Set Advertise Enable の完了通知が返らなくなり、
+// 広告が出ないまま「切断中」で居座る (2026-10-31 / 11-09 / 11-12 の共通症状)。
+// ADV-EN が返らなければコントローラが HCI を受け付けていない = 復旧不能と判断する
+#ifndef BLE_DEAD_DETECT_ENABLE
+#define BLE_DEAD_DETECT_ENABLE 1
+#endif
+#ifndef BLE_DEAD_ADV_TIMEOUT_MS
+#define BLE_DEAD_ADV_TIMEOUT_MS 3000
+#endif
+#ifndef BLE_DEAD_ADV_RETRIES
+#define BLE_DEAD_ADV_RETRIES 3
+#endif
+// 自動再起動を許す最低稼働時間。起動直後の連鎖再起動を防ぐ
+#ifndef BLE_AUTO_REBOOT_MIN_UPTIME_S
+#define BLE_AUTO_REBOOT_MIN_UPTIME_S 3600
+#endif
+static volatile uint64_t adv_pending_since_us = 0;
+static uint8_t adv_fail_count = 0;
+static bool ble_dead_declared = false;
+static bool ble_dead_snapshot_done = false;
+static uint64_t ble_dead_since_us = 0;
+static uint64_t ble_reboot_at_us = 0;
+static uint64_t ble_dead_wait_log_us = 0;
+
 static volatile int adv_enable_req = 0;
 static volatile bool adv_enabled_ok = false;
 // コントローラが広告有効化を**拒否した**ときだけ立てる (成功時の取りこぼしで
@@ -277,6 +303,12 @@ static uint64_t adv_retry_next_us = 0;
 
 static void adv_set(int enable) {
     adv_enable_req = enable;
+    // 【2026-11-12】enable 要求から ADV-EN 完了までの経過を測る
+    if (enable) {
+        adv_pending_since_us = time_us_64();
+    } else {
+        adv_pending_since_us = 0;
+    }
     gap_advertisements_enable(enable);
 }
 
@@ -1446,6 +1478,14 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                 if (st != 0 && adv_enable_req != 0) {
                     adv_retry_pending = true; // 拒否されたときだけ張り直す
                 }
+                if (st == 0) {
+                    // 広告が出た → 監視を解除（チップは生きている）
+                    adv_pending_since_us = 0;
+                    adv_fail_count = 0;
+                    ble_dead_declared = false;
+                    ble_dead_snapshot_done = false;
+                    ble_reboot_at_us = 0;
+                }
                 remote_log_eventf("ADV-EN status=0x%02X en=%d slot=%d pair=%d st=%d",
                                   st, adv_enable_req, current_slot + 1, is_pairing_mode,
                                   (int) current_state);
@@ -1898,6 +1938,67 @@ static void ble_hid_task_locked(void) {
         adv_enable_pending = false;
         adv_set(1);
     }
+
+#if BLE_DEAD_DETECT_ENABLE
+    // 【2026-11-12】広告が出ないまま居座る状態（＝チップが HCI を受け付けない）を検出し、
+    // 状況を記録したうえで、条件を満たせば自動で再起動する。
+    // 再起動のループ防止は「起動後 BLE_AUTO_REBOOT_MIN_UPTIME_S 秒は再起動しない」
+    // だけで行う（跨いだ状態は保存しない）
+    {
+        uint64_t now_d = time_us_64();
+        if (!ble_dead_declared && adv_pending_since_us != 0 &&
+            (now_d - adv_pending_since_us) > (BLE_DEAD_ADV_TIMEOUT_MS * 1000ULL)) {
+            if (adv_fail_count < BLE_DEAD_ADV_RETRIES) {
+                adv_fail_count++;
+                adv_pending_since_us = now_d;
+                gap_advertisements_enable(0);
+                adv_set(1);
+                remote_log_eventf("BT ADV-NOACK retry=%u", (unsigned) adv_fail_count);
+            } else {
+                ble_dead_declared = true;
+                ble_dead_since_us = now_d;
+                adv_pending_since_us = 0;
+            }
+        }
+
+        if (ble_dead_declared) {
+            if (!ble_dead_snapshot_done) {
+                ble_dead_snapshot_done = true;
+                ble_dead_wait_log_us = now_d;
+                remote_log_eventf(
+                    "BT DEAD-SNAP up=%us conn=%u heap=%u temp=%d rssi=%d slot=%d bonded=%d "
+                    "ok=%u cp=%u disc=%u rs=0x%02X acl=%u blk=%u adv_ok=%d",
+                    (unsigned) (now_d / 1000000ULL), (unsigned) health_conn_count,
+                    (unsigned) remote_log_heap_used(), remote_log_chip_temp_c(),
+                    remote_log_last_rssi(), current_slot + 1,
+                    is_slot_bonded(current_slot) ? 1 : 0, (unsigned) health_ok,
+                    (unsigned) health_cp_packets, (unsigned) health_disc,
+                    (unsigned) health_disc_reason, (unsigned) health_acl_full,
+                    (unsigned) health_blocked, adv_enabled_ok ? 1 : 0);
+                // 以後 USB で運用しつつ、再起動の可否を待つ
+                health_tx_stalled = true;
+            }
+            if ((now_d / 1000000ULL) >= (uint64_t) BLE_AUTO_REBOOT_MIN_UPTIME_S) {
+                if (ble_reboot_at_us == 0) {
+                    ble_reboot_at_us = now_d + 500000ULL; // ログ送信の猶予
+                    remote_log_eventf("BT AUTO-REBOOT adv_stuck up=%us",
+                                      (unsigned) (now_d / 1000000ULL));
+                } else if (now_d >= ble_reboot_at_us) {
+                    printf("[BT] auto reboot (advertising stuck, uptime=%us)\r\n",
+                           (unsigned) (now_d / 1000000ULL));
+                    watchdog_reboot(0, 0, 100);
+                    while (true) tight_loop_contents();
+                }
+            } else if ((now_d - ble_dead_wait_log_us) >= 300000000ULL) {
+                // まだ再起動できない: 5 分ごとに生存を残す (USB 運用中)
+                ble_dead_wait_log_us = now_d;
+                remote_log_eventf("BT DEAD-WAIT up=%us (reboot at %us)",
+                                  (unsigned) (now_d / 1000000ULL),
+                                  (unsigned) BLE_AUTO_REBOOT_MIN_UPTIME_S);
+            }
+        }
+    }
+#endif
 
     // コントローラ再投入後に「広告が本当に出たか」を確認する。
     // ADV-EN の完了通知が返らないまま WORKING 到達 = 復旧と判断して休眠に入り、

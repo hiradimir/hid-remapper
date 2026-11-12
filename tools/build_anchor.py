@@ -1274,6 +1274,35 @@ patch(WT + '/firmware/src/remote_log.cc', [
 ])
 
 
+# --- 2026-11-12: 広告が出ない膠着の検出と自動再起動 (wake55) ---
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ('static volatile bool adv_enable_pending = false;  // 遅延させる広告有効化\nstatic uint64_t adv_enable_at_us = 0;',
+     'static volatile bool adv_enable_pending = false;  // 遅延させる広告有効化\nstatic uint64_t adv_enable_at_us = 0;\n\n// 【2026-11-12】広告が出たかどうかの監視。\n// チップが固まると LE Set Advertise Enable の完了通知が返らなくなり、\n// 広告が出ないまま「切断中」で居座る。ADV-EN が返らない = コントローラが\n// HCI を受け付けていない = 復旧不能と判断して自動再起動する\n#ifndef BLE_DEAD_DETECT_ENABLE\n#define BLE_DEAD_DETECT_ENABLE 1\n#endif\n#ifndef BLE_DEAD_ADV_TIMEOUT_MS\n#define BLE_DEAD_ADV_TIMEOUT_MS 3000\n#endif\n#ifndef BLE_DEAD_ADV_RETRIES\n#define BLE_DEAD_ADV_RETRIES 3\n#endif\n#ifndef BLE_AUTO_REBOOT_MIN_UPTIME_S\n#define BLE_AUTO_REBOOT_MIN_UPTIME_S 3600\n#endif\nstatic volatile uint64_t adv_pending_since_us = 0;\nstatic uint8_t adv_fail_count = 0;\nstatic bool ble_dead_declared = false;\nstatic bool ble_dead_snapshot_done = false;\nstatic uint64_t ble_dead_since_us = 0;\nstatic uint64_t ble_reboot_at_us = 0;\nstatic uint64_t ble_dead_wait_log_us = 0;'),
+    ('static void adv_set(int enable) {\n    adv_enable_req = enable;\n    gap_advertisements_enable(enable);\n}',
+     'static void adv_set(int enable) {\n    adv_enable_req = enable;\n    // 【2026-11-12】enable 要求から ADV-EN 完了までの経過を測る\n    if (enable) {\n        adv_pending_since_us = time_us_64();\n    } else {\n        adv_pending_since_us = 0;\n    }\n    gap_advertisements_enable(enable);\n}'),
+    ('                adv_enabled_ok = (st == 0) && (adv_enable_req != 0);\n                remote_log_eventf("ADV-EN status=0x%02X en=%d slot=%d pair=%d st=%d",',
+     '                adv_enabled_ok = (st == 0) && (adv_enable_req != 0);\n                if (st == 0) {\n                    // 広告が出た → 監視を解除（チップは生きている）\n                    adv_pending_since_us = 0;\n                    adv_fail_count = 0;\n                    ble_dead_declared = false;\n                    ble_dead_snapshot_done = false;\n                    ble_reboot_at_us = 0;\n                }\n                remote_log_eventf("ADV-EN status=0x%02X en=%d slot=%d pair=%d st=%d",'),
+    ('#include "pico/unique_id.h"',
+     '#include "pico/unique_id.h"\n#include "hardware/watchdog.h"'),
+    ('    // コントローラ再投入後に「広告が本当に出たか」を確認する。',
+     '#if BLE_DEAD_DETECT_ENABLE\n    // 【2026-11-12】広告が出ないまま居座る状態（＝チップが HCI を受け付けない）を検出し、\n    // 状況を記録したうえで、条件を満たせば自動で再起動する。\n    // ループ防止は「起動後 BLE_AUTO_REBOOT_MIN_UPTIME_S 秒は再起動しない」だけで行う\n    {\n        uint64_t now_d = time_us_64();\n        if (!ble_dead_declared && adv_pending_since_us != 0 &&\n            (now_d - adv_pending_since_us) > (BLE_DEAD_ADV_TIMEOUT_MS * 1000ULL)) {\n            if (adv_fail_count < BLE_DEAD_ADV_RETRIES) {\n                adv_fail_count++;\n                adv_pending_since_us = now_d;\n                gap_advertisements_enable(0);\n                adv_set(1);\n                remote_log_eventf("BT ADV-NOACK retry=%u", (unsigned) adv_fail_count);\n            } else {\n                ble_dead_declared = true;\n                ble_dead_since_us = now_d;\n                adv_pending_since_us = 0;\n            }\n        }\n\n        if (ble_dead_declared) {\n            if (!ble_dead_snapshot_done) {\n                ble_dead_snapshot_done = true;\n                ble_dead_wait_log_us = now_d;\n                remote_log_eventf(\n                    "BT DEAD-SNAP up=%us conn=%u heap=%u temp=%d rssi=%d slot=%d bonded=%d "\n                    "ok=%u cp=%u disc=%u rs=0x%02X acl=%u blk=%u adv_ok=%d",\n                    (unsigned) (now_d / 1000000ULL), (unsigned) health_conn_count,\n                    (unsigned) remote_log_heap_used(), remote_log_chip_temp_c(),\n                    remote_log_last_rssi(), current_slot + 1,\n                    is_slot_bonded(current_slot) ? 1 : 0, (unsigned) health_ok,\n                    (unsigned) health_cp_packets, (unsigned) health_disc,\n                    (unsigned) health_disc_reason, (unsigned) health_acl_full,\n                    (unsigned) health_blocked, adv_enabled_ok ? 1 : 0);\n                health_tx_stalled = true; // 以後 USB で運用\n            }\n            if ((now_d / 1000000ULL) >= (uint64_t) BLE_AUTO_REBOOT_MIN_UPTIME_S) {\n                if (ble_reboot_at_us == 0) {\n                    ble_reboot_at_us = now_d + 500000ULL; // ログ送信の猶予\n                    remote_log_eventf("BT AUTO-REBOOT adv_stuck up=%us",\n                                      (unsigned) (now_d / 1000000ULL));\n                } else if (now_d >= ble_reboot_at_us) {\n                    printf("[BT] auto reboot (advertising stuck, uptime=%us)\\r\\n",\n                           (unsigned) (now_d / 1000000ULL));\n                    watchdog_reboot(0, 0, 100);\n                    while (true) tight_loop_contents();\n                }\n            } else if ((now_d - ble_dead_wait_log_us) >= 300000000ULL) {\n                ble_dead_wait_log_us = now_d;\n                remote_log_eventf("BT DEAD-WAIT up=%us (reboot at %us)",\n                                  (unsigned) (now_d / 1000000ULL),\n                                  (unsigned) BLE_AUTO_REBOOT_MIN_UPTIME_S);\n            }\n        }\n    }\n#endif\n\n    // コントローラ再投入後に「広告が本当に出たか」を確認する。'),
+])
+
+
+# --- 2026-11-12: LAT-HIGH 無効化オプション (wake54) ---
+patch(WT + '/firmware/CMakeLists.txt', [
+    ('option(BLE_LOCK_DISABLE "Disable ble_lock (BL-45 bisect only)" OFF)',
+     'option(BLE_LOCK_DISABLE "Disable ble_lock (BL-45 bisect only)" OFF)\n# 【2026-11-12】lat 高止まりでの自発再接続 (wake43) を無効化する\noption(BLE_LAT_WATCH_DISABLE "Disable the LAT-HIGH proactive reconnect (wake54)" OFF)'),
+    ('    if(BLE_LOCK_DISABLE)\n        target_compile_definitions(remapper PUBLIC BLE_LOCK_DISABLE=1)\n    endif()',
+     '    if(BLE_LOCK_DISABLE)\n        target_compile_definitions(remapper PUBLIC BLE_LOCK_DISABLE=1)\n    endif()\n    if(BLE_LAT_WATCH_DISABLE)\n        target_compile_definitions(remapper PUBLIC BLE_LAT_WATCH_ENABLE=0)\n    endif()'),
+])
+
+patch(WT + '/firmware/src/remote_log.cc', [
+    ('#if defined(BL43_NO_FLOW_CONTROL) && BL43_NO_FLOW_CONTROL\n    // 【2026-11-12】BL-43 フロー制御設定の A/B 用 (焼き間違い検出)\n    remote_log_eventf("BUILD VARIANT bl43_flowctl=off");\n#endif',
+     '#if defined(BL43_NO_FLOW_CONTROL) && BL43_NO_FLOW_CONTROL\n    // 【2026-11-12】BL-43 フロー制御設定の A/B 用 (焼き間違い検出)\n    remote_log_eventf("BUILD VARIANT bl43_flowctl=off");\n#endif\n#if defined(BLE_LAT_WATCH_ENABLE) && !BLE_LAT_WATCH_ENABLE\n    // 【2026-11-12】LAT-HIGH 自発再接続を無効化したビルド (焼き間違い検出)\n    remote_log_eventf("BUILD VARIANT lat_watch=off");\n#endif'),
+])
+
+
 # --- 生成物の自己検算 (2026-11-01 追加) -------------------------------------
 # 「パッチは当たったように見えるが実は欠けている」事故を防ぐ。
 # 実際に wake37 の health_acl_run++ が欠け、aclrun が常に 0 のまま
@@ -1295,6 +1324,8 @@ REQUIRED_MARKERS = [
     ('firmware/src/main.cc', 'USB DEV re-attach'),
     ('firmware/src/remote_log.cc', 'remote_log_heap_used'),
     ('firmware/src/ble_hid.cc', 'health_conn_count'),
+    ('firmware/src/ble_hid.cc', 'BT DEAD-SNAP'),
+    ('firmware/src/ble_hid.cc', 'BT AUTO-REBOOT'),
     ('firmware/src/remote_log.cc', 'bl43_flowctl=off'),
     ('firmware/src/remote_log.cc', 'USB DEV %s'),
     ('firmware/src/remote_log.cc', 'clat=%u st=%u'),
