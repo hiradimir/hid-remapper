@@ -1257,6 +1257,23 @@ patch(WT + '/firmware/CMakeLists.txt', [
 ])
 
 
+# --- 2026-11-12: BL-43 フロー制御設定の A/B (BL43_NO_FLOW_CONTROL) ---
+patch(WT + '/firmware/src/btstack_config.h', [
+    ('#define MAX_NR_CONTROLLER_ACL_BUFFERS 3\n#define MAX_NR_CONTROLLER_SCO_PACKETS 3\n#define ENABLE_HCI_CONTROLLER_TO_HOST_FLOW_CONTROL\n#define HCI_HOST_ACL_PACKET_LEN 1024\n#define HCI_HOST_ACL_PACKET_NUM 3\n#define HCI_HOST_SCO_PACKET_LEN 120\n#define HCI_HOST_SCO_PACKET_NUM 3',
+     '// 【2026-11-12】BL-43 フロー制御設定の A/B 用に切り替え可能にした。\n// -DBL43_NO_FLOW_CONTROL=ON で BTstack 既定向き (EhHHKB2 と同じ構成) になる\n#if !defined(BL43_NO_FLOW_CONTROL)\n#define MAX_NR_CONTROLLER_ACL_BUFFERS 3\n#define MAX_NR_CONTROLLER_SCO_PACKETS 3\n#define ENABLE_HCI_CONTROLLER_TO_HOST_FLOW_CONTROL\n#define HCI_HOST_ACL_PACKET_LEN 1024\n#define HCI_HOST_ACL_PACKET_NUM 3\n#define HCI_HOST_SCO_PACKET_LEN 120\n#define HCI_HOST_SCO_PACKET_NUM 3\n#endif'),
+])
+
+patch(WT + '/firmware/CMakeLists.txt', [
+    ('    if(BLE_LOCK_DISABLE)\n        target_compile_definitions(remapper PUBLIC BLE_LOCK_DISABLE=1)\n    endif()',
+     '    if(BLE_LOCK_DISABLE)\n        target_compile_definitions(remapper PUBLIC BLE_LOCK_DISABLE=1)\n    endif()\n\n    # 【2026-11-12】BL-43 フロー制御設定の A/B 用。\n    # btstack_config.h は BTstack 側のソース (hci.c 等) も読むため、\n    # ライブラリ側にも定義を渡さないと効かない\n    option(BL43_NO_FLOW_CONTROL "Disable the BL-43 flow control config (A/B test)" OFF)\n    if(BL43_NO_FLOW_CONTROL)\n        target_compile_definitions(remapper PUBLIC BL43_NO_FLOW_CONTROL=1)\n        if(TARGET pico_btstack_ble)\n            target_compile_definitions(pico_btstack_ble INTERFACE BL43_NO_FLOW_CONTROL=1)\n        endif()\n        if(TARGET pico_btstack_cyw43)\n            target_compile_definitions(pico_btstack_cyw43 INTERFACE BL43_NO_FLOW_CONTROL=1)\n        endif()\n    endif()'),
+])
+
+patch(WT + '/firmware/src/remote_log.cc', [
+    ('#if defined(BLE_LOCK_DISABLE) && BLE_LOCK_DISABLE\n    // 切り分け用ビルドの取り違え防止 (常用ビルドでは出ない)\n    remote_log_eventf("BUILD VARIANT ble_lock=disabled");\n#endif',
+     '#if defined(BLE_LOCK_DISABLE) && BLE_LOCK_DISABLE\n    // 切り分け用ビルドの取り違え防止 (常用ビルドでは出ない)\n    remote_log_eventf("BUILD VARIANT ble_lock=disabled");\n#endif\n#if defined(BL43_NO_FLOW_CONTROL) && BL43_NO_FLOW_CONTROL\n    // 【2026-11-12】BL-43 フロー制御設定の A/B 用 (焼き間違い検出)\n    remote_log_eventf("BUILD VARIANT bl43_flowctl=off");\n#endif'),
+])
+
+
 # --- 生成物の自己検算 (2026-11-01 追加) -------------------------------------
 # 「パッチは当たったように見えるが実は欠けている」事故を防ぐ。
 # 実際に wake37 の health_acl_run++ が欠け、aclrun が常に 0 のまま
@@ -1278,6 +1295,7 @@ REQUIRED_MARKERS = [
     ('firmware/src/main.cc', 'USB DEV re-attach'),
     ('firmware/src/remote_log.cc', 'remote_log_heap_used'),
     ('firmware/src/ble_hid.cc', 'health_conn_count'),
+    ('firmware/src/remote_log.cc', 'bl43_flowctl=off'),
     ('firmware/src/remote_log.cc', 'USB DEV %s'),
     ('firmware/src/remote_log.cc', 'clat=%u st=%u'),
 ]

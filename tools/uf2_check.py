@@ -51,6 +51,7 @@ def main(argv):
         (b'BT CANSEND-PROACT', 1, 'CANSEND 2 秒不通で自発切断 (wake46)'),
         (b'hci_idle=%ums', 1, '膠着の切り分け情報 (wake47)'),
         (b'conn=%u heap=%u temp=%d', 1, '寿命仮説の切り分け (wake51)'),
+        (b'bl43_flowctl=off', None, 'BL-43 フロー制御 OFF の A/B ビルド (任意)'),
         (b'ADV-VERIFY', 1, '再投入後の広告検証 (wake41)'),
         (b'CTRL-DEAD', 1, '復旧不能の検出 (wake41)'),
         (b'USB DEV ', 1, 'USB configure 状態のログ (wake41)'),
@@ -67,7 +68,10 @@ def main(argv):
         print('%s (%d bytes)' % (path, len(body)))
         for key, want, note in checks:
             got = body.count(key)
-            # want=0 は「存在してはいけない」、want>0 は最低件数
+            # want=None は情報表示のみ、0 は「存在してはいけない」、>0 は最低件数
+            if want is None:
+                print('  --   %-22s %d  %s' % (key.decode('utf-8', 'replace'), got, note))
+                continue
             ok = (got >= want) if want else (got == 0)
             print('  %-4s %-22s %d  %s' % ('OK' if ok else 'NG',
                                            key.decode('utf-8', 'replace'), got, note))

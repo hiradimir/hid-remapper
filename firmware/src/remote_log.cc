@@ -1241,6 +1241,10 @@ void remote_log_init(void) {
 #if defined(BL45_SKIP_ADDR_CHANGE) && BL45_SKIP_ADDR_CHANGE
     remote_log_eventf("BUILD VARIANT addr_change=skipped");
 #endif
+#if defined(BL43_NO_FLOW_CONTROL) && BL43_NO_FLOW_CONTROL
+    // 【2026-11-12】BL-43 フロー制御設定の A/B 用 (焼き間違い検出)
+    remote_log_eventf("BUILD VARIANT bl43_flowctl=off");
+#endif
 
     remote_log_eventf("RLOG init target=%s:%d ssid=%s ip=%s",
                       RLOG_TARGET_IP, RLOG_TARGET_PORT, rlog_ssid_masked(),
