@@ -9,6 +9,23 @@
 
 ---
 
+## 2026-11-12 `wake56`: DEAD 監視の誤検出を防ぐ（未接続時のみ監視）
+
+`wake55` の落とし穴: 広告を有効化した直後にホストが接続すると、コントローラが
+`LE Set Advertise Enable` に **0x0C (Command Disallowed)** を返すことがある。
+この場合 `ADV-EN status=0x00` は永遠に来ないので、**接続できているのに DEAD 判定**
+→ 60 分後に**身に覚えのない再起動**が起きる。
+
+**修正**:
+
+- 監視は `con_handle == HCI_CON_HANDLE_INVALID`（未接続）のときだけ
+- 接続成立時に `adv_pending_since_us = 0` / `adv_fail_count = 0` / `ble_dead_declared = false`
+  をクリア（広告は不要になるため）
+
+これで「切断後に広告が出ない」ケース（10/31・11/9・11/12 の実際の症状）だけを捕まえる。
+
+- ビルド: `firmware/artifacts/remapper_anchor_wake56_autoreboot.uf2`（11/12 21:00）
+
 ## 2026-11-12 `wake55`: 広告が出ない膠着の検出と自動再起動
 
 **症状**（20:34）: `CANSEND-TO` → `PROACT` で切断したあと、**二度と広告が出ない**。
