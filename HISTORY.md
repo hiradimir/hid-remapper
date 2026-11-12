@@ -9,6 +9,38 @@
 
 ---
 
+## 2026-11-12 `wake53`: ソークの基準をアンカーから HEAD に移す（BL-45 の修正を取り込む）
+
+**症状**: `wake52_noflow` で slot2 に切り替えたら**広告が出ず接続できない**。
+
+```
+12:19:32  SLOT-APPLY slot=2    addr=E4:08:43:8B:22:2F
+12:19:32  APPLY-DONE st=2
+          ← ADV-ADDR / ADV-PARAM / ADV-EN が 1 つも出ない
+```
+
+slot1 のアドレスは `…27:31`、slot2 は `…22:2F`。**切り替えのたびに MAC を変えている**。
+これは BL-45 で特定した「実行中にアドレスを変えると広告が出ない」現象そのもの。
+
+**原因**: ソークビルドは**アンカー `3a8d85b`（10 月末）+ パッチ**から作っている。
+この地点には BL-45 の修正が入っていない（`get_slot_random_address()` で
+スロットごとに静的ランダムアドレスを生成し、実行中に切り替える旧方式）。
+
+一方、**ツリーの HEAD は BL-45 修正済み**（`gap_local_bd_addr()` の公開アドレスを
+固定し、accept list でスロットを分離）。つまり**修正はツリーにだけ入っていて、
+実機で動かしているソークビルドには反映されていなかった**。
+
+**対応**: ソークの基準をアンカーから **HEAD に移行**。`wake37`〜`wake52` の修正は
+すべてツリーにコミット済みなので、パッチを当て直す必要がない。
+
+- `firmware/artifacts/remapper_head_wake53.uf2`
+  （HEAD + `ENABLE_REMOTE_LOG` + `BLE_LOCK_DISABLE`、BL-43 フロー制御は既定=ON）
+- `firmware/artifacts/remapper_head_wake53_noflow.uf2`
+  （同上 + `BL43_NO_FLOW_CONTROL=ON`。フロー制御 A/B を継続する場合）
+
+確認済みマーカー: `BT ADDR public`（BL-45 修正）/ `ADV-FILTER`（accept list）/
+`bl43_flowctl=off`（noflow 版のみ）。
+
 ## 2026-11-12 `wake52`: BL-43 フロー制御設定の A/B（EhHHKB2 との差分から）
 
 ルディの「EhHHKB2 にヒントは無いか」から `~/git/EhHHKB2` を読んだところ、
