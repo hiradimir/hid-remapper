@@ -57,7 +57,7 @@ def main(argv):
         (b'USB DEV ', 1, 'USB configure 状態のログ (wake41)'),
         (b'PARAM-REQ n=%u', 1, '接続パラメータ再要求'),
         (b'clat=%u st=%u', 1, 'BLE-HB 観測項目'),
-        (b'power-cycle+reload', 1, '膠着時の BT コア再投入'),
+        (b'btcore-reload', 1, '膠着時の BT コア再投入'),
         (b'ble_lock=disabled', 1, 'soak ビルドの目印'),
         (b'192.168.215.1', 0, '誤った送信先 IP (0 件であること)'),
     ]
