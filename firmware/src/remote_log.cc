@@ -1245,6 +1245,10 @@ void remote_log_init(void) {
     // 【2026-11-12】BL-43 フロー制御設定の A/B 用 (焼き間違い検出)
     remote_log_eventf("BUILD VARIANT bl43_flowctl=off");
 #endif
+#if defined(BLE_LAT_WATCH_ENABLE) && !BLE_LAT_WATCH_ENABLE
+    // 【2026-11-12】LAT-HIGH 自発再接続を無効化したビルド (焼き間違い検出)
+    remote_log_eventf("BUILD VARIANT lat_watch=off");
+#endif
 
     remote_log_eventf("RLOG init target=%s:%d ssid=%s ip=%s",
                       RLOG_TARGET_IP, RLOG_TARGET_PORT, rlog_ssid_masked(),

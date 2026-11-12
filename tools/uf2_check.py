@@ -47,7 +47,7 @@ def main(argv):
     checks = [
         (b'CREDIT-STALL', 1, '0x57 監視の再設計 / ストーム検知'),
         (b'NORESTORE', 1, 'クレジット凍結の早期検知 (wake41)'),
-        (b'BT LAT-HIGH', 1, 'lat 高止まりの自発再接続 (wake43)'),
+        (b'BT LAT-HIGH', None, 'lat 高止まりの自発再接続 (lat_watch=off では 0)'),
         (b'BT CANSEND-PROACT', 1, 'CANSEND 2 秒不通で自発切断 (wake46)'),
         (b'hci_idle=%ums', 1, '膠着の切り分け情報 (wake47)'),
         (b'conn=%u heap=%u temp=%d', 1, '寿命仮説の切り分け (wake51)'),
@@ -57,7 +57,7 @@ def main(argv):
         (b'USB DEV ', 1, 'USB configure 状態のログ (wake41)'),
         (b'PARAM-REQ n=%u', 1, '接続パラメータ再要求'),
         (b'clat=%u st=%u', 1, 'BLE-HB 観測項目'),
-        (b'btcore-reload', 1, '膠着時の BT コア再投入'),
+        (b'FLOWCTL-WEDGE', 1, '膠着時の BT コア再投入'),
         (b'ble_lock=disabled', 1, 'soak ビルドの目印'),
         (b'192.168.215.1', 0, '誤った送信先 IP (0 件であること)'),
     ]
