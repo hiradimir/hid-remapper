@@ -9,6 +9,43 @@
 
 ---
 
+## 2026-11-12 `wake52`: BL-43 フロー制御設定の A/B（EhHHKB2 との差分から）
+
+ルディの「EhHHKB2 にヒントは無いか」から `~/git/EhHHKB2` を読んだところ、
+**`btstack_config.h` がうちと決定的に違っていた**:
+
+| 設定 | EhHHKB2 | うち (BL-43) | BTstack 既定 |
+|---|---|---|---|
+| `MAX_NR_CONTROLLER_ACL_BUFFERS` | 未定義 | **3** | **255** |
+| `ENABLE_HCI_CONTROLLER_TO_HOST_FLOW_CONTROL` | 無効 | 有効 | 無効 |
+| `HCI_HOST_ACL_PACKET_LEN/NUM` | 未定義 | 1024 / 3 | — |
+
+EhHHKB2 は**この対策を一切せずに動いている**。当時の BL-43 は A/B をしておらず、
+しかも 10/22 の BL-45 切り分けで「**flow control を無効化しても症状は変わらない**」と
+記録が残っている（ただしそれは「広告が出ない」問題の話で、膠着の A/B は未実施）。
+
+**つまり BL-43 の設定は「効いた」証拠が無いまま残っている。**
+
+### つくったもの
+
+- `firmware/CMakeLists.txt` に `BL43_NO_FLOW_CONTROL` オプション
+  （BTstack 側のソースも `btstack_config.h` を読むため、`pico_btstack_ble` /
+  `pico_btstack_cyw43` にも INTERFACE 定義を渡す）
+- `btstack_config.h` の BL-43 ブロックを `#if !defined(BL43_NO_FLOW_CONTROL)` で囲む
+- 判別用に `BUILD VARIANT bl43_flowctl=off` をログに出す
+
+### A/B 用の 2 本
+
+| ファイル | 内容 |
+|---|---|
+| `remapper_anchor_wake52_flowctl_on.uf2` | 従来（BL-43 設定あり、`ACL_BUFFERS=3`） |
+| `remapper_anchor_wake52_noflow.uf2` | BL-43 設定なし（EhHHKB2 と同じ、既定 255） |
+
+どちらも他の修正（`wake47`〜`wake51` の観測・`PROACT`・`connect=1...`）は同一。
+
+**判定**: 数日ずつ動かして `CANSEND-TO` の回数を比べる。`noflow` 側で減れば
+BL-43 の設定が膠着の一因だったと確定する。
+
 ## 2026-11-12 `wake51`: 寿命仮説の切り分け（conn / heap / temp を記録）
 
 ルディの指摘: 「接続回数で死ぬなら寿命を延ばすだけ。**そもそも寿命がある設計**が
