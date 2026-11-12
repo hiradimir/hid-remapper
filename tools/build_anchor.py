@@ -1303,6 +1303,15 @@ patch(WT + '/firmware/src/remote_log.cc', [
 ])
 
 
+# --- 2026-11-12: DEAD 監視は未接続時のみ（誤検出防止） ---
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ('        if (!ble_dead_declared && adv_pending_since_us != 0 &&\n            (now_d - adv_pending_since_us) > (BLE_DEAD_ADV_TIMEOUT_MS * 1000ULL)) {',
+     '        // 【2026-11-12】接続中は広告しないので、ADV-EN が返らないのは正常。\n        // 未接続のときだけ監視する（接続直後の Command Disallowed で誤検出しないため）\n        if (!ble_dead_declared && adv_pending_since_us != 0 &&\n            con_handle == HCI_CON_HANDLE_INVALID &&\n            (now_d - adv_pending_since_us) > (BLE_DEAD_ADV_TIMEOUT_MS * 1000ULL)) {'),
+    ('            health_acl_run = 0;\n            health_conn_count++;\n        }\n        was_connected = connected_now;',
+     '            health_acl_run = 0;\n            health_conn_count++;\n            // 接続した = 広告は不要。ADV 監視も解除する\n            adv_pending_since_us = 0;\n            adv_fail_count = 0;\n            ble_dead_declared = false;\n            ble_dead_snapshot_done = false;\n            ble_reboot_at_us = 0;\n        }\n        was_connected = connected_now;'),
+])
+
+
 # --- 生成物の自己検算 (2026-11-01 追加) -------------------------------------
 # 「パッチは当たったように見えるが実は欠けている」事故を防ぐ。
 # 実際に wake37 の health_acl_run++ が欠け、aclrun が常に 0 のまま

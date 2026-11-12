@@ -1946,7 +1946,10 @@ static void ble_hid_task_locked(void) {
     // だけで行う（跨いだ状態は保存しない）
     {
         uint64_t now_d = time_us_64();
+        // 【2026-11-12】接続中は広告しないので、ADV-EN が返らないのは正常。
+        // 未接続のときだけ監視する（接続直後の Command Disallowed で誤検出しないため）
         if (!ble_dead_declared && adv_pending_since_us != 0 &&
+            con_handle == HCI_CON_HANDLE_INVALID &&
             (now_d - adv_pending_since_us) > (BLE_DEAD_ADV_TIMEOUT_MS * 1000ULL)) {
             if (adv_fail_count < BLE_DEAD_ADV_RETRIES) {
                 adv_fail_count++;
@@ -2068,6 +2071,12 @@ static void ble_hid_task_locked(void) {
             // (2026-11-05: 再接続 20ms 後に stale な aclrun=51 で誤って絞った)
             health_acl_run = 0;
             health_conn_count++;
+            // 接続した = 広告は不要。ADV 監視も解除する
+            adv_pending_since_us = 0;
+            adv_fail_count = 0;
+            ble_dead_declared = false;
+            ble_dead_snapshot_done = false;
+            ble_reboot_at_us = 0;
         }
         was_connected = connected_now;
 
