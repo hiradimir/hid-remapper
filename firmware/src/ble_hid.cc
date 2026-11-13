@@ -280,6 +280,12 @@ static uint64_t adv_enable_at_us = 0;
 #define BLE_AUTO_REBOOT_MIN_UPTIME_S 3600
 #endif
 static volatile uint64_t adv_pending_since_us = 0;
+// 【2026-11-13】PROACT で切断要求を出した時刻。切断完了イベントも広告も来ない
+// (= コントローラが HCI を受け付けない) ケースを、他の要因に邪魔されず検出する
+#ifndef BLE_PROACT_DEAD_MS
+#define BLE_PROACT_DEAD_MS 15000
+#endif
+static volatile uint64_t proact_pending_us = 0;
 static uint8_t adv_fail_count = 0;
 static bool ble_dead_declared = false;
 static bool ble_dead_snapshot_done = false;
@@ -547,6 +553,7 @@ static void can_send_timeout_handler(btstack_timer_source_t *ts) {
                 // 【2026-11-13】切断要求を出した = 以降は広告が立ち上がるはず。
                 // 切断完了イベントが来ない場合はここから 3 秒で検出する
                 adv_pending_since_us = time_us_64();
+                proact_pending_us = time_us_64();
                 gap_disconnect(con_handle);
                 return;
             }
@@ -1780,8 +1787,9 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             if (!(switch_pending && pending_toggle_off)) {
                 adv_enable_pending = true;
                 adv_enable_at_us = time_us_64() + 200000ULL;
-                // 【2026-11-13】切断完了 → 広告が立ち上がるまでの監視を開始
+                    // 【2026-11-13】切断完了 → 広告が立ち上がるまでの監視を開始
                 adv_pending_since_us = time_us_64();
+                proact_pending_us = 0; // PROACT 起因の監視は解除
             }
             uint8_t reason = hci_event_disconnection_complete_get_reason(packet);
             printf("[BT] Disconnected (reason=0x%02X)\r\n", reason);
@@ -1955,8 +1963,17 @@ static void ble_hid_task_locked(void) {
         // タイマを張る。切断完了イベント自体が来ない（＝チップが固まった）ケースも
         // 捕まえたいので、未接続かどうかでは判定しない。
         // 接続が成立すればその時点でクリアされるので、正常な競合では発動しない
-        if (!ble_dead_declared && adv_pending_since_us != 0 &&
-            (now_d - adv_pending_since_us) > (BLE_DEAD_ADV_TIMEOUT_MS * 1000ULL)) {
+        // 【2026-11-13】PROACT で切断要求を出して 15 秒、切断完了も広告も来ない
+        // = コントローラが HCI を受け付けていない。アプリの状態 (CONNECTED のまま)
+        // は信用できないので、この経路で判定する
+        if (!ble_dead_declared && proact_pending_us != 0 &&
+            (now_d - proact_pending_us) > (BLE_PROACT_DEAD_MS * 1000ULL)) {
+            ble_dead_declared = true;
+            ble_dead_since_us = now_d;
+            proact_pending_us = 0;
+            adv_pending_since_us = 0;
+        } else if (!ble_dead_declared && adv_pending_since_us != 0 &&
+                   (now_d - adv_pending_since_us) > (BLE_DEAD_ADV_TIMEOUT_MS * 1000ULL)) {
             if (adv_fail_count < BLE_DEAD_ADV_RETRIES) {
                 adv_fail_count++;
                 adv_pending_since_us = now_d;
@@ -2083,6 +2100,7 @@ static void ble_hid_task_locked(void) {
             ble_dead_declared = false;
             ble_dead_snapshot_done = false;
             ble_reboot_at_us = 0;
+            proact_pending_us = 0;
         }
         was_connected = connected_now;
 
@@ -2110,6 +2128,7 @@ static void ble_hid_task_locked(void) {
             last_ok_us = now_us;
             health_tx_stalled = false;
             credit_stall = false; // クレジットが戻った
+            proact_pending_us = 0; // 送信が戻った = チップは生きている
         } else if (connected_now && !ctrl_reset_pending && now_us >= cooldown_until_us &&
                    (now_us - connected_since_us) > 15000000ULL &&
                    (((health_acl_full - acl_at_last_ok) >= 40 &&

@@ -1323,6 +1323,23 @@ patch(WT + '/firmware/src/ble_hid.cc', [
 ])
 
 
+# --- 2026-11-13: PROACT 後の無反応を直接検出する ---
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ('static volatile uint64_t adv_pending_since_us = 0;',
+     'static volatile uint64_t adv_pending_since_us = 0;\n// 【2026-11-13】PROACT で切断要求を出した時刻。切断完了も広告も来ない\n// (= コントローラが HCI を受け付けない) ケースを、他の要因に邪魔されず検出する\n#ifndef BLE_PROACT_DEAD_MS\n#define BLE_PROACT_DEAD_MS 15000\n#endif\nstatic volatile uint64_t proact_pending_us = 0;'),
+    ('                adv_pending_since_us = time_us_64();\n                gap_disconnect(con_handle);\n                return;',
+     '                adv_pending_since_us = time_us_64();\n                proact_pending_us = time_us_64();\n                gap_disconnect(con_handle);\n                return;'),
+    ('                // 【2026-11-13】切断完了 → 広告が立ち上がるまでの監視を開始\n                adv_pending_since_us = time_us_64();',
+     '                // 【2026-11-13】切断完了 → 広告が立ち上がるまでの監視を開始\n                adv_pending_since_us = time_us_64();\n                proact_pending_us = 0; // PROACT 起因の監視は解除'),
+    ('            adv_pending_since_us = 0;\n            adv_fail_count = 0;\n            ble_dead_declared = false;\n            ble_dead_snapshot_done = false;\n            ble_reboot_at_us = 0;\n        }\n        was_connected = connected_now;',
+     '            adv_pending_since_us = 0;\n            adv_fail_count = 0;\n            ble_dead_declared = false;\n            ble_dead_snapshot_done = false;\n            ble_reboot_at_us = 0;\n            proact_pending_us = 0;\n        }\n        was_connected = connected_now;'),
+    ('        if (!ble_dead_declared && adv_pending_since_us != 0 &&\n            (now_d - adv_pending_since_us) > (BLE_DEAD_ADV_TIMEOUT_MS * 1000ULL)) {',
+     '        // 【2026-11-13】PROACT で切断要求を出して 15 秒、切断完了も広告も来ない\n        // = コントローラが HCI を受け付けていない。アプリの状態 (CONNECTED のまま)\n        // は信用できないので、この経路で判定する\n        if (!ble_dead_declared && proact_pending_us != 0 &&\n            (now_d - proact_pending_us) > (BLE_PROACT_DEAD_MS * 1000ULL)) {\n            ble_dead_declared = true;\n            ble_dead_since_us = now_d;\n            proact_pending_us = 0;\n            adv_pending_since_us = 0;\n        } else if (!ble_dead_declared && adv_pending_since_us != 0 &&\n                   (now_d - adv_pending_since_us) > (BLE_DEAD_ADV_TIMEOUT_MS * 1000ULL)) {'),
+    ('            health_tx_stalled = false;\n            credit_stall = false; // クレジットが戻った',
+     '            health_tx_stalled = false;\n            credit_stall = false; // クレジットが戻った\n            proact_pending_us = 0; // 送信が戻った = チップは生きている'),
+])
+
+
 # --- 生成物の自己検算 (2026-11-01 追加) -------------------------------------
 # 「パッチは当たったように見えるが実は欠けている」事故を防ぐ。
 # 実際に wake37 の health_acl_run++ が欠け、aclrun が常に 0 のまま
@@ -1346,6 +1363,7 @@ REQUIRED_MARKERS = [
     ('firmware/src/ble_hid.cc', 'health_conn_count'),
     ('firmware/src/ble_hid.cc', 'BT DEAD-SNAP'),
     ('firmware/src/ble_hid.cc', 'BT AUTO-REBOOT'),
+    ('firmware/src/ble_hid.cc', 'proact_pending_us'),
     ('firmware/src/remote_log.cc', 'bl43_flowctl=off'),
     ('firmware/src/remote_log.cc', 'USB DEV %s'),
     ('firmware/src/remote_log.cc', 'clat=%u st=%u'),
