@@ -9,6 +9,36 @@
 
 ---
 
+## 2026-11-13 `wake60`: クレジット枯渇に対して HCI 電源の入れ直しで復旧を試す
+
+`wake59` の観測で**原因が確定**した（22:24 の膠着）:
+
+```
+22:24:28  CANSEND-TO … ccmd=1        ← 詰まり始めはクレジットあり
+22:24:31  BT ADV-NOACK retry=1 ccmd=0   ← 3 秒後には 0（枯渇）
+22:24:40  BT DEAD-SNAP … ccmd=0
+22:24:40  BT AUTO-REBOOT              ← 8 時間稼働 → 再起動（復帰）
+```
+
+**原因**: BTstack の HCI コマンドクレジット（`num_cmd_packets`）が枯渇。
+BLE コントローラのクレジットは 1 個なので、`Command Complete` を 1 回取りこぼすと
+**以降の HCI コマンドが一切送れなくなる**（gSPI 共有バスでの取りこぼし）。
+
+**BTstack のソース確認**: `hci_power_enter_initializing_state()` が
+`num_cmd_packets = 1` に戻す。つまり **`hci_power_control(ON)` でクレジットが復活する**。
+
+**対策（復旧の段階化）**:
+
+1. `PROACT` で切断（従来）
+2. **HCI 電源の入れ直し**（`ctrl_reset_pending` + `ctrl_reload_btcore=false`）
+   - ファーム再投入はしない（クレジットだけ戻せばよい）
+   - `BT HCI-RECYCLE ccmd=0` を記録
+   - 所要 1〜2 秒（再起動の 25 秒より速い）
+3. 15 秒戻らなければ従来どおり再起動（`wake58` の経路）
+4. 稼働 60 分未満なら再起動しない（USB 運用 + `DEAD-WAIT`）
+
+- ビルド: `firmware/artifacts/remapper_anchor_wake60_hcirecycle.uf2`（11/13 22:30）
+
 ## 2026-11-13 `wake59`: HCI コマンドクレジット（ccmd）を観測
 
 ルディが調べた「CYW43 で HCI が受け付けられない原因」の候補のうち、
