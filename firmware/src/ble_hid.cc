@@ -286,6 +286,10 @@ static volatile uint64_t adv_pending_since_us = 0;
 #define BLE_PROACT_DEAD_MS 15000
 #endif
 static volatile uint64_t proact_pending_us = 0;
+// 【2026-11-13】HCI コマンドクレジット枯渇 (ccmd=0) 対策。
+// hci_power_control(ON) は num_cmd_packets を 1 に戻すので、電源を入れ直せば
+// クレジットが復活する。再起動の前に 1 回だけ試す
+static bool hci_recycle_done = false;
 static uint8_t adv_fail_count = 0;
 static bool ble_dead_declared = false;
 static bool ble_dead_snapshot_done = false;
@@ -1967,6 +1971,25 @@ static void ble_hid_task_locked(void) {
         // 【2026-11-13】PROACT で切断要求を出して 15 秒、切断完了も広告も来ない
         // = コントローラが HCI を受け付けていない。アプリの状態 (CONNECTED のまま)
         // は信用できないので、この経路で判定する
+        if (!ble_dead_declared && !hci_recycle_done && !ctrl_reset_pending &&
+            ((proact_pending_us != 0 &&
+              (now_d - proact_pending_us) > (BLE_PROACT_DEAD_MS * 1000ULL)) ||
+             (adv_pending_since_us != 0 &&
+              (now_d - adv_pending_since_us) > (BLE_DEAD_ADV_TIMEOUT_MS * 1000ULL)))) {
+            // 【2026-11-13】まず HCI 電源の入れ直しでクレジットを復活させる。
+            // ファーム再投入はしない (ctrl_reload_btcore = false)
+            hci_recycle_done = true;
+            adv_pending_since_us = 0;
+            proact_pending_us = now_d; // 15 秒の再判定タイマを張り直す
+            adv_fail_count = 0;
+            remote_log_eventf("BT HCI-RECYCLE ccmd=%d",
+                              hci_can_send_command_packet_now() ? 1 : 0);
+            ctrl_reset_pending = true;
+            ctrl_reload_btcore = false;
+            hci_power_control(HCI_POWER_OFF);
+            return;
+        }
+
         if (!ble_dead_declared && proact_pending_us != 0 &&
             (now_d - proact_pending_us) > (BLE_PROACT_DEAD_MS * 1000ULL)) {
             ble_dead_declared = true;
@@ -2108,6 +2131,7 @@ static void ble_hid_task_locked(void) {
             ble_dead_snapshot_done = false;
             ble_reboot_at_us = 0;
             proact_pending_us = 0;
+            hci_recycle_done = false;
         }
         was_connected = connected_now;
 

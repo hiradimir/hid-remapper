@@ -1353,6 +1353,17 @@ patch(WT + '/firmware/src/ble_hid.cc', [
 ])
 
 
+# --- 2026-11-13: DEAD 前に HCI 電源入れ直しでクレジット復活を試す (wake60) ---
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ('static volatile uint64_t proact_pending_us = 0;',
+     'static volatile uint64_t proact_pending_us = 0;\n// 【2026-11-13】HCI コマンドクレジット枯渇 (ccmd=0) 対策。\n// hci_power_control(ON) は num_cmd_packets を 1 に戻すので、電源を入れ直せば\n// クレジットが復活する。再起動の前に 1 回だけ試す\nstatic bool hci_recycle_done = false;'),
+    ('            ble_reboot_at_us = 0;\n            proact_pending_us = 0;\n        }\n        was_connected = connected_now;',
+     '            ble_reboot_at_us = 0;\n            proact_pending_us = 0;\n            hci_recycle_done = false;\n        }\n        was_connected = connected_now;'),
+    ('        if (!ble_dead_declared && proact_pending_us != 0 &&\n            (now_d - proact_pending_us) > (BLE_PROACT_DEAD_MS * 1000ULL)) {\n            ble_dead_declared = true;\n            ble_dead_since_us = now_d;\n            proact_pending_us = 0;\n            adv_pending_since_us = 0;\n        } else if (!ble_dead_declared && adv_pending_since_us != 0 &&\n                   (now_d - adv_pending_since_us) > (BLE_DEAD_ADV_TIMEOUT_MS * 1000ULL)) {',
+     '        if (!ble_dead_declared && !hci_recycle_done && !ctrl_reset_pending &&\n            ((proact_pending_us != 0 &&\n              (now_d - proact_pending_us) > (BLE_PROACT_DEAD_MS * 1000ULL)) ||\n             (adv_pending_since_us != 0 &&\n              (now_d - adv_pending_since_us) > (BLE_DEAD_ADV_TIMEOUT_MS * 1000ULL)))) {\n            // 【2026-11-13】まず HCI 電源の入れ直しでクレジットを復活させる。\n            // ファーム再投入はしない (ctrl_reload_btcore = false)\n            hci_recycle_done = true;\n            adv_pending_since_us = 0;\n            proact_pending_us = now_d; // 15 秒の再判定タイマを張り直す\n            adv_fail_count = 0;\n            remote_log_eventf("BT HCI-RECYCLE ccmd=%d",\n                              hci_can_send_command_packet_now() ? 1 : 0);\n            ctrl_reset_pending = true;\n            ctrl_reload_btcore = false;\n            hci_power_control(HCI_POWER_OFF);\n            return;\n        }\n\n        if (!ble_dead_declared && proact_pending_us != 0 &&\n            (now_d - proact_pending_us) > (BLE_PROACT_DEAD_MS * 1000ULL)) {\n            ble_dead_declared = true;\n            ble_dead_since_us = now_d;\n            proact_pending_us = 0;\n            adv_pending_since_us = 0;\n        } else if (!ble_dead_declared && adv_pending_since_us != 0 &&\n                   (now_d - adv_pending_since_us) > (BLE_DEAD_ADV_TIMEOUT_MS * 1000ULL)) {'),
+])
+
+
 # --- 生成物の自己検算 (2026-11-01 追加) -------------------------------------
 # 「パッチは当たったように見えるが実は欠けている」事故を防ぐ。
 # 実際に wake37 の health_acl_run++ が欠け、aclrun が常に 0 のまま
@@ -1378,6 +1389,7 @@ REQUIRED_MARKERS = [
     ('firmware/src/ble_hid.cc', 'BT AUTO-REBOOT'),
     ('firmware/src/ble_hid.cc', 'proact_pending_us'),
     ('firmware/src/ble_hid.cc', 'ccmd=%d'),
+    ('firmware/src/ble_hid.cc', 'BT HCI-RECYCLE'),
     ('firmware/src/remote_log.cc', 'bl43_flowctl=off'),
     ('firmware/src/remote_log.cc', 'USB DEV %s'),
     ('firmware/src/remote_log.cc', 'clat=%u st=%u'),
