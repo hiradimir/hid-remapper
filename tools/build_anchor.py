@@ -1460,6 +1460,14 @@ patch(WT + '/firmware/src/ble_hid.cc', [
 ])
 
 
+# --- 2026-11-13: USB の消費電流申告を 500mA に (6 箇所すべて) ---
+# patch() は 1 箇所しか置換できないので、直接置換する
+_path = WT + '/firmware/src/tinyusb_stuff.cc'
+_t = open(_path).read()
+assert _t.count(', 100),') == 6, _t.count(', 100),')
+open(_path, "w").write(_t.replace(", 100),", ", 500),"))
+
+
 # --- 生成物の自己検算 (2026-11-01 追加) -------------------------------------
 # 「パッチは当たったように見えるが実は欠けている」事故を防ぐ。
 # 実際に wake37 の health_acl_run++ が欠け、aclrun が常に 0 のまま
