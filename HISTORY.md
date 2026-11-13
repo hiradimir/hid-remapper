@@ -9,6 +9,30 @@
 
 ---
 
+## 2026-11-13 `wake59`: HCI コマンドクレジット（ccmd）を観測
+
+ルディが調べた「CYW43 で HCI が受け付けられない原因」の候補のうち、
+**gSPI 共有バスでの `Command Complete` 取りこぼし**が症状と一致する:
+
+- BTstack はコマンド送信でクレジットを 1 消費し、`Command Complete` で戻す
+- BLE コントローラのクレジットは通常 **1 個**なので、**1 回取りこぼすと以降の
+  HCI コマンドが一切送れなくなる**
+- 説明できる症状: 広告・切断コマンドが通らない / チップは生きているのに沈黙 /
+  再起動でしか直らない / 確率的に起きる
+
+**確認方法**: `hci_can_send_command_packet_now()` を記録する。
+これが `false`（`ccmd=0`）ならクレジット枯渇が原因で確定。
+
+- `BT CANSEND-TO … ccmd=%d`
+- `BT ADV-NOACK retry=%u ccmd=%d`
+- `BT DEAD-SNAP … adv_ok=%d ccmd=%d`
+
+**もし確定したら**: `pico_cyw43_arch_lwip_threadsafe_background` →
+`lwip_poll`（メインループで CYW43 を回す = EhHHKB2 と同じ方式）に変えて
+イベント取りこぼしの発生自体を止められる可能性がある。
+
+- ビルド: `firmware/artifacts/remapper_anchor_wake59_ccmd.uf2`（11/13 14:20）
+
 ## 2026-11-13 `wake58`: PROACT 後の無反応を直接検出（自動再起動の 2 度目の取りこぼし）
 
 **症状**: 11:53:02 に slot2 へ切替 → 一度は接続（11:53:04 `CONNECTED slot=2`）→
