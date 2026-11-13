@@ -97,7 +97,10 @@ extern "C" {
 #ifndef RLOG_RING_SIZE
 #define RLOG_RING_SIZE 16384
 #endif
-#define RLOG_LINE_MAX 256
+// 【2026-11-13】1 行の上限。HB 行が 257 文字に育って 256 で切れ、
+// 末尾の ccmd= が欠けていた。データグラム上限 512 - プレフィックス 16 = 496 に
+// 収まる範囲で広げる
+#define RLOG_LINE_MAX 384
 
 // データグラム先頭に付ける "#<seq> " プレフィックスの最大長 (余裕含む 16 バイト)。
 // 抽出側は RLOG_DATAGRAM_MAX からこの分を引いた長さを上限とする
