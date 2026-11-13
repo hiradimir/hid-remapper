@@ -9,6 +9,41 @@
 
 ---
 
+## 2026-11-13 `wake62`: コマンド衝突テスト（狙い撃ちの再現実験）
+
+ルディの指摘「周期タイマーの Flash 書き込みでは**衝突を狙えない**。BT の操作は
+人間由来でランダムだから」は正しい。`wake61` の周期ストレスは確率が低すぎる。
+
+**狙い撃ち**: 広告有効化コマンドを送った**直後に IRQ を 20ms 止める**。
+「コマンドの応答が返る瞬間にホストが止まる」状況を確実に作れる。
+
+```
+gap_advertisements_enable(enable);
+→ save_and_disable_interrupts(); 20ms 待つ; restore_interrupts();
+→ BT CMD-COLLIDE us=20000 en=1
+```
+
+これで膠着（`ADV-NOACK` → `ccmd=0`）が出れば、**機序が完全に確定**する。
+
+### 同時に入れたもの
+
+- `STALL_EMU_MS` / `STALL_EMU_US` … 周期的に IRQ を止める（Flash 摩耗なしの汎用ストレス）
+- `CMD_COLLIDE_US` … 上記の狙い撃ちテスト
+- `HB … ccmd=%d`（`wake61` から）
+- `BUILD VARIANT cmd_collide=…` / `stall_emu=…` で判別
+
+- ビルド: `firmware/artifacts/remapper_anchor_wake62_collide.uf2`（11/13 22:55,
+  `CMD_COLLIDE_US=20000`）
+
+### 歴史の整理（ルディの記憶より）
+
+- 「ポインタの飛び（`BIGDX`）」は 10 月前半から追っていた現象
+- **「膠着（`CANSEND-TO` / 0x57 / `ok` 凍結）」の記録は 10/30 以降**
+- Wi-Fi ログ (BL-39) の導入は **10/21**
+
+→ **膠着は Wi-Fi 導入後に顕在化した可能性がある**。以前の「Wi-Fi は無関係」という
+判断は、症状（飛び vs 膠着）を取り違えていた疑いがある。
+
 ## 2026-11-13 `wake61`: クレジット枯渇の「引き金」を探る計装 + Flash 書き込みストレス
 
 ルディの指摘「膠着は Wi-Fi ログを始める前からあった」により、**Wi-Fi 共存説は
