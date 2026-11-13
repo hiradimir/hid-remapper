@@ -1364,6 +1364,44 @@ patch(WT + '/firmware/src/ble_hid.cc', [
 ])
 
 
+# --- 2026-11-13: Flash 書き込み計測 + ストレス書き込み + HB に ccmd ---
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ('static void save_slot_bonded_mask(uint8_t mask) {',
+     '// 【2026-11-13】TLV (Flash) 書き込みの所要時間を記録する。\n// Flash 書き込み中は XIP が止まるため、CYW43 ドライバが動けず HCI イベントを\n// 取りこぼす仮説の検証用。1ms 以上かかったときだけ記録する\nstatic void tlv_store_timed(uint32_t tag, const void* data, int len, const char* kind) {\n    if (!tlv_impl) return;\n    uint64_t t0 = time_us_64();\n    tlv_impl->store_tag(&tlv_context, tag, (const uint8_t*) data, len);\n    uint32_t ms = (uint32_t) ((time_us_64() - t0) / 1000ULL);\n    if (ms >= 1) {\n        remote_log_eventf("BT FLASH-WRITE kind=%s ms=%u", kind, (unsigned) ms);\n    }\n}\n\n// 【2026-11-13】Flash 書き込みが HCI イベント取りこぼしの原因かの検証用。\n// FLASH_STRESS_MS > 0 で、その間隔でダミーの TLV 書き込みを繰り返す\n#ifndef FLASH_STRESS_MS\n#define FLASH_STRESS_MS 0\n#endif\n#if FLASH_STRESS_MS > 0\n#define TLV_TAG_STRESS 0x53545253u\n#endif\n\nstatic void save_slot_bonded_mask(uint8_t mask) {'),
+    ('    tlv_impl->store_tag(&tlv_context, TLV_TAG_SLOT_BOND_MASK, &mask, sizeof(mask));',
+     '    tlv_store_timed(TLV_TAG_SLOT_BOND_MASK, &mask, sizeof(mask), "mask");'),
+    ('    tlv_impl->store_tag(&tlv_context, TLV_TAG_SLOT_PEERS, (uint8_t*)slot_peers, sizeof(slot_peers));',
+     '    tlv_store_timed(TLV_TAG_SLOT_PEERS, slot_peers, sizeof(slot_peers), "peers");'),
+    ('    tlv_impl->store_tag(&tlv_context, TLV_TAG_SLOT_SALTS, (uint8_t*)slot_salts, sizeof(slot_salts));',
+     '    tlv_store_timed(TLV_TAG_SLOT_SALTS, slot_salts, sizeof(slot_salts), "salts");'),
+    ('static void ble_hid_task_locked(void) {\n    static uint64_t last_countdown_check_us = 0;\n    uint64_t now_us = time_us_64();',
+     'static void ble_hid_task_locked(void) {\n    static uint64_t last_countdown_check_us = 0;\n    uint64_t now_us = time_us_64();\n\n#if FLASH_STRESS_MS > 0\n    // 【2026-11-13】Flash 書き込みストレス (検証専用)\n    {\n        static uint64_t next_stress_us = 0;\n        static uint32_t stress_n = 0;\n        if (next_stress_us == 0) next_stress_us = now_us + (FLASH_STRESS_MS * 1000ULL);\n        if (now_us >= next_stress_us) {\n            next_stress_us = now_us + (FLASH_STRESS_MS * 1000ULL);\n            stress_n++;\n            if (tlv_impl) {\n                uint32_t v = stress_n;\n                uint64_t t0 = time_us_64();\n                tlv_impl->store_tag(&tlv_context, TLV_TAG_STRESS, (const uint8_t*) &v, sizeof(v));\n                remote_log_eventf("BT FLASH-STRESS n=%u ms=%u", (unsigned) stress_n,\n                                  (unsigned) ((time_us_64() - t0) / 1000ULL));\n            }\n        }\n    }\n#endif'),
+])
+
+patch(WT + '/firmware/src/remote_log.cc', [
+    ('sus=%u clat=%u st=%u cu=%u aclrun=%u cpd=%u conn=%u heap=%u temp=%d",',
+     'sus=%u clat=%u st=%u cu=%u aclrun=%u cpd=%u conn=%u heap=%u temp=%d ccmd=%d",'),
+    ('                              (unsigned) h.conn_count, (unsigned) remote_log_heap_used(),\n                              remote_log_chip_temp_c());',
+     '                              (unsigned) h.conn_count, (unsigned) remote_log_heap_used(),\n                              remote_log_chip_temp_c(),\n                              // 【2026-11-13】HCI コマンドクレジットの残量 (1=送れる)\n                              hci_can_send_command_packet_now() ? 1 : 0);'),
+    ('#include "remote_log.h"',
+     '#include "remote_log.h"\n#include "hci.h"  // 【2026-11-13】hci_can_send_command_packet_now() の観測用'),
+])
+
+
+# --- 2026-11-13: FLASH_STRESS_MS オプション ---
+patch(WT + '/firmware/CMakeLists.txt', [
+    ('option(BLE_LAT_WATCH_DISABLE "Disable the LAT-HIGH proactive reconnect (wake54)" OFF)',
+     'option(BLE_LAT_WATCH_DISABLE "Disable the LAT-HIGH proactive reconnect (wake54)" OFF)\n# 【2026-11-13】Flash 書き込みストレス (検証専用)。0 で無効、ミリ秒で間隔指定\nset(FLASH_STRESS_MS 0 CACHE STRING "Force a TLV flash write every N ms (diagnostic)")'),
+    ('    if(BLE_LAT_WATCH_DISABLE)\n        target_compile_definitions(remapper PUBLIC BLE_LAT_WATCH_ENABLE=0)\n    endif()',
+     '    if(BLE_LAT_WATCH_DISABLE)\n        target_compile_definitions(remapper PUBLIC BLE_LAT_WATCH_ENABLE=0)\n    endif()\n    if(NOT FLASH_STRESS_MS STREQUAL "0")\n        target_compile_definitions(remapper PUBLIC FLASH_STRESS_MS=${FLASH_STRESS_MS})\n    endif()'),
+])
+
+patch(WT + '/firmware/src/remote_log.cc', [
+    ('#if defined(BLE_LAT_WATCH_ENABLE) && !BLE_LAT_WATCH_ENABLE\n    // 【2026-11-12】LAT-HIGH 自発再接続を無効化したビルド (焼き間違い検出)\n    remote_log_eventf("BUILD VARIANT lat_watch=off");\n#endif',
+     '#if defined(BLE_LAT_WATCH_ENABLE) && !BLE_LAT_WATCH_ENABLE\n    // 【2026-11-12】LAT-HIGH 自発再接続を無効化したビルド (焼き間違い検出)\n    remote_log_eventf("BUILD VARIANT lat_watch=off");\n#endif\n#if defined(FLASH_STRESS_MS) && FLASH_STRESS_MS > 0\n    // 【2026-11-13】Flash 書き込みストレス (検証専用)\n    remote_log_eventf("BUILD VARIANT flash_stress=%d", (int) FLASH_STRESS_MS);\n#endif'),
+])
+
+
 # --- 生成物の自己検算 (2026-11-01 追加) -------------------------------------
 # 「パッチは当たったように見えるが実は欠けている」事故を防ぐ。
 # 実際に wake37 の health_acl_run++ が欠け、aclrun が常に 0 のまま
@@ -1390,6 +1428,9 @@ REQUIRED_MARKERS = [
     ('firmware/src/ble_hid.cc', 'proact_pending_us'),
     ('firmware/src/ble_hid.cc', 'ccmd=%d'),
     ('firmware/src/ble_hid.cc', 'BT HCI-RECYCLE'),
+    ('firmware/src/ble_hid.cc', 'BT FLASH-WRITE'),
+    ('firmware/src/remote_log.cc', 'flash_stress='),
+    ('firmware/src/remote_log.cc', 'temp=%d ccmd=%d'),
     ('firmware/src/remote_log.cc', 'bl43_flowctl=off'),
     ('firmware/src/remote_log.cc', 'USB DEV %s'),
     ('firmware/src/remote_log.cc', 'clat=%u st=%u'),

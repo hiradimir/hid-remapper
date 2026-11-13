@@ -12,6 +12,7 @@
 //   - lwIP は NO_SYS=1 (pico_cyw43_arch_lwip_threadsafe_background) のため、
 //     lwIP API 呼び出しはメインループから cyw43_arch_lwip_begin/end を介して行う
 #include "remote_log.h"
+#include "hci.h"  // 【2026-11-13】hci_can_send_command_packet_now() の観測用
 #include "remapper.h"
 
 #if ENABLE_REMOTE_LOG
@@ -1042,7 +1043,7 @@ static void ble_health_task(uint64_t now_us) {
         loop_gap_max_us = 0;
 
         if (ever) {
-            remote_log_eventf("BLE-HB ci=%u ok=%u blk=%u acl=%u err=%u cp=%u/%u disc=%u rs=0x%02X tx=%ums omax=%ums lat=%ums burst=%u in=%u gmax=%ums dmax=%u sk=%u/%u/%u fl=0x%02X lps=%u lmax=%ums rtt=%ums rmax=%ums u=%u/%u sus=%u clat=%u st=%u cu=%u aclrun=%u cpd=%u conn=%u heap=%u temp=%d",
+            remote_log_eventf("BLE-HB ci=%u ok=%u blk=%u acl=%u err=%u cp=%u/%u disc=%u rs=0x%02X tx=%ums omax=%ums lat=%ums burst=%u in=%u gmax=%ums dmax=%u sk=%u/%u/%u fl=0x%02X lps=%u lmax=%ums rtt=%ums rmax=%ums u=%u/%u sus=%u clat=%u st=%u cu=%u aclrun=%u cpd=%u conn=%u heap=%u temp=%d ccmd=%d",
                               (unsigned) h.ci, (unsigned) h.ok, (unsigned) h.blocked,
                               (unsigned) h.acl_full, (unsigned) h.err, (unsigned) h.cp_events, (unsigned) h.cp_packets, (unsigned) h.disc,
                               (unsigned) h.disc_reason, (unsigned) tx_ms,
@@ -1060,7 +1061,9 @@ static void ble_health_task(uint64_t now_us) {
                               (unsigned) h.acl_run, (unsigned) cp_packets_delta,
                               // 【2026-11-12】寿命仮説の切り分け
                               (unsigned) h.conn_count, (unsigned) remote_log_heap_used(),
-                              remote_log_chip_temp_c());
+                              remote_log_chip_temp_c(),
+                              // 【2026-11-13】HCI コマンドクレジットの残量 (1=送れる)
+                              hci_can_send_command_packet_now() ? 1 : 0);
         } else {
             remote_log_eventf("BLE-HB ci=%u ok=0 blk=%u acl=%u err=%u cp=%u/%u disc=%u rs=0x%02X tx=none in=%u gmax=%ums lps=%u lmax=%ums rtt=%ums rmax=%ums u=%u/%u sus=%u",
                               (unsigned) h.ci, (unsigned) h.blocked,
@@ -1248,6 +1251,10 @@ void remote_log_init(void) {
 #if defined(BLE_LAT_WATCH_ENABLE) && !BLE_LAT_WATCH_ENABLE
     // 【2026-11-12】LAT-HIGH 自発再接続を無効化したビルド (焼き間違い検出)
     remote_log_eventf("BUILD VARIANT lat_watch=off");
+#endif
+#if defined(FLASH_STRESS_MS) && FLASH_STRESS_MS > 0
+    // 【2026-11-13】Flash 書き込みストレス (検証専用)
+    remote_log_eventf("BUILD VARIANT flash_stress=%d", (int) FLASH_STRESS_MS);
 #endif
 
     remote_log_eventf("RLOG init target=%s:%d ssid=%s ip=%s",

@@ -667,20 +667,44 @@ static void check_and_start_connection_stabilize(void) {
     }
 }
 
+// 【2026-11-13】TLV (Flash) 書き込みの所要時間を記録する。
+// Flash 書き込み中は XIP が止まるため、CYW43 ドライバが動けず HCI イベントを
+// 取りこぼす仮説の検証用。1ms 以上かかったときだけ記録する
+static void tlv_store_timed(uint32_t tag, const void* data, int len, const char* kind) {
+    if (!tlv_impl) return;
+    uint64_t t0 = time_us_64();
+    tlv_impl->store_tag(&tlv_context, tag, (const uint8_t*) data, len);
+    uint32_t ms = (uint32_t) ((time_us_64() - t0) / 1000ULL);
+    if (ms >= 1) {
+        remote_log_eventf("BT FLASH-WRITE kind=%s ms=%u", kind, (unsigned) ms);
+    }
+}
+
+// 【2026-11-13】Flash 書き込みが HCI イベント取りこぼしの原因かの検証用。
+// FLASH_STRESS_MS > 0 で、その間隔でダミーの TLV 書き込みを繰り返す。
+// 膠着の頻度が上がれば「XIP 停止で CYW43 ドライバが止まる」説が確定する。
+// 既定は 0 (無効)。実験時のみ -DFLASH_STRESS_MS=10000 などで有効化する
+#ifndef FLASH_STRESS_MS
+#define FLASH_STRESS_MS 0
+#endif
+#if FLASH_STRESS_MS > 0
+#define TLV_TAG_STRESS 0x53545253u
+#endif
+
 static void save_slot_bonded_mask(uint8_t mask) {
     slot_bonded_mask = mask;
     if (!tlv_impl) return;
-    tlv_impl->store_tag(&tlv_context, TLV_TAG_SLOT_BOND_MASK, &mask, sizeof(mask));
+    tlv_store_timed(TLV_TAG_SLOT_BOND_MASK, &mask, sizeof(mask), "mask");
 }
 
 static void save_slot_peers(void) {
     if (!tlv_impl) return;
-    tlv_impl->store_tag(&tlv_context, TLV_TAG_SLOT_PEERS, (uint8_t*)slot_peers, sizeof(slot_peers));
+    tlv_store_timed(TLV_TAG_SLOT_PEERS, slot_peers, sizeof(slot_peers), "peers");
 }
 
 static void save_slot_salts(void) {
     if (!tlv_impl) return;
-    tlv_impl->store_tag(&tlv_context, TLV_TAG_SLOT_SALTS, (uint8_t*)slot_salts, sizeof(slot_salts));
+    tlv_store_timed(TLV_TAG_SLOT_SALTS, slot_salts, sizeof(slot_salts), "salts");
 }
 
 static void load_slot_salts(void) {
@@ -909,7 +933,9 @@ static void save_slot_timer_handler(btstack_timer_source_t *ts) {
         uint8_t current_saved = 0xFF;
         int len = tlv_impl->get_tag(&tlv_context, TLV_TAG_CURRENT_SLOT, &current_saved, sizeof(current_saved));
         if (len != sizeof(current_saved) || current_saved != slot_to_save) {
+            uint64_t _t0 = time_us_64();
             int res = tlv_impl->store_tag(&tlv_context, TLV_TAG_CURRENT_SLOT, &slot_to_save, sizeof(slot_to_save));
+            if ((time_us_64() - _t0) >= 1000ULL) remote_log_eventf("BT FLASH-WRITE kind=slot ms=%u", (unsigned) ((time_us_64() - _t0) / 1000ULL));
             printf("[BT] Saved current_slot: %d to TLV (res=%d)\r\n", slot_to_save + 1, res);
         }
     }
@@ -919,7 +945,9 @@ static void save_slot_timer_handler(btstack_timer_source_t *ts) {
         char saved_os[MAX_SLOTS];
         int len = tlv_impl->get_tag(&tlv_context, TLV_TAG_SLOT_OS, (uint8_t*)saved_os, sizeof(saved_os));
         if (len != sizeof(saved_os) || memcmp(saved_os, slot_os, sizeof(slot_os)) != 0) {
+            uint64_t _t1 = time_us_64();
             int res = tlv_impl->store_tag(&tlv_context, TLV_TAG_SLOT_OS, (const uint8_t*)slot_os, sizeof(slot_os));
+            if ((time_us_64() - _t1) >= 1000ULL) remote_log_eventf("BT FLASH-WRITE kind=os ms=%u", (unsigned) ((time_us_64() - _t1) / 1000ULL));
             printf("[BT] Saved slot_os: [%c, %c, %c, %c] to TLV (res=%d)\r\n",
                    slot_os[0], slot_os[1], slot_os[2], slot_os[3], res);
         }
@@ -931,7 +959,9 @@ static void save_slot_timer_handler(btstack_timer_source_t *ts) {
         uint8_t current_val = 0xFF;
         int len = tlv_impl->get_tag(&tlv_context, TLV_TAG_RADIO_OFF, &current_val, sizeof(current_val));
         if (len != sizeof(current_val) || current_val != val) {
+            uint64_t _t2 = time_us_64();
             int res = tlv_impl->store_tag(&tlv_context, TLV_TAG_RADIO_OFF, &val, sizeof(val));
+            if ((time_us_64() - _t2) >= 1000ULL) remote_log_eventf("BT FLASH-WRITE kind=radio ms=%u", (unsigned) ((time_us_64() - _t2) / 1000ULL));
             printf("[BT] Saved radio_off: %d to TLV (res=%d)\r\n", val, res);
         }
     }
@@ -1950,6 +1980,26 @@ void ble_hid_task(void) {
 static void ble_hid_task_locked(void) {
     static uint64_t last_countdown_check_us = 0;
     uint64_t now_us = time_us_64();
+
+#if FLASH_STRESS_MS > 0
+    // 【2026-11-13】Flash 書き込みストレス (検証専用)
+    {
+        static uint64_t next_stress_us = 0;
+        static uint32_t stress_n = 0;
+        if (next_stress_us == 0) next_stress_us = now_us + (FLASH_STRESS_MS * 1000ULL);
+        if (now_us >= next_stress_us) {
+            next_stress_us = now_us + (FLASH_STRESS_MS * 1000ULL);
+            stress_n++;
+            if (tlv_impl) {
+                uint32_t v = stress_n;
+                uint64_t t0 = time_us_64();
+                tlv_impl->store_tag(&tlv_context, TLV_TAG_STRESS, (const uint8_t*) &v, sizeof(v));
+                remote_log_eventf("BT FLASH-STRESS n=%u ms=%u", (unsigned) stress_n,
+                                  (unsigned) ((time_us_64() - t0) / 1000ULL));
+            }
+        }
+    }
+#endif
 
     // 遅延させた広告有効化 (apply_slot_identity / 切断完了から 200ms 後)
     if (adv_enable_pending && now_us >= adv_enable_at_us) {
