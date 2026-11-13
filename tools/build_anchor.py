@@ -1468,6 +1468,15 @@ assert _t.count(', 100),') == 6, _t.count(', 100),')
 open(_path, "w").write(_t.replace(", 100),", ", 500),"))
 
 
+# --- 2026-11-13: HB 5 秒 / ALIVE 30 秒 ---
+patch(WT + '/firmware/src/remote_log.cc', [
+    ('#ifndef RLOG_BLE_HB_MS\n#define RLOG_BLE_HB_MS 15000 // BLE ヘルス行の周期 (変化が無ければ接続中のみ)\n#endif',
+     '#ifndef RLOG_BLE_HB_MS\n// 【2026-11-13】5 秒に短縮。膠着の前後を細かく見たい行なので ALIVE より優先する\n#define RLOG_BLE_HB_MS 5000 // BLE ヘルス行の周期 (変化が無ければ接続中のみ)\n#endif\n#ifndef RLOG_ALIVE_MS\n// 【2026-11-13】5 秒 → 30 秒。RSSI などの緩やかな指標しか載っていない\n#define RLOG_ALIVE_MS 30000\n#endif'),
+    ('    next_ping_us = time_us_64() + 5000000ULL;',
+     '    next_ping_us = time_us_64() + (RLOG_ALIVE_MS * 1000ULL);'),
+])
+
+
 # --- 生成物の自己検算 (2026-11-01 追加) -------------------------------------
 # 「パッチは当たったように見えるが実は欠けている」事故を防ぐ。
 # 実際に wake37 の health_acl_run++ が欠け、aclrun が常に 0 のまま

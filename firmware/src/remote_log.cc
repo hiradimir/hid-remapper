@@ -63,7 +63,14 @@ extern "C" {
 
 // BLE ヘルス観測 (BL-43/45 ウェッジ用)
 #ifndef RLOG_BLE_HB_MS
-#define RLOG_BLE_HB_MS 15000 // BLE ヘルス行の周期 (変化が無ければ接続中のみ)
+// 【2026-11-13】5 秒に短縮。膠着の前後を細かく見たい行なので、
+// ALIVE より優先して高頻度にする (ルディの提案)
+#define RLOG_BLE_HB_MS 5000 // BLE ヘルス行の周期 (変化が無ければ接続中のみ)
+#endif
+#ifndef RLOG_ALIVE_MS
+// 【2026-11-13】5 秒 → 30 秒。RSSI などの緩やかな指標しか載っていないため、
+// 通信量を HB に回す
+#define RLOG_ALIVE_MS 30000
 #endif
 #ifndef RLOG_BLE_STALL_MS
 // 通知がこれだけ途絶えたら「停止」とみなす。5 秒だと「マウスが一瞬止まった」を
@@ -1274,7 +1281,7 @@ void remote_log_init(void) {
 
     const uint64_t boot_grace_us = 3000000ULL; // BLE 起動を優先させる 3 秒猶予
     next_connect_attempt_us = time_us_64() + boot_grace_us;
-    next_ping_us = time_us_64() + 5000000ULL;
+    next_ping_us = time_us_64() + (RLOG_ALIVE_MS * 1000ULL);
 
     remote_log_eventf("RLOG init target=%s:%d ssid=%s ok",
                       RLOG_TARGET_IP, RLOG_TARGET_PORT, rlog_ssid_masked());
