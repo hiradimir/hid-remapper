@@ -1453,6 +1453,13 @@ patch(WT + '/firmware/src/remote_log.cc', [
 ])
 
 
+# --- 2026-11-13: 衝突テストを切断コマンドにも適用 ---
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ('                gap_disconnect(con_handle);\n                return;\n            }\n        }\n#endif',
+     '                gap_disconnect(con_handle);\n#if CMD_COLLIDE_US > 0\n                // 【2026-11-13】衝突テスト: 切断コマンドの応答中に IRQ を止める\n                {\n                    uint32_t irq_state = save_and_disable_interrupts();\n                    uint64_t t0 = time_us_64();\n                    while ((time_us_64() - t0) < CMD_COLLIDE_US) {\n                        tight_loop_contents();\n                    }\n                    restore_interrupts(irq_state);\n                    remote_log_eventf("BT CMD-COLLIDE us=%u en=disc",\n                                      (unsigned) CMD_COLLIDE_US);\n                }\n#endif\n                return;\n            }\n        }\n#endif'),
+])
+
+
 # --- 生成物の自己検算 (2026-11-01 追加) -------------------------------------
 # 「パッチは当たったように見えるが実は欠けている」事故を防ぐ。
 # 実際に wake37 の health_acl_run++ が欠け、aclrun が常に 0 のまま

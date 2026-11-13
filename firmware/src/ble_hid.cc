@@ -579,6 +579,20 @@ static void can_send_timeout_handler(btstack_timer_source_t *ts) {
                 adv_pending_since_us = time_us_64();
                 proact_pending_us = time_us_64();
                 gap_disconnect(con_handle);
+#if CMD_COLLIDE_US > 0
+                // 【2026-11-13】衝突テスト: 切断コマンドの応答中に IRQ を止める
+                // （実機で応答を落としたのがこのコマンドだったため）
+                {
+                    uint32_t irq_state = save_and_disable_interrupts();
+                    uint64_t t0 = time_us_64();
+                    while ((time_us_64() - t0) < CMD_COLLIDE_US) {
+                        tight_loop_contents();
+                    }
+                    restore_interrupts(irq_state);
+                    remote_log_eventf("BT CMD-COLLIDE us=%u en=disc",
+                                      (unsigned) CMD_COLLIDE_US);
+                }
+#endif
                 return;
             }
         }
