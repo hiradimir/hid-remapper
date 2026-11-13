@@ -1256,6 +1256,14 @@ void remote_log_init(void) {
     // 【2026-11-13】Flash 書き込みストレス (検証専用)
     remote_log_eventf("BUILD VARIANT flash_stress=%d", (int) FLASH_STRESS_MS);
 #endif
+#if defined(STALL_EMU_MS) && STALL_EMU_MS > 0
+    // 【2026-11-13】IRQ 停止ストレス (検証専用)
+    remote_log_eventf("BUILD VARIANT stall_emu=%d/%d", (int) STALL_EMU_MS, (int) STALL_EMU_US);
+#endif
+#if defined(CMD_COLLIDE_US) && CMD_COLLIDE_US > 0
+    // 【2026-11-13】コマンド衝突テスト (検証専用)
+    remote_log_eventf("BUILD VARIANT cmd_collide=%d", (int) CMD_COLLIDE_US);
+#endif
 
     remote_log_eventf("RLOG init target=%s:%d ssid=%s ip=%s",
                       RLOG_TARGET_IP, RLOG_TARGET_PORT, rlog_ssid_masked(),

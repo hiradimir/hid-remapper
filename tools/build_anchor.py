@@ -1402,6 +1402,50 @@ patch(WT + '/firmware/src/remote_log.cc', [
 ])
 
 
+# --- 2026-11-13: IRQ 停止ストレス (STALL_EMU) ---
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ('#ifndef FLASH_STRESS_MS\n#define FLASH_STRESS_MS 0\n#endif',
+     '#ifndef FLASH_STRESS_MS\n#define FLASH_STRESS_MS 0\n#endif\n// 【2026-11-13】IRQ 停止の周期 (ms) と停止時間 (us)。0 で無効\n#ifndef STALL_EMU_MS\n#define STALL_EMU_MS 0\n#endif\n#ifndef STALL_EMU_US\n#define STALL_EMU_US 10000\n#endif'),
+    ('#if FLASH_STRESS_MS > 0\n    // 【2026-11-13】Flash 書き込みストレス (検証専用)',
+     '#if STALL_EMU_MS > 0\n    // 【2026-11-13】IRQ 停止ストレス (検証専用・Flash 摩耗なし)。\n    // CYW43 のドライバは IRQ で動くので、IRQ を止めれば Flash 書き込み中と\n    // 同じ「ホストが止まる」状況を再現できる\n    {\n        static uint64_t next_stall_us = 0;\n        if (next_stall_us == 0) next_stall_us = now_us + (STALL_EMU_MS * 1000ULL);\n        if (now_us >= next_stall_us) {\n            next_stall_us = now_us + (STALL_EMU_MS * 1000ULL);\n            uint32_t irq_state = save_and_disable_interrupts();\n            uint64_t t0 = time_us_64();\n            while ((time_us_64() - t0) < STALL_EMU_US) {\n                tight_loop_contents();\n            }\n            restore_interrupts(irq_state);\n            remote_log_eventf("BT STALL-EMU ms=%u us=%u", (unsigned) STALL_EMU_MS,\n                              (unsigned) STALL_EMU_US);\n        }\n    }\n#endif\n\n#if FLASH_STRESS_MS > 0\n    // 【2026-11-13】Flash 書き込みストレス (検証専用)'),
+    ('#include "hardware/watchdog.h"',
+     '#include "hardware/watchdog.h"\n#include "hardware/sync.h"  // IRQ 停止ストレスの計装用'),
+])
+
+patch(WT + '/firmware/src/remote_log.cc', [
+    ('#if defined(FLASH_STRESS_MS) && FLASH_STRESS_MS > 0\n    // 【2026-11-13】Flash 書き込みストレス (検証専用)\n    remote_log_eventf("BUILD VARIANT flash_stress=%d", (int) FLASH_STRESS_MS);\n#endif',
+     '#if defined(FLASH_STRESS_MS) && FLASH_STRESS_MS > 0\n    // 【2026-11-13】Flash 書き込みストレス (検証専用)\n    remote_log_eventf("BUILD VARIANT flash_stress=%d", (int) FLASH_STRESS_MS);\n#endif\n#if defined(STALL_EMU_MS) && STALL_EMU_MS > 0\n    // 【2026-11-13】IRQ 停止ストレス (検証専用)\n    remote_log_eventf("BUILD VARIANT stall_emu=%d/%d", (int) STALL_EMU_MS, (int) STALL_EMU_US);\n#endif'),
+])
+
+patch(WT + '/firmware/CMakeLists.txt', [
+    ('set(FLASH_STRESS_MS 0 CACHE STRING "Force a TLV flash write every N ms (diagnostic)")',
+     'set(FLASH_STRESS_MS 0 CACHE STRING "Force a TLV flash write every N ms (diagnostic)")\n# 【2026-11-13】IRQ 停止ストレス (検証専用)。0 で無効\nset(STALL_EMU_MS 0 CACHE STRING "Stop interrupts every N ms (diagnostic)")\nset(STALL_EMU_US 10000 CACHE STRING "Interrupt-off duration in us (diagnostic)")'),
+    ('    if(NOT FLASH_STRESS_MS STREQUAL "0")\n        target_compile_definitions(remapper PUBLIC FLASH_STRESS_MS=${FLASH_STRESS_MS})\n    endif()',
+     '    if(NOT FLASH_STRESS_MS STREQUAL "0")\n        target_compile_definitions(remapper PUBLIC FLASH_STRESS_MS=${FLASH_STRESS_MS})\n    endif()\n    if(NOT STALL_EMU_MS STREQUAL "0")\n        target_compile_definitions(remapper PUBLIC STALL_EMU_MS=${STALL_EMU_MS})\n        target_compile_definitions(remapper PUBLIC STALL_EMU_US=${STALL_EMU_US})\n    endif()'),
+])
+
+
+# --- 2026-11-13: コマンド衝突テスト (CMD_COLLIDE_US) ---
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ('static void adv_set(int enable) {\n    adv_enable_req = enable;',
+     '#ifndef CMD_COLLIDE_US\n#define CMD_COLLIDE_US 0\n#endif\n\nstatic void adv_set(int enable) {\n    adv_enable_req = enable;'),
+    ('    } else {\n        adv_pending_since_us = 0;\n    }\n    gap_advertisements_enable(enable);\n}',
+     '    } else {\n        adv_pending_since_us = 0;\n    }\n    gap_advertisements_enable(enable);\n#if CMD_COLLIDE_US > 0\n    // 【2026-11-13】衝突テスト (検証専用): コマンド送信直後に IRQ を止めて、\n    // 「応答が返る瞬間にホストが止まる」状況を確実に作る\n    {\n        uint32_t irq_state = save_and_disable_interrupts();\n        uint64_t t0 = time_us_64();\n        while ((time_us_64() - t0) < CMD_COLLIDE_US) {\n            tight_loop_contents();\n        }\n        restore_interrupts(irq_state);\n        remote_log_eventf("BT CMD-COLLIDE us=%u en=%d", (unsigned) CMD_COLLIDE_US, enable);\n    }\n#endif\n}'),
+])
+
+patch(WT + '/firmware/src/remote_log.cc', [
+    ('#if defined(STALL_EMU_MS) && STALL_EMU_MS > 0\n    // 【2026-11-13】IRQ 停止ストレス (検証専用)\n    remote_log_eventf("BUILD VARIANT stall_emu=%d/%d", (int) STALL_EMU_MS, (int) STALL_EMU_US);\n#endif',
+     '#if defined(STALL_EMU_MS) && STALL_EMU_MS > 0\n    // 【2026-11-13】IRQ 停止ストレス (検証専用)\n    remote_log_eventf("BUILD VARIANT stall_emu=%d/%d", (int) STALL_EMU_MS, (int) STALL_EMU_US);\n#endif\n#if defined(CMD_COLLIDE_US) && CMD_COLLIDE_US > 0\n    // 【2026-11-13】コマンド衝突テスト (検証専用)\n    remote_log_eventf("BUILD VARIANT cmd_collide=%d", (int) CMD_COLLIDE_US);\n#endif'),
+])
+
+patch(WT + '/firmware/CMakeLists.txt', [
+    ('set(STALL_EMU_US 10000 CACHE STRING "Interrupt-off duration in us (diagnostic)")',
+     'set(STALL_EMU_US 10000 CACHE STRING "Interrupt-off duration in us (diagnostic)")\n# 【2026-11-13】コマンド送信直後に IRQ を止める衝突テスト (検証専用)\nset(CMD_COLLIDE_US 0 CACHE STRING "Block interrupts right after sending an advertising command (diagnostic)")'),
+    ('    if(NOT STALL_EMU_MS STREQUAL "0")\n        target_compile_definitions(remapper PUBLIC STALL_EMU_MS=${STALL_EMU_MS})\n        target_compile_definitions(remapper PUBLIC STALL_EMU_US=${STALL_EMU_US})\n    endif()',
+     '    if(NOT STALL_EMU_MS STREQUAL "0")\n        target_compile_definitions(remapper PUBLIC STALL_EMU_MS=${STALL_EMU_MS})\n        target_compile_definitions(remapper PUBLIC STALL_EMU_US=${STALL_EMU_US})\n    endif()\n    if(NOT CMD_COLLIDE_US STREQUAL "0")\n        target_compile_definitions(remapper PUBLIC CMD_COLLIDE_US=${CMD_COLLIDE_US})\n    endif()'),
+])
+
+
 # --- 生成物の自己検算 (2026-11-01 追加) -------------------------------------
 # 「パッチは当たったように見えるが実は欠けている」事故を防ぐ。
 # 実際に wake37 の health_acl_run++ が欠け、aclrun が常に 0 のまま
@@ -1430,6 +1474,8 @@ REQUIRED_MARKERS = [
     ('firmware/src/ble_hid.cc', 'BT HCI-RECYCLE'),
     ('firmware/src/ble_hid.cc', 'BT FLASH-WRITE'),
     ('firmware/src/remote_log.cc', 'flash_stress='),
+    ('firmware/src/ble_hid.cc', 'BT STALL-EMU'),
+    ('firmware/src/ble_hid.cc', 'BT CMD-COLLIDE'),
     ('firmware/src/remote_log.cc', 'temp=%d ccmd=%d'),
     ('firmware/src/remote_log.cc', 'bl43_flowctl=off'),
     ('firmware/src/remote_log.cc', 'USB DEV %s'),

@@ -8,6 +8,7 @@
 #include "pico/async_context.h"
 #include "pico/unique_id.h"
 #include "hardware/watchdog.h"
+#include "hardware/sync.h"  // IRQ 停止ストレスの計装用
 #include "btstack.h"
 #include "btstack_config.h"
 #include "ble/le_device_db.h"
@@ -311,6 +312,10 @@ static uint64_t adv_verify_deadline_us = 0;
 static uint8_t adv_verify_count = 0;
 static uint64_t adv_retry_next_us = 0;
 
+#ifndef CMD_COLLIDE_US
+#define CMD_COLLIDE_US 0
+#endif
+
 static void adv_set(int enable) {
     adv_enable_req = enable;
     // 【2026-11-12】enable 要求から ADV-EN 完了までの経過を測る
@@ -320,6 +325,20 @@ static void adv_set(int enable) {
         adv_pending_since_us = 0;
     }
     gap_advertisements_enable(enable);
+#if CMD_COLLIDE_US > 0
+    // 【2026-11-13】衝突テスト (検証専用): コマンド送信直後に IRQ を止めて、
+    // 「応答が返る瞬間にホストが止まる」状況を確実に作る。
+    // ここでクレジットが落ちれば、膠着の機序がこれで確定する
+    {
+        uint32_t irq_state = save_and_disable_interrupts();
+        uint64_t t0 = time_us_64();
+        while ((time_us_64() - t0) < CMD_COLLIDE_US) {
+            tight_loop_contents();
+        }
+        restore_interrupts(irq_state);
+        remote_log_eventf("BT CMD-COLLIDE us=%u en=%d", (unsigned) CMD_COLLIDE_US, enable);
+    }
+#endif
 }
 
 
@@ -686,6 +705,13 @@ static void tlv_store_timed(uint32_t tag, const void* data, int len, const char*
 // 既定は 0 (無効)。実験時のみ -DFLASH_STRESS_MS=10000 などで有効化する
 #ifndef FLASH_STRESS_MS
 #define FLASH_STRESS_MS 0
+#endif
+// 【2026-11-13】IRQ 停止の周期 (ms) と停止時間 (us)。0 で無効
+#ifndef STALL_EMU_MS
+#define STALL_EMU_MS 0
+#endif
+#ifndef STALL_EMU_US
+#define STALL_EMU_US 10000
 #endif
 #if FLASH_STRESS_MS > 0
 #define TLV_TAG_STRESS 0x53545253u
@@ -1980,6 +2006,27 @@ void ble_hid_task(void) {
 static void ble_hid_task_locked(void) {
     static uint64_t last_countdown_check_us = 0;
     uint64_t now_us = time_us_64();
+
+#if STALL_EMU_MS > 0
+    // 【2026-11-13】IRQ 停止ストレス (検証専用・Flash 摩耗なし)。
+    // CYW43 のドライバは IRQ で動くので、IRQ を止めれば Flash 書き込み中と
+    // 同じ「ホストが止まる」状況を再現できる
+    {
+        static uint64_t next_stall_us = 0;
+        if (next_stall_us == 0) next_stall_us = now_us + (STALL_EMU_MS * 1000ULL);
+        if (now_us >= next_stall_us) {
+            next_stall_us = now_us + (STALL_EMU_MS * 1000ULL);
+            uint32_t irq_state = save_and_disable_interrupts();
+            uint64_t t0 = time_us_64();
+            while ((time_us_64() - t0) < STALL_EMU_US) {
+                tight_loop_contents();
+            }
+            restore_interrupts(irq_state);
+            remote_log_eventf("BT STALL-EMU ms=%u us=%u", (unsigned) STALL_EMU_MS,
+                              (unsigned) STALL_EMU_US);
+        }
+    }
+#endif
 
 #if FLASH_STRESS_MS > 0
     // 【2026-11-13】Flash 書き込みストレス (検証専用)
