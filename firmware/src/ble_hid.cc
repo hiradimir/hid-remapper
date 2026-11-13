@@ -522,11 +522,12 @@ static void can_send_timeout_handler(btstack_timer_source_t *ts) {
             uint32_t cp_idle = (health_last_cp_us != 0)
                                    ? (uint32_t) ((now_d - health_last_cp_us) / 1000ULL)
                                    : 0xFFFFFFFFu;
-            remote_log_eventf("CANSEND-TO n=%d hci_idle=%ums cp_idle=%ums rlog_age=%ums rssi=%d conn=%u heap=%u temp=%d",
+            remote_log_eventf("CANSEND-TO n=%d hci_idle=%ums cp_idle=%ums rlog_age=%ums rssi=%d conn=%u heap=%u temp=%d ccmd=%d",
                               consecutive_can_send_timeouts, (unsigned) hci_idle,
                               (unsigned) cp_idle, (unsigned) remote_log_tx_age_ms(),
                               remote_log_last_rssi(), (unsigned) health_conn_count,
-                              (unsigned) remote_log_heap_used(), remote_log_chip_temp_c());
+                              (unsigned) remote_log_heap_used(), remote_log_chip_temp_c(),
+                              hci_can_send_command_packet_now() ? 1 : 0);
         }
         // 【2026-11-09】送信要求が 2 秒通らない = アプリ状態が CONNECTED でも
         // リンクは実質死んでいる。ここで tx_stalled を立てないと、転送先が
@@ -1979,7 +1980,11 @@ static void ble_hid_task_locked(void) {
                 adv_pending_since_us = now_d;
                 gap_advertisements_enable(0);
                 adv_set(1);
-                remote_log_eventf("BT ADV-NOACK retry=%u", (unsigned) adv_fail_count);
+                // 【2026-11-13】ccmd=0 なら BTstack の HCI コマンドクレジットが
+                // 枯渇している (= Command Complete を取りこぼした) 証拠
+                remote_log_eventf("BT ADV-NOACK retry=%u ccmd=%d",
+                                  (unsigned) adv_fail_count,
+                                  hci_can_send_command_packet_now() ? 1 : 0);
             } else {
                 ble_dead_declared = true;
                 ble_dead_since_us = now_d;
@@ -1993,14 +1998,16 @@ static void ble_hid_task_locked(void) {
                 ble_dead_wait_log_us = now_d;
                 remote_log_eventf(
                     "BT DEAD-SNAP up=%us conn=%u heap=%u temp=%d rssi=%d slot=%d bonded=%d "
-                    "ok=%u cp=%u disc=%u rs=0x%02X acl=%u blk=%u adv_ok=%d",
+                    "ok=%u cp=%u disc=%u rs=0x%02X acl=%u blk=%u adv_ok=%d ccmd=%d",
                     (unsigned) (now_d / 1000000ULL), (unsigned) health_conn_count,
                     (unsigned) remote_log_heap_used(), remote_log_chip_temp_c(),
                     remote_log_last_rssi(), current_slot + 1,
                     is_slot_bonded(current_slot) ? 1 : 0, (unsigned) health_ok,
                     (unsigned) health_cp_packets, (unsigned) health_disc,
                     (unsigned) health_disc_reason, (unsigned) health_acl_full,
-                    (unsigned) health_blocked, adv_enabled_ok ? 1 : 0);
+                    (unsigned) health_blocked, adv_enabled_ok ? 1 : 0,
+                    // 【2026-11-13】HCI コマンドクレジットが残っているか
+                    hci_can_send_command_packet_now() ? 1 : 0);
                 // 以後 USB で運用しつつ、再起動の可否を待つ
                 health_tx_stalled = true;
             }

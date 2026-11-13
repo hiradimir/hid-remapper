@@ -1340,6 +1340,19 @@ patch(WT + '/firmware/src/ble_hid.cc', [
 ])
 
 
+# --- 2026-11-13: HCI コマンドクレジット (ccmd) の観測 ---
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ('                remote_log_eventf("BT ADV-NOACK retry=%u", (unsigned) adv_fail_count);',
+     '                // 【2026-11-13】ccmd=0 なら BTstack の HCI コマンドクレジットが\n                // 枯渇している (= Command Complete を取りこぼした) 証拠\n                remote_log_eventf("BT ADV-NOACK retry=%u ccmd=%d",\n                                  (unsigned) adv_fail_count,\n                                  hci_can_send_command_packet_now() ? 1 : 0);'),
+    ('                    "BT DEAD-SNAP up=%us conn=%u heap=%u temp=%d rssi=%d slot=%d bonded=%d "\n                    "ok=%u cp=%u disc=%u rs=0x%02X acl=%u blk=%u adv_ok=%d",',
+     '                    "BT DEAD-SNAP up=%us conn=%u heap=%u temp=%d rssi=%d slot=%d bonded=%d "\n                    "ok=%u cp=%u disc=%u rs=0x%02X acl=%u blk=%u adv_ok=%d ccmd=%d",'),
+    ('                    (unsigned) health_blocked, adv_enabled_ok ? 1 : 0);',
+     '                    (unsigned) health_blocked, adv_enabled_ok ? 1 : 0,\n                    // 【2026-11-13】HCI コマンドクレジットが残っているか\n                    hci_can_send_command_packet_now() ? 1 : 0);'),
+    ('            remote_log_eventf("CANSEND-TO n=%d hci_idle=%ums cp_idle=%ums rlog_age=%ums rssi=%d conn=%u heap=%u temp=%d",\n                              consecutive_can_send_timeouts, (unsigned) hci_idle,\n                              (unsigned) cp_idle, (unsigned) remote_log_tx_age_ms(),\n                              remote_log_last_rssi(), (unsigned) health_conn_count,\n                              (unsigned) remote_log_heap_used(), remote_log_chip_temp_c());',
+     '            remote_log_eventf("CANSEND-TO n=%d hci_idle=%ums cp_idle=%ums rlog_age=%ums rssi=%d conn=%u heap=%u temp=%d ccmd=%d",\n                              consecutive_can_send_timeouts, (unsigned) hci_idle,\n                              (unsigned) cp_idle, (unsigned) remote_log_tx_age_ms(),\n                              remote_log_last_rssi(), (unsigned) health_conn_count,\n                              (unsigned) remote_log_heap_used(), remote_log_chip_temp_c(),\n                              hci_can_send_command_packet_now() ? 1 : 0);'),
+])
+
+
 # --- 生成物の自己検算 (2026-11-01 追加) -------------------------------------
 # 「パッチは当たったように見えるが実は欠けている」事故を防ぐ。
 # 実際に wake37 の health_acl_run++ が欠け、aclrun が常に 0 のまま
@@ -1364,6 +1377,7 @@ REQUIRED_MARKERS = [
     ('firmware/src/ble_hid.cc', 'BT DEAD-SNAP'),
     ('firmware/src/ble_hid.cc', 'BT AUTO-REBOOT'),
     ('firmware/src/ble_hid.cc', 'proact_pending_us'),
+    ('firmware/src/ble_hid.cc', 'ccmd=%d'),
     ('firmware/src/remote_log.cc', 'bl43_flowctl=off'),
     ('firmware/src/remote_log.cc', 'USB DEV %s'),
     ('firmware/src/remote_log.cc', 'clat=%u st=%u'),

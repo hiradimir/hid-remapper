@@ -51,6 +51,7 @@ def main(argv):
         (b'BT CANSEND-PROACT', 1, 'CANSEND 2 秒不通で自発切断 (wake46)'),
         (b'hci_idle=%ums', 1, '膠着の切り分け情報 (wake47)'),
         (b'conn=%u heap=%u temp=%d', 1, '寿命仮説の切り分け (wake51)'),
+        (b'ccmd=%d', 1, 'HCI コマンドクレジットの観測 (wake59)'),
         (b'bl43_flowctl=off', None, 'BL-43 フロー制御 OFF の A/B ビルド (任意)'),
         (b'ADV-VERIFY', 1, '再投入後の広告検証 (wake41)'),
         (b'CTRL-DEAD', 1, '復旧不能の検出 (wake41)'),
