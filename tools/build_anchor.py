@@ -1505,6 +1505,27 @@ patch(WT + '/firmware/CMakeLists.txt', [
 ])
 
 
+# --- 2026-11-14: 再現テスト (送信し続ける版 REPRO_FLOOD_MS) ---
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ('#ifndef REPRO_CYCLE_MS\n#define REPRO_CYCLE_MS 0\n#endif',
+     '#ifndef REPRO_CYCLE_MS\n#define REPRO_CYCLE_MS 0\n#endif\n// 【2026-11-14】再現テスト (検証専用): 一定周期でゼロ移動のマウスレポートを送り続け、\n// 「ずっと使っている」状態を合成する。0 で無効\n#ifndef REPRO_FLOOD_MS\n#define REPRO_FLOOD_MS 0\n#endif'),
+    ('#if REPRO_CYCLE_MS > 0\n    // 【2026-11-14】再現テスト: 切断と再広告を交互に繰り返す',
+     '#if REPRO_FLOOD_MS > 0\n    // 【2026-11-14】再現テスト: ゼロ移動のマウスレポートを送り続ける\n    if (ble_hid_is_connected() && !ble_hid_is_tx_stalled()) {\n        static uint64_t next_flood_us = 0;\n        if (next_flood_us == 0) next_flood_us = now_us + (REPRO_FLOOD_MS * 1000ULL);\n        if (now_us >= next_flood_us) {\n            next_flood_us = now_us + (REPRO_FLOOD_MS * 1000ULL);\n            uint8_t zero_mouse[9] = {0};\n            ble_hid_send_report(1, zero_mouse, sizeof(zero_mouse));\n        }\n    }\n#endif\n\n#if REPRO_CYCLE_MS > 0\n    // 【2026-11-14】再現テスト: 切断と再広告を交互に繰り返す'),
+])
+
+patch(WT + '/firmware/src/remote_log.cc', [
+    ('#if defined(REPRO_CYCLE_MS) && REPRO_CYCLE_MS > 0\n    // 【2026-11-14】膠着の再現テスト (検証専用)\n    remote_log_eventf("BUILD VARIANT repro=%d", (int) REPRO_CYCLE_MS);\n#endif',
+     '#if defined(REPRO_CYCLE_MS) && REPRO_CYCLE_MS > 0\n    // 【2026-11-14】膠着の再現テスト (検証専用)\n    remote_log_eventf("BUILD VARIANT repro=%d", (int) REPRO_CYCLE_MS);\n#endif\n#if defined(REPRO_FLOOD_MS) && REPRO_FLOOD_MS > 0\n    // 【2026-11-14】膠着の再現テスト (送信し続ける版)\n    remote_log_eventf("BUILD VARIANT repro_flood=%d", (int) REPRO_FLOOD_MS);\n#endif'),
+])
+
+patch(WT + '/firmware/CMakeLists.txt', [
+    ('set(REPRO_CYCLE_MS 0 CACHE STRING "Auto disconnect/re-advertise every N ms (repro test)")',
+     'set(REPRO_CYCLE_MS 0 CACHE STRING "Auto disconnect/re-advertise every N ms (repro test)")\n# 【2026-11-14】再現テスト: 一定周期でゼロ移動マウスレポートを送り続ける\nset(REPRO_FLOOD_MS 0 CACHE STRING "Continuously send zero-move mouse reports every N ms (repro test)")'),
+    ('    if(NOT REPRO_CYCLE_MS STREQUAL "0")\n        target_compile_definitions(remapper PUBLIC REPRO_CYCLE_MS=${REPRO_CYCLE_MS})\n    endif()',
+     '    if(NOT REPRO_CYCLE_MS STREQUAL "0")\n        target_compile_definitions(remapper PUBLIC REPRO_CYCLE_MS=${REPRO_CYCLE_MS})\n    endif()\n    if(NOT REPRO_FLOOD_MS STREQUAL "0")\n        target_compile_definitions(remapper PUBLIC REPRO_FLOOD_MS=${REPRO_FLOOD_MS})\n    endif()'),
+])
+
+
 # --- 生成物の自己検算 (2026-11-01 追加) -------------------------------------
 # 「パッチは当たったように見えるが実は欠けている」事故を防ぐ。
 # 実際に wake37 の health_acl_run++ が欠け、aclrun が常に 0 のまま

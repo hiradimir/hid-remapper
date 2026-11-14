@@ -321,6 +321,12 @@ static uint64_t adv_retry_next_us = 0;
 #ifndef REPRO_CYCLE_MS
 #define REPRO_CYCLE_MS 0
 #endif
+// 【2026-11-14】再現テスト (検証専用): 一定周期でゼロ移動のマウスレポートを送り続け、
+// 「ずっと使っている」状態を合成する。カーソルは動かないが ACL 送信は発生する。
+// 膠着が「送信し続けている最中」に起きるなら、これで狙える。0 で無効
+#ifndef REPRO_FLOOD_MS
+#define REPRO_FLOOD_MS 0
+#endif
 
 static void adv_set(int enable) {
     adv_enable_req = enable;
@@ -2073,6 +2079,20 @@ static void ble_hid_task_locked(void) {
         adv_enable_pending = false;
         adv_set(1);
     }
+
+#if REPRO_FLOOD_MS > 0
+    // 【2026-11-14】再現テスト: ゼロ移動のマウスレポートを送り続ける
+    // (カーソルは動かないが、送信経路は実際に使われる)
+    if (ble_hid_is_connected() && !ble_hid_is_tx_stalled()) {
+        static uint64_t next_flood_us = 0;
+        if (next_flood_us == 0) next_flood_us = now_us + (REPRO_FLOOD_MS * 1000ULL);
+        if (now_us >= next_flood_us) {
+            next_flood_us = now_us + (REPRO_FLOOD_MS * 1000ULL);
+            uint8_t zero_mouse[9] = {0};
+            ble_hid_send_report(1, zero_mouse, sizeof(zero_mouse));
+        }
+    }
+#endif
 
 #if REPRO_CYCLE_MS > 0
     // 【2026-11-14】再現テスト: 切断と再広告を交互に繰り返す

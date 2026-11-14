@@ -1278,6 +1278,10 @@ void remote_log_init(void) {
     // 【2026-11-14】膠着の再現テスト (検証専用)
     remote_log_eventf("BUILD VARIANT repro=%d", (int) REPRO_CYCLE_MS);
 #endif
+#if defined(REPRO_FLOOD_MS) && REPRO_FLOOD_MS > 0
+    // 【2026-11-14】膠着の再現テスト (送信し続ける版)
+    remote_log_eventf("BUILD VARIANT repro_flood=%d", (int) REPRO_FLOOD_MS);
+#endif
 
     remote_log_eventf("RLOG init target=%s:%d ssid=%s ip=%s",
                       RLOG_TARGET_IP, RLOG_TARGET_PORT, rlog_ssid_masked(),

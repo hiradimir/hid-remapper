@@ -55,6 +55,8 @@ set(STALL_EMU_US 10000 CACHE STRING "Interrupt-off duration in us (diagnostic)")
 set(CMD_COLLIDE_US 0 CACHE STRING "Block interrupts right after sending an advertising command (diagnostic)")
 # 【2026-11-14】膠着の再現テスト (検証専用): 一定周期で切断/再広告を繰り返す
 set(REPRO_CYCLE_MS 0 CACHE STRING "Auto disconnect/re-advertise every N ms (repro test)")
+# 【2026-11-14】再現テスト: 一定周期でゼロ移動マウスレポートを送り続ける
+set(REPRO_FLOOD_MS 0 CACHE STRING "Continuously send zero-move mouse reports every N ms (repro test)")
 if(BL43_NO_FLOW_CONTROL)
     # btstack_config.h は BTstack 側のソースが読むため、ライブラリ側に定義を渡す
     if(TARGET pico_btstack_ble)
@@ -122,6 +124,9 @@ if(ENABLE_BLE)
     endif()
     if(NOT REPRO_CYCLE_MS STREQUAL "0")
         target_compile_definitions(remapper PUBLIC REPRO_CYCLE_MS=${REPRO_CYCLE_MS})
+    endif()
+    if(NOT REPRO_FLOOD_MS STREQUAL "0")
+        target_compile_definitions(remapper PUBLIC REPRO_FLOOD_MS=${REPRO_FLOOD_MS})
     endif()
     if(BL45_SKIP_ADDR_CHANGE)
         target_compile_definitions(remapper PUBLIC BL45_SKIP_ADDR_CHANGE=1)
