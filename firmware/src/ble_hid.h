@@ -67,7 +67,9 @@ bool ble_hid_is_pairing(void);
 void ble_hid_reset_lat_max(void);
 void ble_hid_reset_dmax(void);
 bool ble_hid_can_send(void);
-void ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len);
+// 【2026-11-14】受理されたか (true) / されなかったか (false) を返す。
+// false のとき remapper 側はキューに残して再試行する (キー固着の防止)
+bool ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len);
 void ble_hid_kick_reconnect(void);
 
 void ble_pair_new_device(void);
@@ -105,8 +107,9 @@ static inline bool ble_hid_is_dormant(void) { return false; }
 static inline void ble_hid_wake_from_dormant(void) {}
 static inline bool ble_hid_is_pairing(void) { return false; }
 static inline bool ble_hid_can_send(void) { return false; }
-static inline void ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len) {
+static inline bool ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len) {
     (void)report_id; (void)data; (void)len;
+    return false;
 }
 static inline void ble_hid_kick_reconnect(void) {}
 static inline void ble_pair_new_device(void) {}

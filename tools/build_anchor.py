@@ -1547,6 +1547,41 @@ patch(WT + '/firmware/src/remapper.cc', [
      '    bool sent = false;\n    if (our_descriptor == &our_descriptors[our_descriptor_number]) {\n        sent = do_send_report(0, outgoing_reports[or_head], report_sizes[report_id] + 1);\n        if (!sent) {\n            // 【2026-11-14】送れなかったらキューに残して次のスロットで再試行する。\n            // 以前は成否に関わらず pop していたため、キーボードの key-up が\n            // 捨てられるとホスト側でキーが押しっぱなしになった\n            return false;\n        }\n    }\n\n    or_head = (or_head + 1) % OR_BUFSIZE;\n    or_items--;'),
 ])
 
+# --- 2026-11-14: ble_hid_send_report を bool 化 + flood を「操作中は休む」 ---
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ('#ifndef REPRO_FLOOD_MS\n#define REPRO_FLOOD_MS 0\n#endif',
+     '#ifndef REPRO_FLOOD_MS\n#define REPRO_FLOOD_MS 0\n#endif\n#ifndef REPRO_FLOOD_IDLE_MS\n// 【2026-11-14】人間の入力からこの時間が経つまで flood を止める。\n// 使っている最中にダミーが送信キューを奪うと、タイピングが遅延・欠落する\n#define REPRO_FLOOD_IDLE_MS 2000\n#endif\n\n// 【2026-11-14】人間の最終操作時刻 (remapper が更新する)\nextern volatile uint64_t last_real_ingest_us;'),
+    ('void ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len) {\n    if (current_state != BLE_STATE_CONNECTED || con_handle == HCI_CON_HANDLE_INVALID) {\n        health_skip_state++;\n        return;\n    }\n\n    // 【BL-15】暗号化完了 かつ 該当レポート購読完了を厳密にチェック\n    if (!ble_encrypted) {\n        health_skip_enc++;\n        return;\n    }\n    if (report_id == 2 && !ble_kbd_ready) {\n        health_skip_ready++;\n        return;\n    }      // Report ID 2: Keyboard\n    if (report_id == 1 && !ble_mouse_ready) {\n        health_skip_ready++;\n        return;\n    }    // Report ID 1: Mouse\n    if (report_id == 3 && !ble_consumer_ready) {\n        health_skip_ready++;\n        return;\n    } // Report ID 3: Consumer (BL-12)\n    if (report_id != 1 && report_id != 2 && report_id != 3) return;\n\n    if (!ble_can_send) {\n        health_blocked++; // フロー制御待ちで捨てた (ウェッジ時に増える)\n        return;\n    }\n    if (credit_stall) {\n        // クレジットが返らない間は 1 秒に 1 回だけ試す。0x57 の連打を止める\n        uint64_t nowp = time_us_64();\n        if (nowp < credit_stall_next_probe_us) {\n            health_blocked++;\n            return;\n        }\n        credit_stall_next_probe_us = nowp + 1000000ULL;\n    }\n\n    ble_lock();\n\n    oled_notify_tx();\n    uint8_t status = hids_device_send_input_report_for_id(con_handle, report_id, (uint8_t*)data, len);\n    if (status == ERROR_CODE_SUCCESS) {\n        // 「放置 -> 触った」遷移のマーカー (直後に DISC が出れば引き金が再開だと分かる)\n        static uint64_t last_send_us = 0;\n        const uint64_t now_us = time_us_64();\n        if (last_send_us != 0 && (now_us - last_send_us) < 2000ULL) {\n            health_burst++;\n        }\n        if (last_send_us != 0 && (now_us - last_send_us) >= 10000000ULL) {\n            remote_log_eventf("BT RESUME gap=%us", (unsigned) ((now_us - last_send_us) / 1000000ULL));\n            last_resume_us = now_us;\n        }\n        last_send_us = now_us;\n        health_ok++;\n        health_last_ok_us = now_us;\n        health_acl_run = 0; // 通ったので連続 0x57 は途切れた\n    } else if (status == 0x57) { // BTSTACK_ACL_BUFFERS_FULL: 受理されず再要求になる\n        health_acl_full++;\n        // 2026-11-01 修正: この 1 行が wake37 のミラーで欠けており、aclrun が\n        // 常に 0 のまま = 0x57 ストーム検知が一度も動かなかった\n        if (health_acl_run < 0xFFFF) health_acl_run++;\n    }\n    if (status == ERROR_CODE_SUCCESS || status == 0x57) { // 0x57: BTSTACK_ACL_BUFFERS_FULL\n        ble_can_send = false;\n        btstack_run_loop_remove_timer(&can_send_timeout_timer);\n        btstack_run_loop_set_timer_handler(&can_send_timeout_timer, can_send_timeout_handler);\n        btstack_run_loop_set_timer(&can_send_timeout_timer, 2000); // 2秒の安全ウォッチドッグ\n        btstack_run_loop_add_timer(&can_send_timeout_timer);\n        can_send_req_us = time_us_64();\n        uint8_t req_err = hids_device_request_can_send_now_event(con_handle);\n        if (req_err != ERROR_CODE_SUCCESS) {\n            can_send_req_us = 0;\n            ble_can_send = true;\n            btstack_run_loop_remove_timer(&can_send_timeout_timer);\n        }\n    } else {\n        printf("[BLE-ERR] send_report id=%d len=%d status=0x%02X\\r\\n", report_id, len, status);\n        ble_can_send = true;\n    }\n\n    ble_unlock();\n}\n\n',
+     'bool ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len) {\n    // 【2026-11-14】受理されたかを返す。false なら呼び出し側 (remapper) が\n    // キューに残して次のスロットで再試行する。以前は void で常に成功扱い\n    // だったため、key-up が捨てられても検出できずキーが固着した\n    if (current_state != BLE_STATE_CONNECTED || con_handle == HCI_CON_HANDLE_INVALID) {\n        health_skip_state++;\n        return false;\n    }\n\n    // 【BL-15】暗号化完了 かつ 該当レポート購読完了を厳密にチェック\n    if (!ble_encrypted) {\n        health_skip_enc++;\n        return false;\n    }\n    if (report_id == 2 && !ble_kbd_ready) {      // Report ID 2: Keyboard\n        health_skip_ready++;\n        return false;\n    }\n    if (report_id == 1 && !ble_mouse_ready) {    // Report ID 1: Mouse\n        health_skip_ready++;\n        return false;\n    }\n    if (report_id == 3 && !ble_consumer_ready) { // Report ID 3: Consumer (BL-12)\n        health_skip_ready++;\n        return false;\n    }\n    if (report_id != 1 && report_id != 2 && report_id != 3) return false;\n\n    if (!ble_can_send) {\n        health_blocked++; // フロー制御待ち (呼び出し側がキューに残して再試行する)\n        return false;\n    }\n    if (credit_stall) {\n        // クレジットが返らない間は 1 秒に 1 回だけ試す。0x57 の連打を止める\n        uint64_t nowp = time_us_64();\n        if (nowp < credit_stall_next_probe_us) {\n            health_blocked++;\n            return false;\n        }\n        credit_stall_next_probe_us = nowp + 1000000ULL;\n    }\n\n    ble_lock();\n\n    oled_notify_tx();\n    uint8_t status = hids_device_send_input_report_for_id(con_handle, report_id, (uint8_t*)data, len);\n    if (status == ERROR_CODE_SUCCESS) {\n        // 「放置 -> 触った」遷移のマーカー (直後に DISC が出れば引き金が再開だと分かる)\n        static uint64_t last_send_us = 0;\n        const uint64_t now_us = time_us_64();\n        if (last_send_us != 0 && (now_us - last_send_us) < 2000ULL) {\n            health_burst++;\n        }\n        if (last_send_us != 0 && (now_us - last_send_us) >= 10000000ULL) {\n            remote_log_eventf("BT RESUME gap=%us", (unsigned) ((now_us - last_send_us) / 1000000ULL));\n            last_resume_us = now_us;\n        }\n        last_send_us = now_us;\n        health_ok++;\n        health_last_ok_us = now_us;\n        health_acl_run = 0; // 通ったので連続 0x57 は途切れた\n    } else if (status == 0x57) { // BTSTACK_ACL_BUFFERS_FULL: 受理されず再要求になる\n        health_acl_full++;\n        // 2026-11-01 修正: この 1 行が wake37 のミラーで欠けており、aclrun が\n        // 常に 0 のまま = 0x57 ストーム検知が一度も動かなかった\n        if (health_acl_run < 0xFFFF) health_acl_run++;\n    }\n    if (status == ERROR_CODE_SUCCESS || status == 0x57) { // 0x57: BTSTACK_ACL_BUFFERS_FULL\n        ble_can_send = false;\n        btstack_run_loop_remove_timer(&can_send_timeout_timer);\n        btstack_run_loop_set_timer_handler(&can_send_timeout_timer, can_send_timeout_handler);\n        btstack_run_loop_set_timer(&can_send_timeout_timer, 2000); // 2秒の安全ウォッチドッグ\n        btstack_run_loop_add_timer(&can_send_timeout_timer);\n        can_send_req_us = time_us_64();\n        uint8_t req_err = hids_device_request_can_send_now_event(con_handle);\n        if (req_err != ERROR_CODE_SUCCESS) {\n            can_send_req_us = 0;\n            ble_can_send = true;\n            btstack_run_loop_remove_timer(&can_send_timeout_timer);\n        }\n    } else {\n        printf("[BLE-ERR] send_report id=%d len=%d status=0x%02X\\r\\n", report_id, len, status);\n        ble_can_send = true;\n    }\n\n    ble_unlock();\n    return status == ERROR_CODE_SUCCESS;\n}\n\n'),
+    ('    if (ble_hid_is_connected() && !ble_hid_is_tx_stalled()) {\n        static uint64_t next_flood_us = 0;',
+     '    // 直近 REPRO_FLOOD_IDLE_MS に本物の入力があれば flood は休む\n    // (使っている間は通常のペーシングだけ = タイピングを邪魔しない)\n    const bool flood_idle =\n        (last_real_ingest_us == 0) ||\n        ((now_us - last_real_ingest_us) > (REPRO_FLOOD_IDLE_MS * 1000ULL));\n    if (flood_idle && ble_hid_is_connected() && !ble_hid_is_tx_stalled()) {\n        static uint64_t next_flood_us = 0;'),
+    ('    ble_hid_send_report(report_id, report_data, report_len);\n    return true;',
+     '    // 【2026-11-14】受理されたかを返す。false なら remapper が再試行する\n    return ble_hid_send_report(report_id, report_data, report_len);'),
+])
+
+patch(WT + '/firmware/src/ble_hid.h', [
+    ('void ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len);',
+     '// 【2026-11-14】受理されたか (true) / されなかったか (false) を返す。\n// false のとき remapper 側はキューに残して再試行する (キー固着の防止)\nbool ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len);'),
+    ('static inline void ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len) {\n    (void)report_id; (void)data; (void)len;\n}',
+     'static inline bool ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len) {\n    (void)report_id; (void)data; (void)len;\n    return false;\n}'),
+])
+
+patch(WT + '/firmware/src/remapper.cc', [
+    ('volatile uint8_t last_ingest_protocol = 0;',
+     'volatile uint8_t last_ingest_protocol = 0;\n\n// 【2026-11-14】人間が実際に操作した最終時刻。再現テスト (REPRO_FLOOD_MS) が\n// 「使っている最中にキューを奪う」のを避けるためのゲートに使う\nvolatile uint64_t last_real_ingest_us = 0;'),
+])
+
+patch(WT + '/firmware/src/remapper_single.cc', [
+    ('        reports_received = true;\n        {\n            uint16_t itf',
+     '        reports_received = true;\n        last_real_ingest_us = time_us_64(); // 【2026-11-14】人間の操作時刻 (flood のゲート用)\n        {\n            uint16_t itf'),
+])
+
+patch(WT + '/firmware/src/remapper.h', [
+    ('extern volatile uint8_t last_ingest_protocol;',
+     'extern volatile uint8_t last_ingest_protocol;\n\n// 【2026-11-14】人間の最終操作時刻 (µs)。再現テストの flood を「操作中は休む」ために使う\nextern volatile uint64_t last_real_ingest_us;'),
+])
+
+
 # --- 生成物の自己検算 (2026-11-01 追加) ---
 REQUIRED_MARKERS = [
     ('firmware/src/ble_hid.cc', 'health_acl_run < 0xFFFF'),
@@ -1576,6 +1611,12 @@ REQUIRED_MARKERS = [
     ('firmware/src/remote_log.cc', 'temp=%d ccmd=%d'),
     ('firmware/src/main.cc', 'USB DEV re-attach'),
     ('firmware/src/remapper.cc', 'キーが押しっぱなし'),
+    ('firmware/src/remapper.cc', 'last_real_ingest_us = 0'),
+    ('firmware/src/ble_hid.cc', 'REPRO_FLOOD_IDLE_MS'),
+    ('firmware/src/ble_hid.cc', 'flood_idle'),
+    ('firmware/src/ble_hid.cc', 'bool ble_hid_send_report'),
+    ('firmware/src/ble_hid.cc', 'return status == ERROR_CODE_SUCCESS'),
+    ('firmware/src/remapper_single.cc', 'last_real_ingest_us = time_us_64'),
 ]
 for _rel, _needle in REQUIRED_MARKERS:
     _txt = open(WT + '/' + _rel).read()

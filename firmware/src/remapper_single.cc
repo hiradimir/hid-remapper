@@ -113,6 +113,7 @@ void report_received_callback(uint8_t dev_addr, uint8_t instance, uint8_t const*
         handle_received_report(report, len, (uint16_t) (dev_addr << 8) | instance);
 
         reports_received = true;
+        last_real_ingest_us = time_us_64(); // 【2026-11-14】人間の操作時刻 (flood のゲート用)
         {
             // ポインタ判定はデスクリプタ由来 (bInterfaceProtocol=0 のデバイスがあるため)
             uint16_t itf = (uint16_t) ((dev_addr << 8) | instance);

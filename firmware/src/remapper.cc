@@ -83,6 +83,10 @@ uint8_t or_items = 0;
 // 観測側が「マウスの入力だけ」を数えられるようにするための最小の公開
 volatile uint8_t last_ingest_protocol = 0;
 
+// 【2026-11-14】人間が実際に操作した最終時刻。再現テスト (REPRO_FLOOD_MS) が
+// 「使っている最中にキューを奪う」のを避けるためのゲートに使う
+volatile uint64_t last_real_ingest_us = 0;
+
 std::vector<uint8_t> report_ids;
 
 #define MAX_INPUT_STATES 1024

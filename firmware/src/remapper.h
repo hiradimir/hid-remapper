@@ -32,6 +32,9 @@ void read_report(bool* new_report, bool* tick);
 // 直近レポートの HID プロトコル (1=KBD, 2=Mouse, 0=不明)。remote_log の観測用
 extern volatile uint8_t last_ingest_protocol;
 
+// 【2026-11-14】人間の最終操作時刻 (µs)。再現テストの flood を「操作中は休む」ために使う
+extern volatile uint64_t last_real_ingest_us;
+
 void interval_override_updated();
 
 void parse_our_descriptor();

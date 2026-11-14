@@ -21,6 +21,7 @@ extern uint8_t outgoing_reports[OR_BUFSIZE][MAX_REPORT_SIZE + 1];
 extern uint8_t or_head;
 extern uint8_t or_items;
 extern uint8_t or_tail; // 【2026-11-14】再現テストでキューに積むため
+extern volatile uint64_t last_real_ingest_us; // 【2026-11-14】人間の最終操作時刻
 
 #include "btstack.h"
 #include "btstack_config.h"
@@ -339,6 +340,11 @@ static uint64_t adv_retry_next_us = 0;
 // 膠着が「送信し続けている最中」に起きるなら、これで狙える。0 で無効
 #ifndef REPRO_FLOOD_MS
 #define REPRO_FLOOD_MS 0
+#endif
+#ifndef REPRO_FLOOD_IDLE_MS
+// 【2026-11-14】人間の入力からこの時間が経つまで flood を止める。
+// 使っている最中にダミーが送信キューを奪うと、タイピングが遅延・欠落する
+#define REPRO_FLOOD_IDLE_MS 2000
 #endif
 
 static void adv_set(int enable) {
@@ -2098,7 +2104,12 @@ static void ble_hid_task_locked(void) {
     // 直接 ble_hid_send_report を叩くと許可待ちで自分自身が blk に計上され、
     // 「過負荷」ではなく「壊れた送信者」になってしまう (in=0 でも blk が増えた)。
     // キュー経由なら通常のペーシングで送られ、本物の入力と競合したときだけ溢れる
-    if (ble_hid_is_connected() && !ble_hid_is_tx_stalled()) {
+    // 直近 REPRO_FLOOD_IDLE_MS に本物の入力があれば flood は休む
+    // (使っている間は通常のペーシングだけ = タイピングを邪魔しない)
+    const bool flood_idle =
+        (last_real_ingest_us == 0) ||
+        ((now_us - last_real_ingest_us) > (REPRO_FLOOD_IDLE_MS * 1000ULL));
+    if (flood_idle && ble_hid_is_connected() && !ble_hid_is_tx_stalled()) {
         static uint64_t next_flood_us = 0;
         if (next_flood_us == 0) next_flood_us = now_us + (REPRO_FLOOD_MS * 1000ULL);
         if (now_us >= next_flood_us) {
@@ -2573,41 +2584,41 @@ bool ble_hid_can_send(void) {
            !slot_disconnect_after_zero;
 }
 
-void ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len) {
+bool ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len) {
     if (current_state != BLE_STATE_CONNECTED || con_handle == HCI_CON_HANDLE_INVALID) {
         health_skip_state++;
-        return;
+        return false;
     }
 
     // 【BL-15】暗号化完了 かつ 該当レポート購読完了を厳密にチェック
     if (!ble_encrypted) {
         health_skip_enc++;
-        return;
+        return false;
     }
     if (report_id == 2 && !ble_kbd_ready) {      // Report ID 2: Keyboard
         health_skip_ready++;
-        return;
+        return false;
     }
     if (report_id == 1 && !ble_mouse_ready) {    // Report ID 1: Mouse
         health_skip_ready++;
-        return;
+        return false;
     }
     if (report_id == 3 && !ble_consumer_ready) { // Report ID 3: Consumer (BL-12)
         health_skip_ready++;
-        return;
+        return false;
     }
-    if (report_id != 1 && report_id != 2 && report_id != 3) return;
+    if (report_id != 1 && report_id != 2 && report_id != 3) return false;
 
     if (!ble_can_send) {
-        health_blocked++; // フロー制御待ちで捨てた (ウェッジ時に増える)
-        return;
+        health_blocked++; // フロー制御待ち (呼び出し側がキューに残して再試行する)
+        return false;
     }
     if (credit_stall) {
         // クレジットが返らない間は 1 秒に 1 回だけ試す。0x57 の連打を止める
         uint64_t nowp = time_us_64();
         if (nowp < credit_stall_next_probe_us) {
             health_blocked++;
-            return;
+            return false;
         }
         credit_stall_next_probe_us = nowp + 1000000ULL;
     }
@@ -2658,6 +2669,7 @@ void ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len) {
     }
 
     ble_unlock();
+    return status == ERROR_CODE_SUCCESS;
 }
 
 
@@ -2994,8 +3006,8 @@ static bool do_send_report_ble(uint8_t interface, const uint8_t* report_with_id,
         }
     }
 
-    ble_hid_send_report(report_id, report_data, report_len);
-    return true;
+    // 【2026-11-14】受理されたかを返す。false なら remapper が再試行する
+    return ble_hid_send_report(report_id, report_data, report_len);
 }
 
 void ble_transport_task(ble_send_report_fn_t do_send_usb) {
