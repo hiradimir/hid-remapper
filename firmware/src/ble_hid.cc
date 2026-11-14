@@ -9,6 +9,19 @@
 #include "pico/unique_id.h"
 #include "hardware/watchdog.h"
 #include "hardware/sync.h"  // IRQ 停止ストレスの計装用
+
+// 【2026-11-14】送信キュー (再現テストで積むため、定義を前方に移動)
+#ifndef OR_BUFSIZE
+#define OR_BUFSIZE 8
+#endif
+#ifndef MAX_REPORT_SIZE
+#define MAX_REPORT_SIZE 64
+#endif
+extern uint8_t outgoing_reports[OR_BUFSIZE][MAX_REPORT_SIZE + 1];
+extern uint8_t or_head;
+extern uint8_t or_items;
+extern uint8_t or_tail; // 【2026-11-14】再現テストでキューに積むため
+
 #include "btstack.h"
 #include "btstack_config.h"
 #include "ble/le_device_db.h"
@@ -2081,15 +2094,22 @@ static void ble_hid_task_locked(void) {
     }
 
 #if REPRO_FLOOD_MS > 0
-    // 【2026-11-14】再現テスト: ゼロ移動のマウスレポートを送り続ける
-    // (カーソルは動かないが、送信経路は実際に使われる)
+    // 【2026-11-14】再現テスト (改): ゼロ移動のマウスレポートを**送信キューに積む**。
+    // 直接 ble_hid_send_report を叩くと許可待ちで自分自身が blk に計上され、
+    // 「過負荷」ではなく「壊れた送信者」になってしまう (in=0 でも blk が増えた)。
+    // キュー経由なら通常のペーシングで送られ、本物の入力と競合したときだけ溢れる
     if (ble_hid_is_connected() && !ble_hid_is_tx_stalled()) {
         static uint64_t next_flood_us = 0;
         if (next_flood_us == 0) next_flood_us = now_us + (REPRO_FLOOD_MS * 1000ULL);
         if (now_us >= next_flood_us) {
             next_flood_us = now_us + (REPRO_FLOOD_MS * 1000ULL);
-            uint8_t zero_mouse[9] = {0};
-            ble_hid_send_report(1, zero_mouse, sizeof(zero_mouse));
+            // 空のときだけ積む（自分でキューを埋めない）
+            if (or_items == 0) {
+                memset(outgoing_reports[or_tail], 0, MAX_REPORT_SIZE + 1);
+                outgoing_reports[or_tail][0] = 1; // Report ID 1: Mouse (ゼロ移動)
+                or_tail = (uint8_t) ((or_tail + 1) % OR_BUFSIZE);
+                or_items++;
+            }
         }
     }
 #endif
@@ -2796,15 +2816,6 @@ void ble_led(bool value) {
 // =========================================================================
 // 送信・トランスポートディスパッチおよびスロット切替ホットキー処理
 // =========================================================================
-#ifndef OR_BUFSIZE
-#define OR_BUFSIZE 8
-#endif
-#ifndef MAX_REPORT_SIZE
-#define MAX_REPORT_SIZE 64
-#endif
-extern uint8_t outgoing_reports[OR_BUFSIZE][MAX_REPORT_SIZE + 1];
-extern uint8_t or_head;
-extern uint8_t or_items;
 
 static uint64_t last_mouse_pace_us = 0;
 static uint8_t last_mouse_buttons = 0;

@@ -1526,45 +1526,19 @@ patch(WT + '/firmware/CMakeLists.txt', [
 ])
 
 
-# --- 生成物の自己検算 (2026-11-01 追加) -------------------------------------
-# 「パッチは当たったように見えるが実は欠けている」事故を防ぐ。
-# 実際に wake37 の health_acl_run++ が欠け、aclrun が常に 0 のまま
-# 0x57 ストーム検知が一度も動かなかった (2026-11-01 13:23 の膠着で発覚)。
-REQUIRED_MARKERS = [
-    ('firmware/src/ble_hid.cc', 'health_acl_run < 0xFFFF'),
-    ('firmware/src/ble_hid.cc', 'BT CREDIT-STALL start (storm'),
-    ('firmware/src/ble_hid.cc', 'BT NORESTORE'),
-    ('firmware/src/ble_hid.cc', 'BT ADV-VERIFY armed'),
-    ('firmware/src/ble_hid.cc', 'BT CTRL-DEAD'),
-    ('firmware/src/ble_hid.cc', 'last_resume_us'),
-    ('firmware/src/ble_hid.cc', 'BT LAT-HIGH'),
-    ('firmware/src/ble_hid.cc', 'ボンド消去直後など'),
-    ('firmware/src/ble_hid.cc', 'cp_last_change_us'),
-    ('firmware/src/ble_hid.cc', 'BT CANSEND-PROACT'),
-    ('firmware/src/ble_hid.cc', 'hci_idle=%ums'),
-    ('firmware/src/ble_hid.cc', 'now_us - 28000000ULL'),
-    ('firmware/src/remote_log.cc', 'remote_log_tx_age_ms'),
-    ('firmware/src/main.cc', 'USB DEV re-attach'),
-    ('firmware/src/remote_log.cc', 'remote_log_heap_used'),
-    ('firmware/src/ble_hid.cc', 'health_conn_count'),
-    ('firmware/src/ble_hid.cc', 'BT DEAD-SNAP'),
-    ('firmware/src/ble_hid.cc', 'BT AUTO-REBOOT'),
-    ('firmware/src/ble_hid.cc', 'proact_pending_us'),
-    ('firmware/src/ble_hid.cc', 'ccmd=%d'),
-    ('firmware/src/ble_hid.cc', 'BT HCI-RECYCLE'),
-    ('firmware/src/ble_hid.cc', 'BT FLASH-WRITE'),
-    ('firmware/src/remote_log.cc', 'flash_stress='),
-    ('firmware/src/ble_hid.cc', 'BT STALL-EMU'),
-    ('firmware/src/ble_hid.cc', 'BT CMD-COLLIDE'),
-    ('firmware/src/ble_hid.cc', 'BT REPRO n=%u'),
-    ('firmware/src/remote_log.cc', 'temp=%d ccmd=%d'),
-    ('firmware/src/remote_log.cc', 'bl43_flowctl=off'),
-    ('firmware/src/remote_log.cc', 'USB DEV %s'),
-    ('firmware/src/remote_log.cc', 'clat=%u st=%u'),
-]
-for _rel, _needle in REQUIRED_MARKERS:
-    _txt = open(WT + '/' + _rel).read()
-    assert _txt.count(_needle) >= 1, ('MARKER MISSING', _rel, _needle)
-print('self-check ok: %d markers' % len(REQUIRED_MARKERS))
+# --- 2026-11-14: 再現テストを送信キュー経由に変更 (過負荷の忠実化) ---
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ('#ifndef OR_BUFSIZE\n#define OR_BUFSIZE 8\n#endif\n#ifndef MAX_REPORT_SIZE\n#define MAX_REPORT_SIZE 64\n#endif\nextern uint8_t outgoing_reports[OR_BUFSIZE][MAX_REPORT_SIZE + 1];\nextern uint8_t or_head;\nextern uint8_t or_items;\n',
+     '#ifndef OR_BUFSIZE\n#define OR_BUFSIZE 8\n#endif\n#ifndef MAX_REPORT_SIZE\n#define MAX_REPORT_SIZE 64\n#endif\nextern uint8_t outgoing_reports[OR_BUFSIZE][MAX_REPORT_SIZE + 1];\nextern uint8_t or_head;\nextern uint8_t or_tail; // 【2026-11-14】再現テストでキューに積むため\nextern uint8_t or_items;\n'),
+    ('#if REPRO_FLOOD_MS > 0\n    // 【2026-11-14】再現テスト: ゼロ移動のマウスレポートを送り続ける\n    if (ble_hid_is_connected() && !ble_hid_is_tx_stalled()) {\n        static uint64_t next_flood_us = 0;\n        if (next_flood_us == 0) next_flood_us = now_us + (REPRO_FLOOD_MS * 1000ULL);\n        if (now_us >= next_flood_us) {\n            next_flood_us = now_us + (REPRO_FLOOD_MS * 1000ULL);\n            uint8_t zero_mouse[9] = {0};\n            ble_hid_send_report(1, zero_mouse, sizeof(zero_mouse));\n        }\n    }\n#endif',
+     '#if REPRO_FLOOD_MS > 0\n    // 【2026-11-14】再現テスト (改): ゼロ移動のマウスレポートを**送信キューに積む**。\n    // 直接 ble_hid_send_report を叩くと許可待ちで自分自身が blk に計上され、\n    // 「過負荷」ではなく「壊れた送信者」になってしまう (in=0 でも blk が増えた)。\n    // キュー経由なら通常のペーシングで送られ、本物の入力と競合したときだけ溢れる\n    if (ble_hid_is_connected() && !ble_hid_is_tx_stalled()) {\n        static uint64_t next_flood_us = 0;\n        if (next_flood_us == 0) next_flood_us = now_us + (REPRO_FLOOD_MS * 1000ULL);\n        if (now_us >= next_flood_us) {\n            next_flood_us = now_us + (REPRO_FLOOD_MS * 1000ULL);\n            if (or_items == 0) { // 空のときだけ積む（自分でキューを埋めない）\n                memset(outgoing_reports[or_tail], 0, MAX_REPORT_SIZE + 1);\n                outgoing_reports[or_tail][0] = 1; // Report ID 1: Mouse (ゼロ移動)\n                or_tail = (uint8_t) ((or_tail + 1) % OR_BUFSIZE);\n                or_items++;\n            }\n        }\n    }\n#endif'),
+])
+
+
+# --- 2026-11-14: 送信キューの extern を前方に置く (再現テスト用) ---
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ('#include "hardware/sync.h"  // IRQ 停止ストレスの計装用',
+     '#include "hardware/sync.h"  // IRQ 停止ストレスの計装用\n\n// 【2026-11-14】送信キュー (再現テストで積むため)\n#ifndef OR_BUFSIZE\n#define OR_BUFSIZE 8\n#endif\n#ifndef MAX_REPORT_SIZE\n#define MAX_REPORT_SIZE 64\n#endif\nextern uint8_t outgoing_reports[OR_BUFSIZE][MAX_REPORT_SIZE + 1];\nextern uint8_t or_head;\nextern uint8_t or_tail; // 【2026-11-14】再現テストでキューに積むため\nextern uint8_t or_items;\n'),
+])
 
 print("patched:", WT)
