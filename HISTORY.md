@@ -9,6 +9,38 @@
 
 ---
 
+## 2026-11-14 `wake72`: `ble_hid_send_report` を bool 化 + flood は「操作中は休む」
+
+`wake71` の修正（送れなかったら pop しない）は **入れたが効いていなかった**。
+`do_send_report_ble` が `ble_hid_send_report()` の結果を捨てて **常に true を返して**
+いたため、`if (!sent)` が一度も成立しなかった（ルディの実機観察「入力が捨てられる」が正）。
+
+**修正 1: bool 化**
+
+- `ble_hid_send_report()` を `void` → `bool`（受理されたかの真偽）
+- 早期 return をすべて `return false`（状態不一致 / 未暗号化 / 未購読 / フロー制御待ち）
+- 末尾で `return status == ERROR_CODE_SUCCESS`
+- `do_send_report_ble()` はその戻り値をそのまま返す
+- ENABLE_BLE=0 のインラインスタブも `bool` + `return false`
+
+これで「送れなかった → キューに残す → 次のスロットで再試行」が実際に動く。
+
+**修正 2: flood は操作中に休む**
+
+`wake70` の flood（15ms ごとにダミーをキューへ）は、使っている間もキューを
+1 枠占有するため、タイピングの遅延・欠落につながった。
+
+- `remapper.cc` に `last_real_ingest_us` を追加（`report_received_callback` で更新）
+- flood は **直近 `REPRO_FLOOD_IDLE_MS`(2000ms) に本物の入力がある間は停止**
+- 手を止めれば即再開するので、「繋ぎっぱなしで送信し続ける」状態は作れる
+
+- ビルド: `firmware/artifacts/remapper_anchor_wake72_flood4.uf2`（11/14 22:5x,
+  `REPRO_FLOOD_MS=15`）
+- 検証: ①`in=0` で `blk` が増えない ②flood 中でもタイピングが効く
+  ③キー/ボタンが固着しない ④手を止めると flood が再開する
+- 注: `blk` の意味が変わる（「送信経路で捨てた」ではなく「フロー制御で
+  入れられなかった」）。通常時は 0 のままになる見込み
+
 ## 2026-11-14 `wake71`: 送信失敗時にレポートを捨てない（キー固着の防止）
 
 ルディの観察: `wake70` で「キーボードがたまに効かない。効いた時も入力が固定される
