@@ -315,6 +315,12 @@ static uint64_t adv_retry_next_us = 0;
 #ifndef CMD_COLLIDE_US
 #define CMD_COLLIDE_US 0
 #endif
+// 【2026-11-14】再現テスト (検証専用): 一定周期で「切断 → 再広告」を自動で繰り返し、
+// 接続/切断のたびに HCI コマンドが連続して送られる状況を作る。
+// 膠着が「応答の取りこぼし」なら、この回転を速くすると再現しやすい。0 で無効
+#ifndef REPRO_CYCLE_MS
+#define REPRO_CYCLE_MS 0
+#endif
 
 static void adv_set(int enable) {
     adv_enable_req = enable;
@@ -2067,6 +2073,29 @@ static void ble_hid_task_locked(void) {
         adv_enable_pending = false;
         adv_set(1);
     }
+
+#if REPRO_CYCLE_MS > 0
+    // 【2026-11-14】再現テスト: 切断と再広告を交互に繰り返す
+    {
+        static uint64_t next_repro_us = 0;
+        static uint32_t repro_n = 0;
+        if (next_repro_us == 0) next_repro_us = now_us + 10000000ULL;
+        if (now_us >= next_repro_us) {
+            next_repro_us = now_us + (REPRO_CYCLE_MS * 1000ULL);
+            repro_n++;
+            if (con_handle != HCI_CON_HANDLE_INVALID) {
+                remote_log_eventf("BT REPRO n=%u disc up=%us", (unsigned) repro_n,
+                                  (unsigned) (now_us / 1000000ULL));
+                gap_disconnect(con_handle);
+            } else {
+                remote_log_eventf("BT REPRO n=%u re-adv up=%us", (unsigned) repro_n,
+                                  (unsigned) (now_us / 1000000ULL));
+                gap_advertisements_enable(0);
+                adv_set(1);
+            }
+        }
+    }
+#endif
 
 #if BLE_DEAD_DETECT_ENABLE
     // 【2026-11-12】広告が出ないまま居座る状態（＝チップが HCI を受け付けない）を検出し、

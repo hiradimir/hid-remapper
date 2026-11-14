@@ -1274,6 +1274,10 @@ void remote_log_init(void) {
     // 【2026-11-13】コマンド衝突テスト (検証専用)
     remote_log_eventf("BUILD VARIANT cmd_collide=%d", (int) CMD_COLLIDE_US);
 #endif
+#if defined(REPRO_CYCLE_MS) && REPRO_CYCLE_MS > 0
+    // 【2026-11-14】膠着の再現テスト (検証専用)
+    remote_log_eventf("BUILD VARIANT repro=%d", (int) REPRO_CYCLE_MS);
+#endif
 
     remote_log_eventf("RLOG init target=%s:%d ssid=%s ip=%s",
                       RLOG_TARGET_IP, RLOG_TARGET_PORT, rlog_ssid_masked(),

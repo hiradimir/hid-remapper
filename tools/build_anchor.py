@@ -1484,6 +1484,27 @@ patch(WT + '/firmware/src/ble_hid.cc', [
 ])
 
 
+# --- 2026-11-14: 膠着の再現テスト (REPRO_CYCLE_MS) ---
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ('#ifndef CMD_COLLIDE_US\n#define CMD_COLLIDE_US 0\n#endif',
+     '#ifndef CMD_COLLIDE_US\n#define CMD_COLLIDE_US 0\n#endif\n// 【2026-11-14】再現テスト (検証専用): 一定周期で「切断 → 再広告」を繰り返す。0 で無効\n#ifndef REPRO_CYCLE_MS\n#define REPRO_CYCLE_MS 0\n#endif'),
+    ('#if BLE_DEAD_DETECT_ENABLE\n    // 【2026-11-12】広告が出ないまま居座る状態（＝チップが HCI を受け付けない）を検出し、',
+     '#if REPRO_CYCLE_MS > 0\n    // 【2026-11-14】再現テスト: 切断と再広告を交互に繰り返す\n    {\n        static uint64_t next_repro_us = 0;\n        static uint32_t repro_n = 0;\n        if (next_repro_us == 0) next_repro_us = now_us + 10000000ULL;\n        if (now_us >= next_repro_us) {\n            next_repro_us = now_us + (REPRO_CYCLE_MS * 1000ULL);\n            repro_n++;\n            if (con_handle != HCI_CON_HANDLE_INVALID) {\n                remote_log_eventf("BT REPRO n=%u disc up=%us", (unsigned) repro_n,\n                                  (unsigned) (now_us / 1000000ULL));\n                gap_disconnect(con_handle);\n            } else {\n                remote_log_eventf("BT REPRO n=%u re-adv up=%us", (unsigned) repro_n,\n                                  (unsigned) (now_us / 1000000ULL));\n                gap_advertisements_enable(0);\n                adv_set(1);\n            }\n        }\n    }\n#endif\n\n#if BLE_DEAD_DETECT_ENABLE\n    // 【2026-11-12】広告が出ないまま居座る状態（＝チップが HCI を受け付けない）を検出し、'),
+])
+
+patch(WT + '/firmware/src/remote_log.cc', [
+    ('#if defined(CMD_COLLIDE_US) && CMD_COLLIDE_US > 0\n    // 【2026-11-13】コマンド衝突テスト (検証専用)\n    remote_log_eventf("BUILD VARIANT cmd_collide=%d", (int) CMD_COLLIDE_US);\n#endif',
+     '#if defined(CMD_COLLIDE_US) && CMD_COLLIDE_US > 0\n    // 【2026-11-13】コマンド衝突テスト (検証専用)\n    remote_log_eventf("BUILD VARIANT cmd_collide=%d", (int) CMD_COLLIDE_US);\n#endif\n#if defined(REPRO_CYCLE_MS) && REPRO_CYCLE_MS > 0\n    // 【2026-11-14】膠着の再現テスト (検証専用)\n    remote_log_eventf("BUILD VARIANT repro=%d", (int) REPRO_CYCLE_MS);\n#endif'),
+])
+
+patch(WT + '/firmware/CMakeLists.txt', [
+    ('set(CMD_COLLIDE_US 0 CACHE STRING "Block interrupts right after sending an advertising command (diagnostic)")',
+     'set(CMD_COLLIDE_US 0 CACHE STRING "Block interrupts right after sending an advertising command (diagnostic)")\n# 【2026-11-14】膠着の再現テスト (検証専用)\nset(REPRO_CYCLE_MS 0 CACHE STRING "Auto disconnect/re-advertise every N ms (repro test)")'),
+    ('    if(NOT CMD_COLLIDE_US STREQUAL "0")\n        target_compile_definitions(remapper PUBLIC CMD_COLLIDE_US=${CMD_COLLIDE_US})\n    endif()',
+     '    if(NOT CMD_COLLIDE_US STREQUAL "0")\n        target_compile_definitions(remapper PUBLIC CMD_COLLIDE_US=${CMD_COLLIDE_US})\n    endif()\n    if(NOT REPRO_CYCLE_MS STREQUAL "0")\n        target_compile_definitions(remapper PUBLIC REPRO_CYCLE_MS=${REPRO_CYCLE_MS})\n    endif()'),
+])
+
+
 # --- 生成物の自己検算 (2026-11-01 追加) -------------------------------------
 # 「パッチは当たったように見えるが実は欠けている」事故を防ぐ。
 # 実際に wake37 の health_acl_run++ が欠け、aclrun が常に 0 のまま
@@ -1514,6 +1535,7 @@ REQUIRED_MARKERS = [
     ('firmware/src/remote_log.cc', 'flash_stress='),
     ('firmware/src/ble_hid.cc', 'BT STALL-EMU'),
     ('firmware/src/ble_hid.cc', 'BT CMD-COLLIDE'),
+    ('firmware/src/ble_hid.cc', 'BT REPRO n=%u'),
     ('firmware/src/remote_log.cc', 'temp=%d ccmd=%d'),
     ('firmware/src/remote_log.cc', 'bl43_flowctl=off'),
     ('firmware/src/remote_log.cc', 'USB DEV %s'),
