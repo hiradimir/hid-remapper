@@ -9,6 +9,25 @@
 
 ---
 
+## 2026-11-14 `wake67`: 再接続しても USB-OUT のままになる循環を断つ
+
+**症状**: 11/14 10:58 に膠着 → `PROACT` → 3 秒後に再接続（`CONNECTED slot=1`）したのに、
+OLED は `USB-OUT` のまま。BLE は健全（`ccmd=1`）、`ok` は凍結、`fl=0x3F`（`tx_stalled`）。
+
+**原因**: `wake49` で入れた `health_tx_stalled = true`（CANSEND-TO 時）が
+**接続成立では解除されない**。解除条件は「送信成功」だけだが、`tx_stalled` が立っていると
+転送先が USB に固定され、**BLE では一度も送信しない** → `ok` が進まない →
+永久に解除されない、という循環。
+
+```
+tx_stalled=true → USB に流す → BLE で送らない → ok 進まない → 解除されない
+```
+
+**修正**: 接続成立（`connected_now && !was_connected`）で `health_tx_stalled = false`。
+新しいリンクなので一度は試す。それでも詰まれば再び `CANSEND-TO` で立つ。
+
+- ビルド: `firmware/artifacts/remapper_anchor_wake67_soak.uf2`（11/14 11:00）
+
 ## 2026-11-13 `wake66`: 観測周期を HB 5 秒 / ALIVE 30 秒に振り替え
 
 ルディの提案。**`BLE-HB` は膠着の前後を細かく見たい行**なのに 15 秒間隔で、
