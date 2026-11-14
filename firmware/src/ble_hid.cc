@@ -2243,6 +2243,11 @@ static void ble_hid_task_locked(void) {
             ble_reboot_at_us = 0;
             proact_pending_us = 0;
             hci_recycle_done = false;
+            // 【2026-11-14】接続が成立したら tx_stalled を解除する。
+            // これが残っていると転送先が USB に固定され、BLE では一度も送らないため
+            // 「送信成功で解除」の条件が永久に成立しない（BLE が健全でも USB-OUT の
+            // ままになる）。新しいリンクなので一度は試す
+            health_tx_stalled = false;
         }
         was_connected = connected_now;
 

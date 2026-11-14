@@ -1477,6 +1477,13 @@ patch(WT + '/firmware/src/remote_log.cc', [
 ])
 
 
+# --- 2026-11-14: 接続成立時に tx_stalled を解除 (USB 固定の循環を断つ) ---
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ('            ble_reboot_at_us = 0;\n            proact_pending_us = 0;\n            hci_recycle_done = false;\n        }\n        was_connected = connected_now;',
+     '            ble_reboot_at_us = 0;\n            proact_pending_us = 0;\n            hci_recycle_done = false;\n            // 【2026-11-14】接続が成立したら tx_stalled を解除する。\n            // 残っていると転送先が USB に固定され、BLE では一度も送らないため\n            // 「送信成功で解除」の条件が永久に成立しない\n            health_tx_stalled = false;\n        }\n        was_connected = connected_now;'),
+])
+
+
 # --- 生成物の自己検算 (2026-11-01 追加) -------------------------------------
 # 「パッチは当たったように見えるが実は欠けている」事故を防ぐ。
 # 実際に wake37 の health_acl_run++ が欠け、aclrun が常に 0 のまま
