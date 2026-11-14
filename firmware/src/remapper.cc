@@ -1450,9 +1450,16 @@ bool send_report(send_report_t do_send_report) {
     bool sent = false;
     if (our_descriptor == &our_descriptors[our_descriptor_number]) {
         sent = do_send_report(0, outgoing_reports[or_head], report_sizes[report_id] + 1);
+        if (!sent) {
+            // 【2026-11-14】送れなかったらキューに残して次のスロットで再試行する。
+            // 以前は成否に関わらず pop していたため、キーボードの key-up が
+            // 捨てられるとホスト側でキーが押しっぱなしになった（マウスの
+            // ボタンも同様）。レポートは「最新の状態」を持つので、
+            // 最後の 1 件さえ届けば状態は回復する
+            return false;
+        }
     }
 
-    // XXX even if not sent?
     or_head = (or_head + 1) % OR_BUFSIZE;
     or_items--;
 

@@ -1541,4 +1541,45 @@ patch(WT + '/firmware/src/ble_hid.cc', [
      '#include "hardware/sync.h"  // IRQ 停止ストレスの計装用\n\n// 【2026-11-14】送信キュー (再現テストで積むため)\n#ifndef OR_BUFSIZE\n#define OR_BUFSIZE 8\n#endif\n#ifndef MAX_REPORT_SIZE\n#define MAX_REPORT_SIZE 64\n#endif\nextern uint8_t outgoing_reports[OR_BUFSIZE][MAX_REPORT_SIZE + 1];\nextern uint8_t or_head;\nextern uint8_t or_tail; // 【2026-11-14】再現テストでキューに積むため\nextern uint8_t or_items;\n'),
 ])
 
+# --- 2026-11-14: 送信失敗時にレポートを捨てない (キー固着の防止) ---
+patch(WT + '/firmware/src/remapper.cc', [
+    ('    bool sent = false;\n    if (our_descriptor == &our_descriptors[our_descriptor_number]) {\n        sent = do_send_report(0, outgoing_reports[or_head], report_sizes[report_id] + 1);\n    }\n\n    // XXX even if not sent?\n    or_head = (or_head + 1) % OR_BUFSIZE;\n    or_items--;',
+     '    bool sent = false;\n    if (our_descriptor == &our_descriptors[our_descriptor_number]) {\n        sent = do_send_report(0, outgoing_reports[or_head], report_sizes[report_id] + 1);\n        if (!sent) {\n            // 【2026-11-14】送れなかったらキューに残して次のスロットで再試行する。\n            // 以前は成否に関わらず pop していたため、キーボードの key-up が\n            // 捨てられるとホスト側でキーが押しっぱなしになった\n            return false;\n        }\n    }\n\n    or_head = (or_head + 1) % OR_BUFSIZE;\n    or_items--;'),
+])
+
+# --- 生成物の自己検算 (2026-11-01 追加) ---
+REQUIRED_MARKERS = [
+    ('firmware/src/ble_hid.cc', 'health_acl_run < 0xFFFF'),
+    ('firmware/src/ble_hid.cc', 'BT CREDIT-STALL start (storm'),
+    ('firmware/src/ble_hid.cc', 'BT NORESTORE'),
+    ('firmware/src/ble_hid.cc', 'BT ADV-VERIFY armed'),
+    ('firmware/src/ble_hid.cc', 'BT CTRL-DEAD'),
+    ('firmware/src/ble_hid.cc', 'last_resume_us'),
+    ('firmware/src/ble_hid.cc', 'BT LAT-HIGH'),
+    ('firmware/src/ble_hid.cc', 'BT CANSEND-PROACT'),
+    ('firmware/src/ble_hid.cc', 'hci_idle=%ums'),
+    ('firmware/src/ble_hid.cc', 'cp_last_change_us'),
+    ('firmware/src/ble_hid.cc', 'proact_pending_us'),
+    ('firmware/src/ble_hid.cc', 'BT HCI-RECYCLE'),
+    ('firmware/src/ble_hid.cc', 'BT DEAD-SNAP'),
+    ('firmware/src/ble_hid.cc', 'BT AUTO-REBOOT'),
+    ('firmware/src/ble_hid.cc', 'BT FLASH-WRITE'),
+    ('firmware/src/ble_hid.cc', 'BT STALL-EMU'),
+    ('firmware/src/ble_hid.cc', 'BT CMD-COLLIDE'),
+    ('firmware/src/ble_hid.cc', 'BT REPRO n=%u'),
+    ('firmware/src/ble_hid.cc', 'ボンド消去直後など'),
+    ('firmware/src/remote_log.cc', 'USB DEV %s'),
+    ('firmware/src/remote_log.cc', 'clat=%u st=%u'),
+    ('firmware/src/remote_log.cc', 'remote_log_tx_age_ms'),
+    ('firmware/src/remote_log.cc', 'remote_log_heap_used'),
+    ('firmware/src/remote_log.cc', 'bl43_flowctl=off'),
+    ('firmware/src/remote_log.cc', 'temp=%d ccmd=%d'),
+    ('firmware/src/main.cc', 'USB DEV re-attach'),
+    ('firmware/src/remapper.cc', 'キーが押しっぱなし'),
+]
+for _rel, _needle in REQUIRED_MARKERS:
+    _txt = open(WT + '/' + _rel).read()
+    assert _txt.count(_needle) >= 1, ('MARKER MISSING', _rel, _needle)
+print('self-check ok: %d markers' % len(REQUIRED_MARKERS))
+
 print("patched:", WT)
