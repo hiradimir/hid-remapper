@@ -1666,6 +1666,20 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     btstack_run_loop_set_timer(&conn_handshake_timeout_timer, 10000);
                     btstack_run_loop_add_timer(&conn_handshake_timeout_timer);
 
+                    // 【2026-11-16】接続直後のパラメータをここで確定させる。
+                    // これまで Connection Update Complete でしか設定していなかったため、
+                    // ホストが一度も更新を送ってこない接続 (実測: スロット 2 のピア) では
+                    // latency/timeout が 0 のまま = 「不明」になり、PARAM-REQ の
+                    // 発火条件 (latency > 0) が永久に偽になっていた。
+                    // 接続完了イベントにも interval/latency/timeout が入っている
+                    ble_conn_interval = hci_subevent_le_connection_complete_get_conn_interval(packet);
+                    ble_conn_latency = hci_subevent_le_connection_complete_get_conn_latency(packet);
+                    ble_conn_timeout = hci_subevent_le_connection_complete_get_supervision_timeout(packet);
+                    remote_log_eventf("BT PARAM-INIT ci=%u lat=%u st=%u",
+                                      (unsigned) ble_conn_interval,
+                                      (unsigned) ble_conn_latency,
+                                      (unsigned) ble_conn_timeout);
+
                     bd_addr_t peer_addr;
                     hci_subevent_le_connection_complete_get_peer_address(packet, peer_addr);
 
@@ -1899,6 +1913,10 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
         }
 
         case HCI_EVENT_DISCONNECTION_COMPLETE: {
+            // 【2026-11-16】interval もリセットする。残すとスロットを跨いだ
+            // 前の接続の値でペーシング (interval - 500us) を計算してしまい、
+            // 実際の接続間隔と食い違う
+            ble_conn_interval = 0;
             ble_conn_latency = 0;
             ble_conn_timeout = 0;
             peer_has_android_timeout = false;
@@ -2487,7 +2505,12 @@ static void ble_hid_task_locked(void) {
         // 受理されたかは BT PARAM (更新完了ログ) の st= で判定する
         // 復帰直後 (60 秒) は撃たない。スリープ明けはリンクが不安定で、
         // パラメータ更新要求の直後に rs=0x08 が続いた実測がある (2026-11-01 13:20)
-        if (BLE_PARAM_REQ_ENABLE && connected_now && ble_conn_latency > 0 &&
+        // 【2026-11-16】条件を「latency > 0」から「latency > 0 または
+        // timeout が 4 秒未満/不明」に広げた。latency が 0 でも supervision
+        // timeout が短ければ同じように切れるため、latency だけを見ると
+        // 要求が一度も出ない接続が生まれる (実測: スロット 2 は 0 回だった)
+        const bool param_needs_fix = (ble_conn_latency > 0) || (ble_conn_timeout < 400);
+        if (BLE_PARAM_REQ_ENABLE && connected_now && param_needs_fix &&
             param_req_count < 3 &&
             (now_us - last_param_req_us) >= 30000000ULL &&
             (last_resume_us == 0 || (now_us - last_resume_us) >= 60000000ULL)) {

@@ -1638,6 +1638,17 @@ patch(WT + '/firmware/src/remote_log.cc', [
 ])
 
 
+# --- 2026-11-16: 接続パラメータの初期値取得と PARAM-REQ 条件の修正 ---
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ('                    bd_addr_t peer_addr;\n                    hci_subevent_le_connection_complete_get_peer_address(packet, peer_addr);',
+     '                    // 【2026-11-16】接続直後のパラメータをここで確定させる。\n                    // これまで Connection Update Complete でしか設定していなかったため、\n                    // ホストが一度も更新を送ってこない接続 (実測: スロット 2 のピア) では\n                    // latency/timeout が 0 のまま = 「不明」になり、PARAM-REQ の\n                    // 発火条件 (latency > 0) が永久に偽になっていた\n                    ble_conn_interval = hci_subevent_le_connection_complete_get_conn_interval(packet);\n                    ble_conn_latency = hci_subevent_le_connection_complete_get_conn_latency(packet);\n                    ble_conn_timeout = hci_subevent_le_connection_complete_get_supervision_timeout(packet);\n                    remote_log_eventf("BT PARAM-INIT ci=%u lat=%u st=%u",\n                                      (unsigned) ble_conn_interval,\n                                      (unsigned) ble_conn_latency,\n                                      (unsigned) ble_conn_timeout);\n\n                    bd_addr_t peer_addr;\n                    hci_subevent_le_connection_complete_get_peer_address(packet, peer_addr);'),
+    ('        if (BLE_PARAM_REQ_ENABLE && connected_now && ble_conn_latency > 0 &&\n            param_req_count < 3 &&',
+     '        // 【2026-11-16】条件を「latency > 0」から「latency > 0 または\n        // timeout が 4 秒未満/不明」に広げた。latency が 0 でも supervision\n        // timeout が短ければ同じように切れるため、latency だけを見ると\n        // 要求が一度も出ない接続が生まれる (実測: スロット 2 は 0 回だった)\n        const bool param_needs_fix = (ble_conn_latency > 0) || (ble_conn_timeout < 400);\n        if (BLE_PARAM_REQ_ENABLE && connected_now && param_needs_fix &&\n            param_req_count < 3 &&'),
+    ('        case HCI_EVENT_DISCONNECTION_COMPLETE: {\n            ble_conn_latency = 0;\n            ble_conn_timeout = 0;',
+     '        case HCI_EVENT_DISCONNECTION_COMPLETE: {\n            // 【2026-11-16】interval もリセットする。残すとスロットを跨いだ\n            // 前の接続の値でペーシング (interval - 500us) を計算してしまい、\n            // 実際の接続間隔と食い違う\n            ble_conn_interval = 0;\n            ble_conn_latency = 0;\n            ble_conn_timeout = 0;'),
+])
+
+
 # --- 生成物の自己検算 (2026-11-01 追加) ---
 REQUIRED_MARKERS = [
     ('firmware/src/ble_hid.cc', 'health_acl_run < 0xFFFF'),
@@ -1681,6 +1692,9 @@ REQUIRED_MARKERS = [
     ('firmware/src/remote_log.cc', 'dense_before'),
     ('firmware/src/remote_log.cc', 'param_req=off'),
     ('firmware/CMakeLists.txt', 'BLE_PARAM_REQ_DISABLE'),
+    ('firmware/src/ble_hid.cc', 'BT PARAM-INIT'),
+    ('firmware/src/ble_hid.cc', 'param_needs_fix'),
+    ('firmware/src/ble_hid.cc', 'ble_conn_interval = 0'),
 ]
 for _rel, _needle in REQUIRED_MARKERS:
     _txt = open(WT + '/' + _rel).read()
