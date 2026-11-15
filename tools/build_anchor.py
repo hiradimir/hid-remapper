@@ -1597,8 +1597,8 @@ patch(WT + '/firmware/CMakeLists.txt', [
 
 # --- 2026-11-15: BLE RSSI / 最後の HCI イベント / HCI レート + PARAM-REQ A/B + omax 修正 ---
 patch(WT + '/firmware/src/ble_hid.h', [
-    ('    uint32_t conn_count;\n    uint64_t last_ok_us;',
-     '    uint32_t conn_count;\n    uint64_t last_ok_us;\n    // 【2026-11-15】BLE リンクの RSSI (dBm)。これまで rssi= は Wi-Fi の値で、\n    // BLE 側は一度も測っていなかった (電波起因かチップ起因かを区別できなかった)。\n    // 127 = 未取得\n    int8_t rssi;\n    // 【2026-11-15】最後に受けた実 HCI イベントコード (hci_idle が伸びたとき\n    // 「何が最後だったか」を見る。0 = まだ受信していない)\n    uint8_t last_hci_event;\n    // HCI イベント総数 (HB 側で差分を取り、1 秒あたりの到着数を見る)\n    uint32_t hci_events;'),
+    ('    uint32_t conn_count;\n    uint64_t last_ok_us; // 最後に受理された通知の時刻 (0 = まだ)',
+     '    uint32_t conn_count;\n    uint64_t last_ok_us; // 最後に受理された通知の時刻 (0 = まだ)\n    // 【2026-11-15】BLE リンクの RSSI (dBm)。これまで rssi= は Wi-Fi の値で、\n    // BLE 側は一度も測っていなかった (電波起因かチップ起因かを区別できなかった)。\n    // 127 = 未取得\n    int8_t rssi;\n    // 【2026-11-15】最後に受けた実 HCI イベントコード (hci_idle が伸びたとき\n    // 「何が最後だったか」を見る。0 = まだ受信していない)\n    uint8_t last_hci_event;\n    // HCI イベント総数 (HB 側で差分を取り、1 秒あたりの到着数を見る)\n    uint32_t hci_events;'),
 ])
 
 patch(WT + '/firmware/src/ble_hid.cc', [
@@ -1664,6 +1664,45 @@ patch(WT + '/firmware/src/ble_hid.cc', [
 ])
 
 
+# --- 2026-11-16: CP 到着間隔 (LL 再送の指標) ---
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ('static void hci_dump_ev_ring(void);      // 膠着時に履歴を吐く (定義は後方)',
+     'static void hci_dump_ev_ring(void);      // 膠着時に履歴を吐く (定義は後方)\n\n// 【2026-11-16】Completed Packets (0x13) の到着間隔の統計。\n// LL 再送が起きると「パケット完了」の間隔が伸びる (正常 29-30ms)。\n// RSSI では見えない瞬間的な衝突・再送を、これで連続観測する\nstatic volatile uint32_t cp_gap_max_ms = 0;\nstatic volatile uint32_t cp_gap_slow = 0;\nstatic volatile uint32_t cp_gap_last_ms = 0;\nstatic volatile uint64_t cp_gap_prev_us = 0;\n// 【2026-11-16】CP 間隔の統計を区切る (HB ウィンドウの先頭で呼ぶ)\nvoid ble_hid_reset_cp_gap(void) {\n    cp_gap_max_ms = 0;\n    cp_gap_slow = 0;\n}'),
+    ('            health_cp_events++;\n            health_cp_packets += total;\n            health_last_cp_us = time_us_64();\n            break;',
+     '            health_cp_events++;\n            health_cp_packets += total;\n            {\n                // 【2026-11-16】パケット完了の間隔 = 無線が前に進んだ間隔。\n                // 正常 29-30ms (接続間隔 15ms の 2 倍)。LL 再送・衝突・\n                // ホッピング失敗がここに現れる\n                uint64_t now_cp = time_us_64();\n                if (cp_gap_prev_us != 0) {\n                    uint32_t gp = (uint32_t) ((now_cp - cp_gap_prev_us) / 1000ULL);\n                    cp_gap_last_ms = gp;\n                    if (gp > cp_gap_max_ms) cp_gap_max_ms = gp;\n                    if (gp >= 60u && cp_gap_slow < 0xFFFF) cp_gap_slow++;\n                }\n                cp_gap_prev_us = now_cp;\n            }\n            health_last_cp_us = time_us_64();\n            break;'),
+    ('    out->hci_events = health_hci_events;',
+     '    out->hci_events = health_hci_events;\n    out->cp_gap_max_ms = cp_gap_max_ms;\n    out->cp_gap_slow = cp_gap_slow;\n    out->cp_gap_last_ms = cp_gap_last_ms;'),
+])
+
+patch(WT + '/firmware/src/ble_hid.h', [
+    # 構造体の末尾に足す (hci_events の直後を狙うと、後続のコメント行を
+    # 巻き込んで別のフィールドに付いてしまう)
+    ("} ble_hid_health_t;",
+     "    // 【2026-11-16】Completed Packets (0x13) の到着間隔。LL 再送・衝突で伸びる\n"
+     "    // (正常 29-30ms = 接続間隔 15ms の 2 倍)\n"
+     "    uint32_t cp_gap_max_ms;\n"
+     "    uint32_t cp_gap_slow;\n"
+     "    uint32_t cp_gap_last_ms;\n"
+     "} ble_hid_health_t;"),
+])
+
+patch(WT + '/firmware/src/ble_hid.h', [
+    ('void ble_hid_reset_lat_max(void);',
+     'void ble_hid_reset_lat_max(void);\n// 【2026-11-16】CP 到着間隔の統計を区切る (HB ウィンドウの先頭で呼ぶ)\nvoid ble_hid_reset_cp_gap(void);'),
+    ('static inline bool ble_hid_can_send(void) { return false; }',
+     'static inline bool ble_hid_can_send(void) { return false; }\nstatic inline void ble_hid_reset_cp_gap(void) {}\nstatic inline void ble_hid_reset_lat_max(void) {}\nstatic inline void ble_hid_reset_dmax(void) {}'),
+])
+
+patch(WT + '/firmware/src/remote_log.cc', [
+    ('        const uint32_t omax_ms = tx_max_ms;',
+     '        // 【2026-11-16】CP 到着間隔 (LL 再送の指標)。区間の最大と 60ms 超の回数\n        const uint32_t cpg_max = h.cp_gap_max_ms;\n        const uint32_t cpg_slow = h.cp_gap_slow;\n        const uint32_t cpg_last = h.cp_gap_last_ms;\n        ble_hid_reset_cp_gap();\n        const uint32_t omax_ms = tx_max_ms;'),
+    ('cu=%u aclrun=%u cpd=%u conn=%u heap=%u temp=%d ccmd=%d brssi=%d hev=0x%02X hcir=%u",',
+     'cu=%u aclrun=%u cpd=%u conn=%u heap=%u temp=%d ccmd=%d brssi=%d hev=0x%02X hcir=%u cpg=%u/%u/%u",'),
+    ('                              (int) h.rssi, (unsigned) h.last_hci_event,\n                              (unsigned) hcir);',
+     '                              (int) h.rssi, (unsigned) h.last_hci_event,\n                              (unsigned) hcir,\n                              // 【2026-11-16】CP 間隔 最大/60ms超の回数/直近\n                              (unsigned) cpg_max, (unsigned) cpg_slow, (unsigned) cpg_last);'),
+])
+
+
 # --- 生成物の自己検算 (2026-11-01 追加) ---
 REQUIRED_MARKERS = [
     ('firmware/src/ble_hid.cc', 'health_acl_run < 0xFFFF'),
@@ -1713,6 +1752,8 @@ REQUIRED_MARKERS = [
     ('firmware/src/ble_hid.cc', 'hci_dump_ev_ring'),
     ('firmware/src/ble_hid.cc', 'HCI-EV%u %s'),
     ('firmware/src/ble_hid.cc', 'BT RADIO-OFF'),
+    ('firmware/src/ble_hid.cc', 'ble_hid_reset_cp_gap'),
+    ('firmware/src/remote_log.cc', 'cpg=%u/%u/%u'),
 ]
 for _rel, _needle in REQUIRED_MARKERS:
     _txt = open(WT + '/' + _rel).read()

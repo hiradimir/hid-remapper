@@ -57,6 +57,11 @@ typedef struct {
     uint8_t last_hci_event;
     // HCI イベント総数 (区間あたりの減少を見るため、HB 側で差分を取る)
     uint32_t hci_events;
+    // 【2026-11-16】Completed Packets (0x13) の到着間隔。LL 再送・衝突で伸びる。
+    // 正常は 29-30ms (接続間隔 15ms の 2 倍)。RSSI では見えない瞬時の劣化を捉える
+    uint32_t cp_gap_max_ms;  // 区間内の最大間隔
+    uint32_t cp_gap_slow;    // 60ms 以上を数えた回数
+    uint32_t cp_gap_last_ms; // 直近の間隔
 } ble_hid_health_t;
 
 #if defined(ENABLE_BLE) && ENABLE_BLE
@@ -74,6 +79,8 @@ void ble_hid_wake_from_dormant(void);
 bool ble_hid_is_pairing(void);
 // 送信レイテンシ最大値をリセット (観測ウィンドウの区切りで remote_log が呼ぶ)
 void ble_hid_reset_lat_max(void);
+// 【2026-11-16】CP 到着間隔の統計を区切る (HB ウィンドウの先頭で呼ぶ)
+void ble_hid_reset_cp_gap(void);
 void ble_hid_reset_dmax(void);
 bool ble_hid_can_send(void);
 // 【2026-11-14】受理されたか (true) / されなかったか (false) を返す。
@@ -116,6 +123,9 @@ static inline bool ble_hid_is_dormant(void) { return false; }
 static inline void ble_hid_wake_from_dormant(void) {}
 static inline bool ble_hid_is_pairing(void) { return false; }
 static inline bool ble_hid_can_send(void) { return false; }
+static inline void ble_hid_reset_cp_gap(void) {}
+static inline void ble_hid_reset_lat_max(void) {}
+static inline void ble_hid_reset_dmax(void) {}
 static inline bool ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len) {
     (void)report_id; (void)data; (void)len;
     return false;

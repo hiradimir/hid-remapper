@@ -435,6 +435,21 @@ static uint16_t hci_ev_gap_ms[HCI_EV_RING];
 static volatile uint8_t hci_ev_head = 0; // 次に書く位置
 static volatile uint8_t hci_ev_num = 0;  // 有効件数
 static void hci_dump_ev_ring(void);      // 膠着時に履歴を吐く (定義は後方)
+
+// 【2026-11-16】Completed Packets (0x13) の到着間隔の統計。
+// LL 再送が起きると「パケット完了」の間隔が伸びる (正常 29-30ms)。
+// 電波強度 (RSSI) では見えない瞬間的な衝突・再送を、これで連続観測する。
+// ウィンドウ = HB 区間 (5 秒)。remote_log が区切りでリセットする
+static volatile uint32_t cp_gap_max_ms = 0; // 区間内の最大間隔
+static volatile uint32_t cp_gap_slow = 0;   // 100ms を超えた回数 (正常 30ms の 3 倍超)
+static volatile uint32_t cp_gap_last_ms = 0;
+static volatile uint64_t cp_gap_prev_us = 0;
+// 【2026-11-16】CP 間隔の統計を区切る (HB ウィンドウの先頭で呼ぶ)
+void ble_hid_reset_cp_gap(void) {
+    cp_gap_max_ms = 0;
+    cp_gap_slow = 0;
+}
+
 static volatile uint64_t health_last_cp_us = 0;
 // 【2026-11-12】起動後の接続成立回数 (寿命仮説①の判定用)
 static volatile uint32_t health_conn_count = 0;
@@ -461,6 +476,9 @@ void ble_hid_get_health(ble_hid_health_t* out) {
     out->rssi = health_ble_rssi;
     out->last_hci_event = health_last_hci_event;
     out->hci_events = health_hci_events;
+    out->cp_gap_max_ms = cp_gap_max_ms;
+    out->cp_gap_slow = cp_gap_slow;
+    out->cp_gap_last_ms = cp_gap_last_ms;
     out->lat_max_ms = health_lat_max_ms;
     out->dmax = health_dmax;
     out->disc = health_disc;
@@ -605,14 +623,15 @@ static void can_send_timeout_handler(btstack_timer_source_t *ts) {
             uint32_t cp_idle = (health_last_cp_us != 0)
                                    ? (uint32_t) ((now_d - health_last_cp_us) / 1000ULL)
                                    : 0xFFFFFFFFu;
-            remote_log_eventf("CANSEND-TO n=%d hci_idle=%ums cp_idle=%ums rlog_age=%ums rssi=%d conn=%u heap=%u temp=%d ccmd=%d brssi=%d hev=0x%02X",
+            remote_log_eventf("CANSEND-TO n=%d hci_idle=%ums cp_idle=%ums rlog_age=%ums rssi=%d conn=%u heap=%u temp=%d ccmd=%d brssi=%d hev=0x%02X cpg=%u",
                               consecutive_can_send_timeouts, (unsigned) hci_idle,
                               (unsigned) cp_idle, (unsigned) remote_log_tx_age_ms(),
                               remote_log_last_rssi(), (unsigned) health_conn_count,
                               (unsigned) remote_log_heap_used(), remote_log_chip_temp_c(),
                               hci_can_send_command_packet_now() ? 1 : 0,
                               // 【2026-11-15】BLE 側 RSSI と最後の実 HCI イベント
-                              (int) health_ble_rssi, (unsigned) health_last_hci_event);
+                              (int) health_ble_rssi, (unsigned) health_last_hci_event,
+                              (unsigned) cp_gap_last_ms);
             // 【2026-11-16】沈黙の入り口を見るため、直近 64 件を吐く
             hci_dump_ev_ring();
         }
@@ -1658,6 +1677,19 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             }
             health_cp_events++;
             health_cp_packets += total;
+            {
+                // 【2026-11-16】パケット完了の間隔 = 無線が前に進んだ間隔。
+                // 正常時の 2 倍 (60ms) を超えたら「詰まった」として数える。
+                // LL 再送・衝突・ホッピングの失敗がここに現れる
+                uint64_t now_cp = time_us_64();
+                if (cp_gap_prev_us != 0) {
+                    uint32_t gp = (uint32_t) ((now_cp - cp_gap_prev_us) / 1000ULL);
+                    cp_gap_last_ms = gp;
+                    if (gp > cp_gap_max_ms) cp_gap_max_ms = gp;
+                    if (gp >= 60u && cp_gap_slow < 0xFFFF) cp_gap_slow++;
+                }
+                cp_gap_prev_us = now_cp;
+            }
             health_last_cp_us = time_us_64();
             break;
         }
