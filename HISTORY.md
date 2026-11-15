@@ -9,6 +9,51 @@
 
 ---
 
+## 2026-11-16 `wake75`: 接続パラメータの初期値取得と PARAM-REQ 条件の修正
+
+11/16 00:44〜00:49 に再度不安定（`CANSEND-TO` 12 回 / `DISC rs=0x08` 12 回）。
+新しい計器のデータから**原因が 2 つに絞れた**。
+
+### 計器が否定したもの
+
+- **電波ではない**: 膠着時の `brssi` は全 12 回とも **-47〜-56 dBm**（BLE の感度は約 -90）
+  → 筐体・PLA・手のかぶりは無関係。**筐体加工は不要**
+- **Wi-Fi ではない**: `q=313` は**バイト**（リング 16384 中 1.9%）、`rlog_age` も
+  最大 796ms。ログは詰まっていない
+- 最後の HCI イベントは全回 `hev=0x13`（Number Of Completed Packets）→
+  そこで黙る
+
+### 見つかったバグ
+
+**① 不安定はスロット 2 だけ**（`CANSEND-TO` も `DISC 0x08` も 12/12 がスロット 2）
+
+**② スロット 2 は接続パラメータが一度も更新されていなかった**
+
+```
+スロット別 PARAM 完了回数: {1: 10, 2: 0}
+slot 1: clat=0 st=400   ← 監視 4 秒
+slot 2: clat=0 st=0     ← 監視タイムアウト不明のまま 2493 サンプル
+```
+
+原因は `ble_conn_latency` を **`Connection Update Complete` でしか設定していなかった**こと。
+`PARAM-REQ` の発火条件が `ble_conn_latency > 0` なので、ホストが更新を送ってこない
+接続では **要求が一度も出ない** → `st=400` にできないまま運用されていた。
+
+**③ `ble_conn_interval` がスロット間で持ち越されていた**
+切断時に latency/timeout はリセットしていたが interval は残していた。HB の `ci=12` は
+スロット 1 の残骸で、ペーシング（`interval - 500us`）もその値で計算していた。
+
+### 修正
+
+1. `LE Connection Complete` でも interval/latency/timeout を読む
+   （接続完了イベントにも入っている）。`BT PARAM-INIT ci=.. lat=.. st=..` を記録
+2. `PARAM-REQ` の条件を `latency > 0` → `latency > 0 || timeout < 400` に拡張
+3. 切断時に `ble_conn_interval` もリセット
+
+- ビルド: `firmware/artifacts/remapper_anchor_wake75_paraminit.uf2`（11/16 01:10）
+- 検証: `BT PARAM-INIT` が接続のたびに出るか / スロット 2 でも `st=400` になるか /
+  `ci=` が接続ごとに正しいか
+
 ## 2026-11-15 `wake74`: `wake73` のビルド指定ミスを修正（flood テスト混入）
 
 `wake73` をビルドする際、`-DREPRO_FLOOD_MS=15`（過負荷再現テスト）を
