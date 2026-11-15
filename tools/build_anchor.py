@@ -1649,6 +1649,21 @@ patch(WT + '/firmware/src/ble_hid.cc', [
 ])
 
 
+# --- 2026-11-16: HCI イベント履歴リング (膠着時に直近 64 件を吐く) ---
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ('static volatile uint32_t health_hci_events = 0;\nstatic uint64_t next_rssi_read_us = 0;',
+     'static volatile uint32_t health_hci_events = 0;\nstatic uint64_t next_rssi_read_us = 0;\n\n// 【2026-11-16】HCI イベントの履歴 (直近 64 件)。\n// 膠着時にまとめて吐くと「沈黙が徐々に始まったか突然か」が分かる\n#define HCI_EV_RING 64\nstatic uint8_t hci_ev_code[HCI_EV_RING];\nstatic uint16_t hci_ev_gap_ms[HCI_EV_RING];\nstatic volatile uint8_t hci_ev_head = 0; // 次に書く位置\nstatic volatile uint8_t hci_ev_num = 0;  // 有効件数\nstatic void hci_dump_ev_ring(void);      // 膠着時に履歴を吐く (定義は後方)'),
+    ('    if (event < 0x60) {\n        health_last_hci_us = time_us_64();\n        health_hci_events++;\n        health_last_hci_event = event;\n    }',
+     '    if (event < 0x60) {\n        const uint64_t now_ev = time_us_64();\n        uint32_t ev_gap = 0;\n        if (health_last_hci_us != 0) {\n            ev_gap = (uint32_t) ((now_ev - health_last_hci_us) / 1000ULL);\n            if (ev_gap > 30000u) ev_gap = 30000u; // 30 秒で飽和\n        }\n        hci_ev_code[hci_ev_head] = event;\n        hci_ev_gap_ms[hci_ev_head] = (uint16_t) ev_gap;\n        hci_ev_head = (uint8_t) ((hci_ev_head + 1) % HCI_EV_RING);\n        if (hci_ev_num < HCI_EV_RING) hci_ev_num++;\n        health_last_hci_us = now_ev;\n        health_hci_events++;\n        health_last_hci_event = event;\n    }'),
+    ('static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size) {',
+     '// 【2026-11-16】HCI イベント履歴を 8 件/行で吐く。\n// 形式: "HCI-EV0 0E:12 13:15 ..." = イベントコード:直前からの経過 ms\nstatic void hci_dump_ev_ring(void) {\n    if (hci_ev_num == 0) {\n        remote_log_eventf("HCI-EV none");\n        return;\n    }\n    uint8_t n = hci_ev_num;\n    uint8_t start = (uint8_t) ((hci_ev_head + HCI_EV_RING - n) % HCI_EV_RING);\n    char buf[96];\n    for (uint8_t i = 0; i < n; i = (uint8_t) (i + 8)) {\n        int len = 0;\n        buf[0] = \'\\0\';\n        for (uint8_t j = i; j < n && j < (uint8_t) (i + 8); j++) {\n            uint8_t k = (uint8_t) ((start + j) % HCI_EV_RING);\n            int w = snprintf(buf + len, sizeof(buf) - (size_t) len, "%02X:%u ",\n                             (unsigned) hci_ev_code[k], (unsigned) hci_ev_gap_ms[k]);\n            if (w <= 0 || (len + w) >= (int) sizeof(buf)) break;\n            len += w;\n        }\n        remote_log_eventf("HCI-EV%u %s", (unsigned) i, buf);\n    }\n}\n\nstatic void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size) {'),
+    ('                              // 【2026-11-15】BLE 側 RSSI と最後の実 HCI イベント\n                              (int) health_ble_rssi, (unsigned) health_last_hci_event);',
+     '                              // 【2026-11-15】BLE 側 RSSI と最後の実 HCI イベント\n                              (int) health_ble_rssi, (unsigned) health_last_hci_event);\n            // 【2026-11-16】沈黙の入り口を見るため、直近 64 件を吐く\n            hci_dump_ev_ring();'),
+    ('        printf("[BT] Slot %d is unbonded and not in pairing mode. Radio OFF (silent).\\r\\n", current_slot + 1);',
+     '        printf("[BT] Slot %d is unbonded and not in pairing mode. Radio OFF (silent).\\r\\n", current_slot + 1);\n        // 【2026-11-16】この経路だけ UDP ログに残らず、後から追えなかった\n        remote_log_eventf("BT RADIO-OFF slot=%d unbonded", current_slot + 1);'),
+])
+
+
 # --- 生成物の自己検算 (2026-11-01 追加) ---
 REQUIRED_MARKERS = [
     ('firmware/src/ble_hid.cc', 'health_acl_run < 0xFFFF'),
@@ -1695,6 +1710,9 @@ REQUIRED_MARKERS = [
     ('firmware/src/ble_hid.cc', 'BT PARAM-INIT'),
     ('firmware/src/ble_hid.cc', 'param_needs_fix'),
     ('firmware/src/ble_hid.cc', 'ble_conn_interval = 0'),
+    ('firmware/src/ble_hid.cc', 'hci_dump_ev_ring'),
+    ('firmware/src/ble_hid.cc', 'HCI-EV%u %s'),
+    ('firmware/src/ble_hid.cc', 'BT RADIO-OFF'),
 ]
 for _rel, _needle in REQUIRED_MARKERS:
     _txt = open(WT + '/' + _rel).read()

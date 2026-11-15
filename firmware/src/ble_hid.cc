@@ -425,6 +425,16 @@ static volatile uint8_t health_last_hci_event = 0;
 // HCI イベント総数。HB 側で差分を取り「1 秒あたり何件来ているか」を見る
 static volatile uint32_t health_hci_events = 0;
 static uint64_t next_rssi_read_us = 0;
+
+// 【2026-11-16】HCI イベントの履歴 (直近 64 件)。
+// 膠着時にまとめて吐くと「沈黙が徐々に始まったか突然か」が分かる。
+// 普段は 1 件あたり 3 バイト書くだけで、出力は異常時のみ
+#define HCI_EV_RING 64
+static uint8_t hci_ev_code[HCI_EV_RING];
+static uint16_t hci_ev_gap_ms[HCI_EV_RING];
+static volatile uint8_t hci_ev_head = 0; // 次に書く位置
+static volatile uint8_t hci_ev_num = 0;  // 有効件数
+static void hci_dump_ev_ring(void);      // 膠着時に履歴を吐く (定義は後方)
 static volatile uint64_t health_last_cp_us = 0;
 // 【2026-11-12】起動後の接続成立回数 (寿命仮説①の判定用)
 static volatile uint32_t health_conn_count = 0;
@@ -603,6 +613,8 @@ static void can_send_timeout_handler(btstack_timer_source_t *ts) {
                               hci_can_send_command_packet_now() ? 1 : 0,
                               // 【2026-11-15】BLE 側 RSSI と最後の実 HCI イベント
                               (int) health_ble_rssi, (unsigned) health_last_hci_event);
+            // 【2026-11-16】沈黙の入り口を見るため、直近 64 件を吐く
+            hci_dump_ev_ring();
         }
         // 【2026-11-09】送信要求が 2 秒通らない = アプリ状態が CONNECTED でも
         // リンクは実質死んでいる。ここで tx_stalled を立てないと、転送先が
@@ -1224,6 +1236,9 @@ static void apply_slot_identity(int slot) {
     // 【厳格なペアリング制御】未ペアリングかつペアリングモードでない場合は電波を完全停止
     if (!is_pairing_mode && !is_bonded) {
         printf("[BT] Slot %d is unbonded and not in pairing mode. Radio OFF (silent).\r\n", current_slot + 1);
+        // 【2026-11-16】この経路だけ printf で UDP ログに残らず、
+        // 「BT-ON にしたのに広告が出ない」を後から追えなかった
+        remote_log_eventf("BT RADIO-OFF slot=%d unbonded", current_slot + 1);
         current_state = BLE_STATE_STANDBY_SILENT;
         update_ui_for_state(current_state);
         return;
@@ -1451,6 +1466,30 @@ static void ble_enter_pairing_mode_locked(int slot) {
     current_state = BLE_STATE_PAIRING;
     update_ui_for_state(current_state);
 }
+// 【2026-11-16】HCI イベント履歴を 8 件/行で吐く。
+// 形式: "HCI-EV0 0E:12 13:15 ..." = イベントコード:直前からの経過 ms
+static void hci_dump_ev_ring(void) {
+    if (hci_ev_num == 0) {
+        remote_log_eventf("HCI-EV none");
+        return;
+    }
+    uint8_t n = hci_ev_num;
+    uint8_t start = (uint8_t) ((hci_ev_head + HCI_EV_RING - n) % HCI_EV_RING);
+    char buf[96];
+    for (uint8_t i = 0; i < n; i = (uint8_t) (i + 8)) {
+        int len = 0;
+        buf[0] = '\0';
+        for (uint8_t j = i; j < n && j < (uint8_t) (i + 8); j++) {
+            uint8_t k = (uint8_t) ((start + j) % HCI_EV_RING);
+            int w = snprintf(buf + len, sizeof(buf) - (size_t) len, "%02X:%u ",
+                             (unsigned) hci_ev_code[k], (unsigned) hci_ev_gap_ms[k]);
+            if (w <= 0 || (len + w) >= (int) sizeof(buf)) break;
+            len += w;
+        }
+        remote_log_eventf("HCI-EV%u %s", (unsigned) i, buf);
+    }
+}
+
 static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size) {
     // 【2026-11-07】HCI イベントが来ているか (チップ/ドライバ生存確認)
     if (packet_type != HCI_EVENT_PACKET) return;
@@ -1460,7 +1499,17 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
     // 0x60 以上は BTstack の内部イベント (STATE 通知など) なので、これを混ぜると
     // チップが黙っていても hci_idle が伸びず、膠着の検知が誤魔化される
     if (event < 0x60) {
-        health_last_hci_us = time_us_64();
+        const uint64_t now_ev = time_us_64();
+        uint32_t ev_gap = 0;
+        if (health_last_hci_us != 0) {
+            ev_gap = (uint32_t) ((now_ev - health_last_hci_us) / 1000ULL);
+            if (ev_gap > 30000u) ev_gap = 30000u; // 30 秒で飽和 (膠着時に巨大値にしない)
+        }
+        hci_ev_code[hci_ev_head] = event;
+        hci_ev_gap_ms[hci_ev_head] = (uint16_t) ev_gap;
+        hci_ev_head = (uint8_t) ((hci_ev_head + 1) % HCI_EV_RING);
+        if (hci_ev_num < HCI_EV_RING) hci_ev_num++;
+        health_last_hci_us = now_ev;
         health_hci_events++;
         health_last_hci_event = event;
     }
