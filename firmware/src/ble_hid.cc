@@ -262,6 +262,14 @@ static volatile uint64_t last_resume_us = 0;
 #ifndef BLE_LAT_WATCH_ENABLE
 #define BLE_LAT_WATCH_ENABLE 1
 #endif
+
+// 【2026-11-15】接続パラメータ再要求の A/B 用スイッチ。
+// -DBLE_PARAM_REQ_DISABLE=ON で PARAM-REQ を撃たなくなる。
+// 「守り手として効いているのか / 実は不要なのか」を実機で確定させるための実験
+// (11/15 10:19〜 の不安定で PARAM-REQ の直後 1 秒に rs=0x08 が 2 回出た)
+#ifndef BLE_PARAM_REQ_ENABLE
+#define BLE_PARAM_REQ_ENABLE 1
+#endif
 // 「クレジットが返らない」と判断して送信を絞っている状態 (1 秒に 1 回だけ試す)
 static volatile bool credit_stall = false;
 static uint64_t credit_stall_next_probe_us = 0;
@@ -409,6 +417,14 @@ static volatile uint32_t health_cp_events = 0;
 // Completed Packets を受けた時刻。CANSEND が来ない瞬間のこの 2 つで
 // 「チップが止まった (hci_idle 大)」か「電波/相手が応答しない (cp_idle だけ大)」を分ける
 static volatile uint64_t health_last_hci_us = 0;
+// 【2026-11-15】BLE リンクの RSSI。今まで rssi= は Wi-Fi の値で、BLE 側は
+// 未知だった (電波起因かチップ起因かを切り分けられなかった)
+static volatile int8_t health_ble_rssi = 127; // 127 = 未取得
+// 【2026-11-15】最後に受けた HCI イベントコード (0x60 未満のみ = 実 HCI)
+static volatile uint8_t health_last_hci_event = 0;
+// HCI イベント総数。HB 側で差分を取り「1 秒あたり何件来ているか」を見る
+static volatile uint32_t health_hci_events = 0;
+static uint64_t next_rssi_read_us = 0;
 static volatile uint64_t health_last_cp_us = 0;
 // 【2026-11-12】起動後の接続成立回数 (寿命仮説①の判定用)
 static volatile uint32_t health_conn_count = 0;
@@ -432,6 +448,9 @@ void ble_hid_get_health(ble_hid_health_t* out) {
     out->cu = conn_update_count;
     out->acl_run = health_acl_run;
     out->conn_count = health_conn_count;
+    out->rssi = health_ble_rssi;
+    out->last_hci_event = health_last_hci_event;
+    out->hci_events = health_hci_events;
     out->lat_max_ms = health_lat_max_ms;
     out->dmax = health_dmax;
     out->disc = health_disc;
@@ -576,12 +595,14 @@ static void can_send_timeout_handler(btstack_timer_source_t *ts) {
             uint32_t cp_idle = (health_last_cp_us != 0)
                                    ? (uint32_t) ((now_d - health_last_cp_us) / 1000ULL)
                                    : 0xFFFFFFFFu;
-            remote_log_eventf("CANSEND-TO n=%d hci_idle=%ums cp_idle=%ums rlog_age=%ums rssi=%d conn=%u heap=%u temp=%d ccmd=%d",
+            remote_log_eventf("CANSEND-TO n=%d hci_idle=%ums cp_idle=%ums rlog_age=%ums rssi=%d conn=%u heap=%u temp=%d ccmd=%d brssi=%d hev=0x%02X",
                               consecutive_can_send_timeouts, (unsigned) hci_idle,
                               (unsigned) cp_idle, (unsigned) remote_log_tx_age_ms(),
                               remote_log_last_rssi(), (unsigned) health_conn_count,
                               (unsigned) remote_log_heap_used(), remote_log_chip_temp_c(),
-                              hci_can_send_command_packet_now() ? 1 : 0);
+                              hci_can_send_command_packet_now() ? 1 : 0,
+                              // 【2026-11-15】BLE 側 RSSI と最後の実 HCI イベント
+                              (int) health_ble_rssi, (unsigned) health_last_hci_event);
         }
         // 【2026-11-09】送信要求が 2 秒通らない = アプリ状態が CONNECTED でも
         // リンクは実質死んでいる。ここで tx_stalled を立てないと、転送先が
@@ -1432,10 +1453,17 @@ static void ble_enter_pairing_mode_locked(int slot) {
 }
 static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size) {
     // 【2026-11-07】HCI イベントが来ているか (チップ/ドライバ生存確認)
-    if (packet_type == HCI_EVENT_PACKET) health_last_hci_us = time_us_64();
     if (packet_type != HCI_EVENT_PACKET) return;
 
     uint8_t event = hci_event_packet_get_type(packet);
+    // 【2026-11-15】生存確認は「実 HCI イベント (0x60 未満)」だけを数える。
+    // 0x60 以上は BTstack の内部イベント (STATE 通知など) なので、これを混ぜると
+    // チップが黙っていても hci_idle が伸びず、膠着の検知が誤魔化される
+    if (event < 0x60) {
+        health_last_hci_us = time_us_64();
+        health_hci_events++;
+        health_last_hci_event = event;
+    }
 
     switch (event) {
         case BTSTACK_EVENT_STATE: {
@@ -1582,6 +1610,13 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             health_cp_events++;
             health_cp_packets += total;
             health_last_cp_us = time_us_64();
+            break;
+        }
+
+        // 【2026-11-15】BLE リンクの RSSI (gap_read_rssi の応答)。
+        // BTstack が GAP_EVENT_RSSI_MEASUREMENT (0xDE) として上げてくる
+        case GAP_EVENT_RSSI_MEASUREMENT: {
+            health_ble_rssi = (int8_t) gap_event_rssi_measurement_get_rssi(packet);
             break;
         }
 
@@ -2397,6 +2432,17 @@ static void ble_hid_task_locked(void) {
             return;
         }
 
+        // 【2026-11-15】BLE リンクの RSSI を 5 秒ごとに取得する。
+        // これまで rssi= は Wi-Fi の値しか無く、BLE 側が弱っているのか
+        // チップが黙っているのかを区別できなかった。取得は HCI コマンド 1 個
+        // なので、5 秒間隔に留める (コマンドクレジットを圧迫しない)
+        if (connected_now && con_handle != HCI_CON_HANDLE_INVALID &&
+            !ctrl_reset_pending && !health_tx_stalled &&
+            (int64_t) (now_us - next_rssi_read_us) >= 0) {
+            next_rssi_read_us = now_us + 5000000ULL;
+            gap_read_rssi(con_handle);
+        }
+
         // 【2026-11-03】lat 高止まりでの自発再接続。
         // CAN_SEND_NOW 待ち (lat) が 30ms 以上で 60 秒続くのは、コントローラが
         // 送信スロットを回せなくなってきた合図 (15:26 の膠着では 6 分前から
@@ -2441,7 +2487,8 @@ static void ble_hid_task_locked(void) {
         // 受理されたかは BT PARAM (更新完了ログ) の st= で判定する
         // 復帰直後 (60 秒) は撃たない。スリープ明けはリンクが不安定で、
         // パラメータ更新要求の直後に rs=0x08 が続いた実測がある (2026-11-01 13:20)
-        if (connected_now && ble_conn_latency > 0 && param_req_count < 3 &&
+        if (BLE_PARAM_REQ_ENABLE && connected_now && ble_conn_latency > 0 &&
+            param_req_count < 3 &&
             (now_us - last_param_req_us) >= 30000000ULL &&
             (last_resume_us == 0 || (now_us - last_resume_us) >= 60000000ULL)) {
             last_param_req_us = now_us;

@@ -48,6 +48,15 @@ typedef struct {
     // 【2026-11-12】起動後の接続成立回数。「N 回で死ぬ」仮説の判定用
     uint32_t conn_count;
     uint64_t last_ok_us; // 最後に受理された通知の時刻 (0 = まだ)
+    // 【2026-11-15】BLE リンクの RSSI (dBm)。これまで HB/DEAD-SNAP の rssi= は
+    // Wi-Fi の値で、BLE 側は一度も測っていなかった (電波か / チップかを
+    // 区別できなかった)。127 = 未取得
+    int8_t rssi;
+    // 【2026-11-15】最後に受けた HCI イベントコード。hci_idle が伸びたとき
+    // 「何が最後だったか」を見るため (0 = まだ受信していない)
+    uint8_t last_hci_event;
+    // HCI イベント総数 (区間あたりの減少を見るため、HB 側で差分を取る)
+    uint32_t hci_events;
 } ble_hid_health_t;
 
 #if defined(ENABLE_BLE) && ENABLE_BLE

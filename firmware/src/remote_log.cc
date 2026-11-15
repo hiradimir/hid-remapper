@@ -909,6 +909,8 @@ static uint64_t ble_last_in_us = 0;     // 最後に input が動いた時刻
 static uint32_t ble_hb_in = 0;          // 直近 HB 時点の入力数
 static uint32_t ble_hb_burst = 0;       // 直近 HB 時点の詰め込み送信数
 static uint32_t ble_hb_loops = 0;       // 直近 HB 時点のループ周回数
+// 【2026-11-15】直近 HB 時点の HCI イベント総数 (1 秒あたりの到着数を見る)
+static uint32_t ble_hb_hci = 0;
 static uint64_t ble_hb_us = 0;          // 直近 HB の時刻
 
 static void ble_health_task(uint64_t now_us) {
@@ -930,6 +932,9 @@ static void ble_health_task(uint64_t now_us) {
     const bool ok_moved = (h.ok != ble_stall_ok_mark);
     ble_stall_in_mark = in_now;
     ble_stall_ok_mark = h.ok;
+    // 【2026-11-15】この秒に入る前から「連続操作中」だったか。
+    // omax はこのフラグが立っている間だけ記録する (下の説明を参照)
+    const bool dense_before = (now_us < dense_until_us);
     {
         const uint32_t in_sec = mouse_ingest_count - in_per_sec_mark;
         in_per_sec_mark = mouse_ingest_count;
@@ -941,10 +946,16 @@ static void ble_health_task(uint64_t now_us) {
         ble_recent_input = true;
         ble_last_in_us = now_us;
         // 入力が来た秒に限り「最後の送信からの経過」を記録する。
-        // 無操作の秒を混ぜると意味がなくなるため in_moved で条件付ける
-        // 5 秒以上は「使っていない」時間なので omax に混ぜない (放置後の 1 発目で
-        // omax が数十分に跳ね、本物の停止と区別できなくなる)
-        if (connected && ever && tx_ms != 0xFFFFFFFFu && tx_ms < 5000u && tx_ms > tx_max_ms) {
+        // 無操作の秒を混ぜると意味がなくなるため in_moved で条件付ける。
+        //
+        // 【2026-11-15 修正】以前は `tx_ms < 5000` だけで除外していたが、
+        // 「1〜5 秒手を止めてから動かした」ときの 1 発目がそのまま入り、
+        // 休憩を「詰まり」と誤読していた (2026-11-15 実測: omax>=1000ms の
+        // 15 件すべてが放置明け・burst=0・「送るものがあるのに ok が増えない」
+        // 窓は 0 件 = 実際には詰まっていない)。
+        // 連続操作が 1 秒以上続いた後に限ることで、休憩明けの 1 発目を捨てる。
+        // 併せて 5 秒以上は従来どおり除外する (放置後の 1 発目で数十分に跳ねる)。
+        if (connected && ever && dense_before && tx_ms != 0xFFFFFFFFu && tx_ms < 5000u && tx_ms > tx_max_ms) {
             tx_max_ms = tx_ms;
         }
         // 入力があるのに送信が 100ms 以上空いたら時刻付きで残す
@@ -1037,6 +1048,13 @@ static void ble_health_task(uint64_t now_us) {
                 lps = (uint32_t) (((uint64_t) (loop_count - ble_hb_loops)) * 1000000ULL / dt_us);
             }
         }
+        // 【2026-11-15】HCI イベントの到着レート (件/秒)。
+        // 正常時は毎秒数十件。これが 0 に落ちる瞬間が「チップが黙る」始まり
+        const uint32_t hci_delta = h.hci_events - ble_hb_hci;
+        const uint32_t hcir = (RLOG_BLE_HB_MS > 0)
+                                  ? (uint32_t) (((uint64_t) hci_delta * 1000ULL) / RLOG_BLE_HB_MS)
+                                  : 0;
+        ble_hb_hci = h.hci_events;
         const uint32_t omax_ms = tx_max_ms; // print 用に退避してからリセット
         const uint32_t lat_ms = h.lat_max_ms;
         tx_max_ms = 0;
@@ -1053,7 +1071,7 @@ static void ble_health_task(uint64_t now_us) {
         loop_gap_max_us = 0;
 
         if (ever) {
-            remote_log_eventf("BLE-HB ci=%u ok=%u blk=%u acl=%u err=%u cp=%u/%u disc=%u rs=0x%02X tx=%ums omax=%ums lat=%ums burst=%u in=%u gmax=%ums dmax=%u sk=%u/%u/%u fl=0x%02X lps=%u lmax=%ums rtt=%ums rmax=%ums u=%u/%u sus=%u clat=%u st=%u cu=%u aclrun=%u cpd=%u conn=%u heap=%u temp=%d ccmd=%d",
+            remote_log_eventf("BLE-HB ci=%u ok=%u blk=%u acl=%u err=%u cp=%u/%u disc=%u rs=0x%02X tx=%ums omax=%ums lat=%ums burst=%u in=%u gmax=%ums dmax=%u sk=%u/%u/%u fl=0x%02X lps=%u lmax=%ums rtt=%ums rmax=%ums u=%u/%u sus=%u clat=%u st=%u cu=%u aclrun=%u cpd=%u conn=%u heap=%u temp=%d ccmd=%d brssi=%d hev=0x%02X hcir=%u",
                               (unsigned) h.ci, (unsigned) h.ok, (unsigned) h.blocked,
                               (unsigned) h.acl_full, (unsigned) h.err, (unsigned) h.cp_events, (unsigned) h.cp_packets, (unsigned) h.disc,
                               (unsigned) h.disc_reason, (unsigned) tx_ms,
@@ -1073,7 +1091,10 @@ static void ble_health_task(uint64_t now_us) {
                               (unsigned) h.conn_count, (unsigned) remote_log_heap_used(),
                               remote_log_chip_temp_c(),
                               // 【2026-11-13】HCI コマンドクレジットの残量 (1=送れる)
-                              hci_can_send_command_packet_now() ? 1 : 0);
+                              hci_can_send_command_packet_now() ? 1 : 0,
+                              // 【2026-11-15】BLE 側の電波 / 最後の HCI イベント
+                              (int) h.rssi, (unsigned) h.last_hci_event,
+                              (unsigned) hcir);
         } else {
             remote_log_eventf("BLE-HB ci=%u ok=0 blk=%u acl=%u err=%u cp=%u/%u disc=%u rs=0x%02X tx=none in=%u gmax=%ums lps=%u lmax=%ums rtt=%ums rmax=%ums u=%u/%u sus=%u",
                               (unsigned) h.ci, (unsigned) h.blocked,
@@ -1261,6 +1282,10 @@ void remote_log_init(void) {
 #if defined(BLE_LAT_WATCH_ENABLE) && !BLE_LAT_WATCH_ENABLE
     // 【2026-11-12】LAT-HIGH 自発再接続を無効化したビルド (焼き間違い検出)
     remote_log_eventf("BUILD VARIANT lat_watch=off");
+#endif
+#if defined(BLE_PARAM_REQ_ENABLE) && !BLE_PARAM_REQ_ENABLE
+    // 【2026-11-15】接続パラメータ再要求を無効化した A/B ビルド (焼き間違い検出)
+    remote_log_eventf("BUILD VARIANT param_req=off");
 #endif
 #if defined(FLASH_STRESS_MS) && FLASH_STRESS_MS > 0
     // 【2026-11-13】Flash 書き込みストレス (検証専用)

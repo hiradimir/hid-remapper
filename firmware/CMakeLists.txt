@@ -46,6 +46,10 @@ option(BL43_NO_FLOW_CONTROL "Disable the BL-43 flow control config (BL-45 bisect
 # 【2026-11-12】lat 高止まりでの自発再接続 (wake43) を無効化する。
 # 発動しても直後に CANSEND-TO が来ることが多く、切断チャーンだけが増えていた
 option(BLE_LAT_WATCH_DISABLE "Disable the LAT-HIGH proactive reconnect (wake54)" OFF)
+# 【2026-11-15】接続パラメータ再要求 (PARAM-REQ) の A/B 用。
+# これが st=100 (監視 1 秒) を st=400 (4 秒) に戻す唯一の防御なので、
+# OFF にすると 1 秒タイムアウトで切断されやすくなる見込み。因果の確定用
+option(BLE_PARAM_REQ_DISABLE "Disable the connection parameter re-request (A/B experiment)" OFF)
 # 【2026-11-13】Flash 書き込みストレス (検証専用)。0 で無効、ミリ秒で間隔指定
 set(FLASH_STRESS_MS 0 CACHE STRING "Force a TLV flash write every N ms (diagnostic)")
 # 【2026-11-13】IRQ 停止ストレス (検証専用)。0 で無効
@@ -111,6 +115,9 @@ if(ENABLE_BLE)
     endif()
     if(BLE_LAT_WATCH_DISABLE)
         target_compile_definitions(remapper PUBLIC BLE_LAT_WATCH_ENABLE=0)
+    endif()
+    if(BLE_PARAM_REQ_DISABLE)
+        target_compile_definitions(remapper PUBLIC BLE_PARAM_REQ_ENABLE=0)
     endif()
     if(NOT FLASH_STRESS_MS STREQUAL "0")
         target_compile_definitions(remapper PUBLIC FLASH_STRESS_MS=${FLASH_STRESS_MS})

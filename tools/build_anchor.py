@@ -1582,6 +1582,62 @@ patch(WT + '/firmware/src/remapper.h', [
 ])
 
 
+# --- 2026-11-15: PARAM-REQ の A/B スイッチ (CMake) ---
+patch(WT + '/firmware/CMakeLists.txt', [
+    ('option(BLE_LAT_WATCH_DISABLE "Disable the LAT-HIGH proactive reconnect (wake54)" OFF)',
+     'option(BLE_LAT_WATCH_DISABLE "Disable the LAT-HIGH proactive reconnect (wake54)" OFF)\n'
+     '# 【2026-11-15】接続パラメータ再要求 (PARAM-REQ) の A/B 用。\n'
+     '# これが st=100 (監視 1 秒) を st=400 (4 秒) に戻す唯一の防御なので、\n'
+     '# OFF にすると 1 秒タイムアウトで切断されやすくなる見込み (因果の確定用)\n'
+     'option(BLE_PARAM_REQ_DISABLE "Disable the connection parameter re-request (A/B experiment)" OFF)'),
+    ('    if(BLE_LAT_WATCH_DISABLE)\n        target_compile_definitions(remapper PUBLIC BLE_LAT_WATCH_ENABLE=0)\n    endif()',
+     '    if(BLE_LAT_WATCH_DISABLE)\n        target_compile_definitions(remapper PUBLIC BLE_LAT_WATCH_ENABLE=0)\n    endif()\n'
+     '    if(BLE_PARAM_REQ_DISABLE)\n        target_compile_definitions(remapper PUBLIC BLE_PARAM_REQ_ENABLE=0)\n    endif()'),
+])
+
+# --- 2026-11-15: BLE RSSI / 最後の HCI イベント / HCI レート + PARAM-REQ A/B + omax 修正 ---
+patch(WT + '/firmware/src/ble_hid.h', [
+    ('    uint32_t conn_count;\n    uint64_t last_ok_us;',
+     '    uint32_t conn_count;\n    uint64_t last_ok_us;\n    // 【2026-11-15】BLE リンクの RSSI (dBm)。これまで rssi= は Wi-Fi の値で、\n    // BLE 側は一度も測っていなかった (電波起因かチップ起因かを区別できなかった)。\n    // 127 = 未取得\n    int8_t rssi;\n    // 【2026-11-15】最後に受けた実 HCI イベントコード (hci_idle が伸びたとき\n    // 「何が最後だったか」を見る。0 = まだ受信していない)\n    uint8_t last_hci_event;\n    // HCI イベント総数 (HB 側で差分を取り、1 秒あたりの到着数を見る)\n    uint32_t hci_events;'),
+])
+
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ('static volatile uint64_t health_last_hci_us = 0;',
+     'static volatile uint64_t health_last_hci_us = 0;\n// 【2026-11-15】BLE リンクの RSSI。今まで rssi= は Wi-Fi の値で、BLE 側は\n// 未知だった (電波起因かチップ起因かを切り分けられなかった)\nstatic volatile int8_t health_ble_rssi = 127; // 127 = 未取得\n// 【2026-11-15】最後に受けた実 HCI イベントコード (0x60 未満のみ)\nstatic volatile uint8_t health_last_hci_event = 0;\n// HCI イベント総数。HB 側で差分を取り 1 秒あたりの到着数を見る\nstatic volatile uint32_t health_hci_events = 0;\nstatic uint64_t next_rssi_read_us = 0;'),
+    ('    if (packet_type == HCI_EVENT_PACKET) health_last_hci_us = time_us_64();\n    if (packet_type != HCI_EVENT_PACKET) return;\n\n    uint8_t event = hci_event_packet_get_type(packet);',
+     '    if (packet_type != HCI_EVENT_PACKET) return;\n\n    uint8_t event = hci_event_packet_get_type(packet);\n    // 【2026-11-15】生存確認は「実 HCI イベント (0x60 未満)」だけを数える。\n    // 0x60 以上は BTstack の内部イベント (STATE 通知など) なので、これを混ぜると\n    // チップが黙っていても hci_idle が伸びず、膠着の検知が誤魔化される。\n    // ヘッダの「HCI イベントが来ているか」の計装は元の位置にあったが、\n    // 0x60 以上を除外するためここへ移した\n    if (event < 0x60) {\n        health_last_hci_us = time_us_64();\n        health_hci_events++;\n        health_last_hci_event = event;\n    }'),
+    ('        case HCI_EVENT_COMMAND_COMPLETE: {',
+     '        // 【2026-11-15】BLE リンクの RSSI (gap_read_rssi の応答)。\n        // BTstack が GAP_EVENT_RSSI_MEASUREMENT (0xDE) として上げてくる\n        case GAP_EVENT_RSSI_MEASUREMENT: {\n            health_ble_rssi = (int8_t) gap_event_rssi_measurement_get_rssi(packet);\n            break;\n        }\n\n        case HCI_EVENT_COMMAND_COMPLETE: {'),
+    ('    out->conn_count = health_conn_count;',
+     '    out->conn_count = health_conn_count;\n    out->rssi = health_ble_rssi;\n    out->last_hci_event = health_last_hci_event;\n    out->hci_events = health_hci_events;'),
+    ('        // 【2026-11-03】lat 高止まりでの自発再接続。',
+     '        // 【2026-11-15】BLE リンクの RSSI を 5 秒ごとに取得する。\n        // これまで rssi= は Wi-Fi の値しか無く、BLE 側が弱っているのか\n        // チップが黙っているのかを区別できなかった。HCI コマンド 1 個なので\n        // 5 秒間隔に留める (コマンドクレジットを圧迫しない)\n        if (connected_now && con_handle != HCI_CON_HANDLE_INVALID &&\n            !ctrl_reset_pending && !health_tx_stalled &&\n            (int64_t) (now_us - next_rssi_read_us) >= 0) {\n            next_rssi_read_us = now_us + 5000000ULL;\n            gap_read_rssi(con_handle);\n        }\n\n        // 【2026-11-03】lat 高止まりでの自発再接続。'),
+    ('#ifndef BLE_LAT_WATCH_ENABLE\n#define BLE_LAT_WATCH_ENABLE 1\n#endif',
+     '#ifndef BLE_LAT_WATCH_ENABLE\n#define BLE_LAT_WATCH_ENABLE 1\n#endif\n\n// 【2026-11-15】接続パラメータ再要求の A/B 用スイッチ。\n// -DBLE_PARAM_REQ_DISABLE=ON で PARAM-REQ を撃たなくなる。\n// 「守り手として効いているのか / 実は不要なのか」を実機で確定させるための実験\n#ifndef BLE_PARAM_REQ_ENABLE\n#define BLE_PARAM_REQ_ENABLE 1\n#endif'),
+    ('        if (connected_now && ble_conn_latency > 0 && param_req_count < 3 &&\n            (now_us - last_param_req_us) >= 30000000ULL &&\n            (last_resume_us == 0 || (now_us - last_resume_us) >= 60000000ULL)) {',
+     '        if (BLE_PARAM_REQ_ENABLE && connected_now && ble_conn_latency > 0 &&\n            param_req_count < 3 &&\n            (now_us - last_param_req_us) >= 30000000ULL &&\n            (last_resume_us == 0 || (now_us - last_resume_us) >= 60000000ULL)) {'),
+    ('remote_log_eventf("CANSEND-TO n=%d hci_idle=%ums cp_idle=%ums rlog_age=%ums rssi=%d conn=%u heap=%u temp=%d ccmd=%d",\n                              consecutive_can_send_timeouts, (unsigned) hci_idle,\n                              (unsigned) cp_idle, (unsigned) remote_log_tx_age_ms(),\n                              remote_log_last_rssi(), (unsigned) health_conn_count,\n                              (unsigned) remote_log_heap_used(), remote_log_chip_temp_c(),\n                              hci_can_send_command_packet_now() ? 1 : 0);',
+     'remote_log_eventf("CANSEND-TO n=%d hci_idle=%ums cp_idle=%ums rlog_age=%ums rssi=%d conn=%u heap=%u temp=%d ccmd=%d brssi=%d hev=0x%02X",\n                              consecutive_can_send_timeouts, (unsigned) hci_idle,\n                              (unsigned) cp_idle, (unsigned) remote_log_tx_age_ms(),\n                              remote_log_last_rssi(), (unsigned) health_conn_count,\n                              (unsigned) remote_log_heap_used(), remote_log_chip_temp_c(),\n                              hci_can_send_command_packet_now() ? 1 : 0,\n                              // 【2026-11-15】BLE 側 RSSI と最後の実 HCI イベント\n                              (int) health_ble_rssi, (unsigned) health_last_hci_event);'),
+])
+
+patch(WT + '/firmware/src/remote_log.cc', [
+    ('static uint32_t ble_hb_loops = 0;',
+     'static uint32_t ble_hb_loops = 0;\n// 【2026-11-15】直近 HB 時点の HCI イベント総数 (到着レートを出すため)\nstatic uint32_t ble_hb_hci = 0;'),
+    ('        const uint32_t omax_ms = tx_max_ms;',
+     '        // 【2026-11-15】HCI イベントの到着レート (件/秒)。\n        // 正常時は毎秒数十件。0 に落ちる瞬間が「チップが黙る」始まり\n        const uint32_t hci_delta = h.hci_events - ble_hb_hci;\n        const uint32_t hcir = (RLOG_BLE_HB_MS > 0)\n                                  ? (uint32_t) (((uint64_t) hci_delta * 1000ULL) / RLOG_BLE_HB_MS)\n                                  : 0;\n        ble_hb_hci = h.hci_events;\n        const uint32_t omax_ms = tx_max_ms;'),
+    ('    {\n        const uint32_t in_sec = mouse_ingest_count - in_per_sec_mark;\n        in_per_sec_mark = mouse_ingest_count;\n        if (in_sec >= 10) {\n            dense_until_us = now_us + 1500000ULL;\n        }\n    }',
+     '    // 【2026-11-15】この秒に入る前から「連続操作中」だったか。\n    // omax はこのフラグが立っている間だけ記録する\n    const bool dense_before = (now_us < dense_until_us);\n    {\n        const uint32_t in_sec = mouse_ingest_count - in_per_sec_mark;\n        in_per_sec_mark = mouse_ingest_count;\n        if (in_sec >= 10) {\n            dense_until_us = now_us + 1500000ULL;\n        }\n    }'),
+    ('        if (connected && ever && tx_ms != 0xFFFFFFFFu && tx_ms < 5000u && tx_ms > tx_max_ms) {\n            tx_max_ms = tx_ms;\n        }',
+     '        // 【2026-11-15 修正】5 秒未満でも「休憩明けの 1 発目」は omax に入れない。\n        // 1〜5 秒手を止めてから動かした値を拾うと、休憩を「詰まり」と誤読する\n        // (omax>=1000ms の 15 件すべてが放置明け・burst=0 だった)\n        if (connected && ever && dense_before && tx_ms != 0xFFFFFFFFu && tx_ms < 5000u && tx_ms > tx_max_ms) {\n            tx_max_ms = tx_ms;\n        }'),
+    ('cu=%u aclrun=%u cpd=%u conn=%u heap=%u temp=%d ccmd=%d",',
+     'cu=%u aclrun=%u cpd=%u conn=%u heap=%u temp=%d ccmd=%d brssi=%d hev=0x%02X hcir=%u",'),
+    ('                              hci_can_send_command_packet_now() ? 1 : 0);',
+     '                              hci_can_send_command_packet_now() ? 1 : 0,\n                              // 【2026-11-15】BLE 側の電波 / 最後の HCI イベント\n                              (int) h.rssi, (unsigned) h.last_hci_event,\n                              (unsigned) hcir);'),
+    ('#if defined(BLE_LAT_WATCH_ENABLE) && !BLE_LAT_WATCH_ENABLE',
+     '#if defined(BLE_PARAM_REQ_ENABLE) && !BLE_PARAM_REQ_ENABLE\n    // 【2026-11-15】接続パラメータ再要求を無効化した A/B ビルド (焼き間違い検出)\n    remote_log_eventf("BUILD VARIANT param_req=off");\n#endif\n#if defined(BLE_LAT_WATCH_ENABLE) && !BLE_LAT_WATCH_ENABLE'),
+])
+
+
 # --- 生成物の自己検算 (2026-11-01 追加) ---
 REQUIRED_MARKERS = [
     ('firmware/src/ble_hid.cc', 'health_acl_run < 0xFFFF'),
@@ -1617,6 +1673,14 @@ REQUIRED_MARKERS = [
     ('firmware/src/ble_hid.cc', 'bool ble_hid_send_report'),
     ('firmware/src/ble_hid.cc', 'return status == ERROR_CODE_SUCCESS'),
     ('firmware/src/remapper_single.cc', 'last_real_ingest_us = time_us_64'),
+    ('firmware/src/ble_hid.cc', 'health_ble_rssi'),
+    ('firmware/src/ble_hid.cc', 'GAP_EVENT_RSSI_MEASUREMENT'),
+    ('firmware/src/ble_hid.cc', 'health_last_hci_event'),
+    ('firmware/src/ble_hid.cc', 'BLE_PARAM_REQ_ENABLE'),
+    ('firmware/src/remote_log.cc', 'brssi=%d hev=0x%02X hcir=%u'),
+    ('firmware/src/remote_log.cc', 'dense_before'),
+    ('firmware/src/remote_log.cc', 'param_req=off'),
+    ('firmware/CMakeLists.txt', 'BLE_PARAM_REQ_DISABLE'),
 ]
 for _rel, _needle in REQUIRED_MARKERS:
     _txt = open(WT + '/' + _rel).read()
