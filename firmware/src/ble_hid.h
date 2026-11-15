@@ -62,6 +62,11 @@ typedef struct {
     uint32_t cp_gap_max_ms;  // 区間内の最大間隔
     uint32_t cp_gap_slow;    // 60ms 以上を数えた回数
     uint32_t cp_gap_last_ms; // 直近の間隔
+    // 【2026-11-16】RSSI の区間最小/最大 (dBm)。1 点の値はフェージングで
+    // -90 まで落ちるため、幅を持って「瞬間的な落ち込み」か「全体的に弱い」かを
+    // 区別する。127/-127 = 未取得
+    int8_t rssi_min;
+    int8_t rssi_max;
 } ble_hid_health_t;
 
 #if defined(ENABLE_BLE) && ENABLE_BLE
@@ -81,6 +86,8 @@ bool ble_hid_is_pairing(void);
 void ble_hid_reset_lat_max(void);
 // 【2026-11-16】CP 到着間隔の統計を区切る (HB ウィンドウの先頭で呼ぶ)
 void ble_hid_reset_cp_gap(void);
+// 【2026-11-16】RSSI の区間最小/最大を区切る (HB ウィンドウの先頭で呼ぶ)
+void ble_hid_reset_rssi_range(void);
 void ble_hid_reset_dmax(void);
 bool ble_hid_can_send(void);
 // 【2026-11-14】受理されたか (true) / されなかったか (false) を返す。
@@ -124,6 +131,7 @@ static inline void ble_hid_wake_from_dormant(void) {}
 static inline bool ble_hid_is_pairing(void) { return false; }
 static inline bool ble_hid_can_send(void) { return false; }
 static inline void ble_hid_reset_cp_gap(void) {}
+static inline void ble_hid_reset_rssi_range(void) {}
 static inline void ble_hid_reset_lat_max(void) {}
 static inline void ble_hid_reset_dmax(void) {}
 static inline bool ble_hid_send_report(uint8_t report_id, const uint8_t* data, uint8_t len) {

@@ -1060,6 +1060,10 @@ static void ble_health_task(uint64_t now_us) {
         const uint32_t cpg_slow = h.cp_gap_slow;
         const uint32_t cpg_last = h.cp_gap_last_ms;
         ble_hid_reset_cp_gap();
+        // 【2026-11-16】RSSI の区間最小/最大 (単発値はフェージングで暴れる)
+        const int brssi_min = (int) h.rssi_min;
+        const int brssi_max = (int) h.rssi_max;
+        ble_hid_reset_rssi_range();
         const uint32_t omax_ms = tx_max_ms; // print 用に退避してからリセット
         const uint32_t lat_ms = h.lat_max_ms;
         tx_max_ms = 0;
@@ -1076,7 +1080,7 @@ static void ble_health_task(uint64_t now_us) {
         loop_gap_max_us = 0;
 
         if (ever) {
-            remote_log_eventf("BLE-HB ci=%u ok=%u blk=%u acl=%u err=%u cp=%u/%u disc=%u rs=0x%02X tx=%ums omax=%ums lat=%ums burst=%u in=%u gmax=%ums dmax=%u sk=%u/%u/%u fl=0x%02X lps=%u lmax=%ums rtt=%ums rmax=%ums u=%u/%u sus=%u clat=%u st=%u cu=%u aclrun=%u cpd=%u conn=%u heap=%u temp=%d ccmd=%d brssi=%d hev=0x%02X hcir=%u cpg=%u/%u/%u",
+            remote_log_eventf("BLE-HB ci=%u ok=%u blk=%u acl=%u err=%u cp=%u/%u disc=%u rs=0x%02X tx=%ums omax=%ums lat=%ums burst=%u in=%u gmax=%ums dmax=%u sk=%u/%u/%u fl=0x%02X lps=%u lmax=%ums rtt=%ums rmax=%ums u=%u/%u sus=%u clat=%u st=%u cu=%u aclrun=%u cpd=%u conn=%u heap=%u temp=%d ccmd=%d brssi=%d/%d/%d hev=0x%02X hcir=%u cpg=%u/%u/%u",
                               (unsigned) h.ci, (unsigned) h.ok, (unsigned) h.blocked,
                               (unsigned) h.acl_full, (unsigned) h.err, (unsigned) h.cp_events, (unsigned) h.cp_packets, (unsigned) h.disc,
                               (unsigned) h.disc_reason, (unsigned) tx_ms,
@@ -1097,8 +1101,10 @@ static void ble_health_task(uint64_t now_us) {
                               remote_log_chip_temp_c(),
                               // 【2026-11-13】HCI コマンドクレジットの残量 (1=送れる)
                               hci_can_send_command_packet_now() ? 1 : 0,
-                              // 【2026-11-15】BLE 側の電波 / 最後の HCI イベント
-                              (int) h.rssi, (unsigned) h.last_hci_event,
+                              // 【2026-11-16】BLE の RSSI は 直近/最小/最大。
+                              // 単発値はフェージングで -90 まで落ちるため幅で見る
+                              (int) h.rssi, brssi_min, brssi_max,
+                              (unsigned) h.last_hci_event,
                               (unsigned) hcir,
                               // 【2026-11-16】CP 間隔 最大/60ms超の回数/直近
                               (unsigned) cpg_max, (unsigned) cpg_slow, (unsigned) cpg_last);

@@ -1703,6 +1703,37 @@ patch(WT + '/firmware/src/remote_log.cc', [
 ])
 
 
+# --- 2026-11-16: RSSI の区間最小/最大 (フェージングと実質劣化の区別) ---
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ('static volatile int8_t health_ble_rssi = 127; // 127 = 未取得',
+     'static volatile int8_t health_ble_rssi = 127; // 127 = 未取得\n// 【2026-11-16】RSSI は「その瞬間に受けた 1 パケット」の値なので、単発では\n// フェージングで -90 まで落ちる。HB 区間の最大/最小を持って幅を見る\nstatic volatile int8_t health_rssi_min = 127;\nstatic volatile int8_t health_rssi_max = -127;'),
+    ('        case GAP_EVENT_RSSI_MEASUREMENT: {\n            health_ble_rssi = (int8_t) gap_event_rssi_measurement_get_rssi(packet);\n            break;\n        }',
+     '        case GAP_EVENT_RSSI_MEASUREMENT: {\n            int8_t v = (int8_t) gap_event_rssi_measurement_get_rssi(packet);\n            health_ble_rssi = v;\n            // 【2026-11-16】区間の最小/最大を更新 (0 は無効値なので除外)\n            if (v != 0 && v < 0) {\n                if (v < health_rssi_min) health_rssi_min = v;\n                if (v > health_rssi_max) health_rssi_max = v;\n            }\n            break;\n        }'),
+    ('void ble_hid_reset_cp_gap(void) {\n    cp_gap_max_ms = 0;\n    cp_gap_slow = 0;\n}',
+     'void ble_hid_reset_cp_gap(void) {\n    cp_gap_max_ms = 0;\n    cp_gap_slow = 0;\n}\n// 【2026-11-16】RSSI の区間最小/最大を区切る (HB ウィンドウの先頭で呼ぶ)\nvoid ble_hid_reset_rssi_range(void) {\n    health_rssi_min = 127;\n    health_rssi_max = -127;\n}'),
+    ('    out->cp_gap_last_ms = cp_gap_last_ms;',
+     '    out->cp_gap_last_ms = cp_gap_last_ms;\n    out->rssi_min = health_rssi_min;\n    out->rssi_max = health_rssi_max;'),
+])
+
+patch(WT + '/firmware/src/ble_hid.h', [
+    ('} ble_hid_health_t;',
+     '    // 【2026-11-16】RSSI の区間最小/最大 (dBm)。1 点の値はフェージングで\n    // -90 まで落ちるため、幅を持って区別する。127/-127 = 未取得\n    int8_t rssi_min;\n    int8_t rssi_max;\n} ble_hid_health_t;'),
+    ('void ble_hid_reset_cp_gap(void);',
+     'void ble_hid_reset_cp_gap(void);\n// 【2026-11-16】RSSI の区間最小/最大を区切る (HB ウィンドウの先頭で呼ぶ)\nvoid ble_hid_reset_rssi_range(void);'),
+    ('static inline void ble_hid_reset_cp_gap(void) {}',
+     'static inline void ble_hid_reset_cp_gap(void) {}\nstatic inline void ble_hid_reset_rssi_range(void) {}'),
+])
+
+patch(WT + '/firmware/src/remote_log.cc', [
+    ('        ble_hid_reset_cp_gap();\n        const uint32_t omax_ms = tx_max_ms;',
+     '        ble_hid_reset_cp_gap();\n        // 【2026-11-16】RSSI の区間最小/最大 (単発値はフェージングで暴れる)\n        const int brssi_min = (int) h.rssi_min;\n        const int brssi_max = (int) h.rssi_max;\n        ble_hid_reset_rssi_range();\n        const uint32_t omax_ms = tx_max_ms;'),
+    ('brssi=%d hev=0x%02X hcir=%u cpg=%u/%u/%u",',
+     'brssi=%d/%d/%d hev=0x%02X hcir=%u cpg=%u/%u/%u",'),
+    ('                              (int) h.rssi, (unsigned) h.last_hci_event,',
+     '                              (int) h.rssi, brssi_min, brssi_max,\n                              (unsigned) h.last_hci_event,'),
+])
+
+
 # --- 生成物の自己検算 (2026-11-01 追加) ---
 REQUIRED_MARKERS = [
     ('firmware/src/ble_hid.cc', 'health_acl_run < 0xFFFF'),
@@ -1742,7 +1773,7 @@ REQUIRED_MARKERS = [
     ('firmware/src/ble_hid.cc', 'GAP_EVENT_RSSI_MEASUREMENT'),
     ('firmware/src/ble_hid.cc', 'health_last_hci_event'),
     ('firmware/src/ble_hid.cc', 'BLE_PARAM_REQ_ENABLE'),
-    ('firmware/src/remote_log.cc', 'brssi=%d hev=0x%02X hcir=%u'),
+    ('firmware/src/remote_log.cc', 'brssi=%d/%d/%d hev=0x%02X hcir=%u'),
     ('firmware/src/remote_log.cc', 'dense_before'),
     ('firmware/src/remote_log.cc', 'param_req=off'),
     ('firmware/CMakeLists.txt', 'BLE_PARAM_REQ_DISABLE'),
@@ -1754,6 +1785,8 @@ REQUIRED_MARKERS = [
     ('firmware/src/ble_hid.cc', 'BT RADIO-OFF'),
     ('firmware/src/ble_hid.cc', 'ble_hid_reset_cp_gap'),
     ('firmware/src/remote_log.cc', 'cpg=%u/%u/%u'),
+    ('firmware/src/ble_hid.cc', 'ble_hid_reset_rssi_range'),
+    ('firmware/src/remote_log.cc', 'brssi=%d/%d/%d'),
 ]
 for _rel, _needle in REQUIRED_MARKERS:
     _txt = open(WT + '/' + _rel).read()

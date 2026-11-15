@@ -420,6 +420,11 @@ static volatile uint64_t health_last_hci_us = 0;
 // 【2026-11-15】BLE リンクの RSSI。今まで rssi= は Wi-Fi の値で、BLE 側は
 // 未知だった (電波起因かチップ起因かを切り分けられなかった)
 static volatile int8_t health_ble_rssi = 127; // 127 = 未取得
+// 【2026-11-16】RSSI は「その瞬間に受けた 1 パケット」の値なので、単発では
+// フェージングで -90 まで落ちる。HB 区間の最大/最小を持って幅を見る。
+// 「常に -50 だが瞬間 -92」なのか「本当に -85 で不安定」なのかを区別する
+static volatile int8_t health_rssi_min = 127;  // 区間内の最小 (最も弱い)
+static volatile int8_t health_rssi_max = -127; // 区間内の最大 (最も強い)
 // 【2026-11-15】最後に受けた HCI イベントコード (0x60 未満のみ = 実 HCI)
 static volatile uint8_t health_last_hci_event = 0;
 // HCI イベント総数。HB 側で差分を取り「1 秒あたり何件来ているか」を見る
@@ -448,6 +453,11 @@ static volatile uint64_t cp_gap_prev_us = 0;
 void ble_hid_reset_cp_gap(void) {
     cp_gap_max_ms = 0;
     cp_gap_slow = 0;
+}
+// 【2026-11-16】RSSI の区間最小/最大を区切る (HB ウィンドウの先頭で呼ぶ)
+void ble_hid_reset_rssi_range(void) {
+    health_rssi_min = 127;
+    health_rssi_max = -127;
 }
 
 static volatile uint64_t health_last_cp_us = 0;
@@ -479,6 +489,8 @@ void ble_hid_get_health(ble_hid_health_t* out) {
     out->cp_gap_max_ms = cp_gap_max_ms;
     out->cp_gap_slow = cp_gap_slow;
     out->cp_gap_last_ms = cp_gap_last_ms;
+    out->rssi_min = health_rssi_min;
+    out->rssi_max = health_rssi_max;
     out->lat_max_ms = health_lat_max_ms;
     out->dmax = health_dmax;
     out->disc = health_disc;
@@ -1697,7 +1709,13 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
         // 【2026-11-15】BLE リンクの RSSI (gap_read_rssi の応答)。
         // BTstack が GAP_EVENT_RSSI_MEASUREMENT (0xDE) として上げてくる
         case GAP_EVENT_RSSI_MEASUREMENT: {
-            health_ble_rssi = (int8_t) gap_event_rssi_measurement_get_rssi(packet);
+            int8_t v = (int8_t) gap_event_rssi_measurement_get_rssi(packet);
+            health_ble_rssi = v;
+            // 【2026-11-16】区間の最小/最大を更新 (0 は無効値なので除外)
+            if (v != 0 && v < 0) {
+                if (v < health_rssi_min) health_rssi_min = v;
+                if (v > health_rssi_max) health_rssi_max = v;
+            }
             break;
         }
 
