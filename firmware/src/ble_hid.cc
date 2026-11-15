@@ -66,6 +66,14 @@ typedef struct {
 
 static uint8_t slot_bonded_mask = 0;
 static slot_peer_t slot_peers[MAX_SLOTS];
+// 【2026-11-16】Flash に書いた値のキャッシュ。接続のたびに無条件で 2 回書き込んで
+// いたが、ボンド情報は接続では変わらないので中身が同じなら書かない。
+// 実測: 接続 21 回で書き込み 42 回 (うち 1 回 63ms)。Flash 書き込み中は XIP が
+// 止まり CYW43 ドライバも動けないため、無駄な停止を減らす。
+// 0xFF = まだ書いていない (起動直後を含む)
+static uint8_t saved_bonded_mask_cache = 0xFF;
+static slot_peer_t saved_slot_peers_cache[MAX_SLOTS];
+static bool saved_slot_peers_valid = false;
 static uint8_t slot_salts[MAX_SLOTS];
 static char slot_os[MAX_SLOTS] = {'-', '-', '-', '-'};
 static bool radio_off_saved = false;
@@ -829,12 +837,23 @@ static void tlv_store_timed(uint32_t tag, const void* data, int len, const char*
 static void save_slot_bonded_mask(uint8_t mask) {
     slot_bonded_mask = mask;
     if (!tlv_impl) return;
+    // 【2026-11-16】前回書いた値と同じなら書かない (Flash 停止を避ける)
+    if (saved_bonded_mask_cache == mask) return;
     tlv_store_timed(TLV_TAG_SLOT_BOND_MASK, &mask, sizeof(mask), "mask");
+    saved_bonded_mask_cache = mask;
 }
 
 static void save_slot_peers(void) {
     if (!tlv_impl) return;
+    // 【2026-11-16】前回書いた内容と同じなら書かない。
+    // 接続のたびに無条件で書いていた (接続 21 回で 42 回、最大 63ms) のを止める
+    if (saved_slot_peers_valid &&
+        memcmp(saved_slot_peers_cache, slot_peers, sizeof(slot_peers)) == 0) {
+        return;
+    }
     tlv_store_timed(TLV_TAG_SLOT_PEERS, slot_peers, sizeof(slot_peers), "peers");
+    memcpy(saved_slot_peers_cache, slot_peers, sizeof(slot_peers));
+    saved_slot_peers_valid = true;
 }
 
 static void save_slot_salts(void) {
@@ -944,8 +963,18 @@ static void load_current_slot(void) {
     } else {
         slot_bonded_mask = 0;
     }
+    // 【2026-11-16】読み込んだ値をキャッシュに入れる (初回接続での無駄な書き込み防止)
+    if (len == sizeof(saved_mask)) {
+        saved_bonded_mask_cache = saved_mask;
+    }
 
     load_slot_peers();
+    // 【2026-11-16】読み込んだ内容を「書き込み済み」として記憶しておく。
+    // こうしないと起動後の初回接続で必ず 1 回書いてしまう (中身は変わっていない)
+    if (tlv_impl) {
+        memcpy(saved_slot_peers_cache, slot_peers, sizeof(slot_peers));
+        saved_slot_peers_valid = true;
+    }
     load_slot_salts();
     load_slot_os();
     load_radio_off();

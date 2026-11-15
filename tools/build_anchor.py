@@ -1734,6 +1734,21 @@ patch(WT + '/firmware/src/remote_log.cc', [
 ])
 
 
+# --- 2026-11-16: Flash 書き込みを「変わったときだけ」に (無駄な停止の削除) ---
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ('static uint8_t slot_bonded_mask = 0;\nstatic slot_peer_t slot_peers[MAX_SLOTS];',
+     'static uint8_t slot_bonded_mask = 0;\nstatic slot_peer_t slot_peers[MAX_SLOTS];\n// 【2026-11-16】Flash に書いた値のキャッシュ。接続のたびに無条件で 2 回書き込んで\n// いたが、ボンド情報は接続では変わらないので中身が同じなら書かない。\n// 実測: 接続 21 回で書き込み 42 回 (うち 1 回 63ms)\nstatic uint8_t saved_bonded_mask_cache = 0xFF;\nstatic slot_peer_t saved_slot_peers_cache[MAX_SLOTS];\nstatic bool saved_slot_peers_valid = false;'),
+    ('static void save_slot_bonded_mask(uint8_t mask) {\n    slot_bonded_mask = mask;\n    if (!tlv_impl) return;\n    tlv_store_timed(TLV_TAG_SLOT_BOND_MASK, &mask, sizeof(mask), "mask");\n}',
+     'static void save_slot_bonded_mask(uint8_t mask) {\n    slot_bonded_mask = mask;\n    if (!tlv_impl) return;\n    // 【2026-11-16】前回書いた値と同じなら書かない (Flash 停止を避ける)\n    if (saved_bonded_mask_cache == mask) return;\n    tlv_store_timed(TLV_TAG_SLOT_BOND_MASK, &mask, sizeof(mask), "mask");\n    saved_bonded_mask_cache = mask;\n}'),
+    ('static void save_slot_peers(void) {\n    if (!tlv_impl) return;\n    tlv_store_timed(TLV_TAG_SLOT_PEERS, slot_peers, sizeof(slot_peers), "peers");\n}',
+     'static void save_slot_peers(void) {\n    if (!tlv_impl) return;\n    // 【2026-11-16】前回書いた内容と同じなら書かない。\n    // 接続のたびに無条件で書いていた (接続 21 回で 42 回、最大 63ms) のを止める\n    if (saved_slot_peers_valid &&\n        memcmp(saved_slot_peers_cache, slot_peers, sizeof(slot_peers)) == 0) {\n        return;\n    }\n    tlv_store_timed(TLV_TAG_SLOT_PEERS, slot_peers, sizeof(slot_peers), "peers");\n    memcpy(saved_slot_peers_cache, slot_peers, sizeof(slot_peers));\n    saved_slot_peers_valid = true;\n}'),
+    ('    load_slot_peers();\n    load_slot_salts();\n    load_slot_os();',
+     '    load_slot_peers();\n    // 【2026-11-16】読み込んだ内容を「書き込み済み」として記憶しておく。\n    // こうしないと起動後の初回接続で必ず 1 回書いてしまう (中身は変わっていない)\n    if (tlv_impl) {\n        memcpy(saved_slot_peers_cache, slot_peers, sizeof(slot_peers));\n        saved_slot_peers_valid = true;\n    }\n    load_slot_salts();\n    load_slot_os();'),
+    ('    if (len == sizeof(saved_mask)) {\n        slot_bonded_mask = saved_mask;\n    } else {\n        slot_bonded_mask = 0;\n    }',
+     '    if (len == sizeof(saved_mask)) {\n        slot_bonded_mask = saved_mask;\n    } else {\n        slot_bonded_mask = 0;\n    }\n    // 【2026-11-16】読み込んだ値をキャッシュに入れる (初回接続での無駄な書き込み防止)\n    if (len == sizeof(saved_mask)) {\n        saved_bonded_mask_cache = saved_mask;\n    }'),
+])
+
+
 # --- 生成物の自己検算 (2026-11-01 追加) ---
 REQUIRED_MARKERS = [
     ('firmware/src/ble_hid.cc', 'health_acl_run < 0xFFFF'),
@@ -1787,6 +1802,8 @@ REQUIRED_MARKERS = [
     ('firmware/src/remote_log.cc', 'cpg=%u/%u/%u'),
     ('firmware/src/ble_hid.cc', 'ble_hid_reset_rssi_range'),
     ('firmware/src/remote_log.cc', 'brssi=%d/%d/%d'),
+    ('firmware/src/ble_hid.cc', 'saved_bonded_mask_cache'),
+    ('firmware/src/ble_hid.cc', 'saved_slot_peers_valid'),
 ]
 for _rel, _needle in REQUIRED_MARKERS:
     _txt = open(WT + '/' + _rel).read()
