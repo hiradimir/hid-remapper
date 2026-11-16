@@ -1749,6 +1749,15 @@ patch(WT + '/firmware/src/ble_hid.cc', [
 ])
 
 
+# --- 2026-11-16: リセット理由の記録 (POR / RUN / PSM / watchdog) ---
+patch(WT + '/firmware/src/remote_log.cc', [
+    ('#include <hardware/sync/spin_lock.h>',
+     '#include <hardware/sync/spin_lock.h>\n// 【2026-11-16】リセット理由の記録用 (vreg_and_chip_reset_hw->chip_reset)\n#include <hardware/structs/vreg_and_chip_reset.h>\n#include <hardware/watchdog.h>'),
+    ('    // どのビルドが焼かれているかを最初に残す (焼き間違いの検出用)\n    remote_log_eventf("BUILD %s %s", REMAPPER_BUILD_TIME, REMAPPER_GIT_SHA);',
+     '    // どのビルドが焼かれているかを最初に残す (焼き間違いの検出用)\n    remote_log_eventf("BUILD %s %s", REMAPPER_BUILD_TIME, REMAPPER_GIT_SHA);\n    // 【2026-11-16】前回のリセット理由を残す。「ハングして勝手に再起動する」\n    // 現象で、電源断 (POR/BOR) か RUN ピンかウォッチドッグかを確定させるため。\n    // chip_reset のビットは「読むとクリア」されるので起動直後に 1 回だけ読む\n    {\n        const uint32_t cr = vreg_and_chip_reset_hw->chip_reset;\n        const bool por = (cr & VREG_AND_CHIP_RESET_CHIP_RESET_HAD_POR_BITS) != 0;\n        const bool run = (cr & VREG_AND_CHIP_RESET_CHIP_RESET_HAD_RUN_BITS) != 0;\n        const bool psm = (cr & VREG_AND_CHIP_RESET_CHIP_RESET_HAD_PSM_RESTART_BITS) != 0;\n        remote_log_eventf("RESET por=%u run=%u psm=%u wdg=%u raw=0x%06X",\n                          por ? 1u : 0u, run ? 1u : 0u, psm ? 1u : 0u,\n                          watchdog_caused_reboot() ? 1u : 0u, (unsigned) (cr & 0xFFFFFFu));\n    }'),
+])
+
+
 # --- 生成物の自己検算 (2026-11-01 追加) ---
 REQUIRED_MARKERS = [
     ('firmware/src/ble_hid.cc', 'health_acl_run < 0xFFFF'),
@@ -1802,6 +1811,7 @@ REQUIRED_MARKERS = [
     ('firmware/src/remote_log.cc', 'cpg=%u/%u/%u'),
     ('firmware/src/ble_hid.cc', 'ble_hid_reset_rssi_range'),
     ('firmware/src/remote_log.cc', 'brssi=%d/%d/%d'),
+    ('firmware/src/remote_log.cc', 'RESET por=%u'),
     ('firmware/src/ble_hid.cc', 'saved_bonded_mask_cache'),
     ('firmware/src/ble_hid.cc', 'saved_slot_peers_valid'),
 ]

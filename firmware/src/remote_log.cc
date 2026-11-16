@@ -26,6 +26,9 @@
 #include <pico/time.h>
 extern "C" {
 #include <hardware/sync/spin_lock.h>
+// 【2026-11-16】リセット理由の記録用 (vreg_and_chip_reset_hw->chip_reset)
+#include <hardware/structs/vreg_and_chip_reset.h>
+#include <hardware/watchdog.h>
 }
 #include <lwip/pbuf.h>
 #include <lwip/udp.h>
@@ -1281,6 +1284,19 @@ void remote_log_init(void) {
     }
     // どのビルドが焼かれているかを最初に残す (焼き間違いの検出用)
     remote_log_eventf("BUILD %s %s", REMAPPER_BUILD_TIME, REMAPPER_GIT_SHA);
+    // 【2026-11-16】前回のリセット理由を残す。
+    // 「ハングして勝手に再起動する」現象で、電源断 (POR/BOR) なのか
+    // RUN ピンなのかウォッチドッグなのかを確定させるため。
+    // chip_reset のビットは「読むとクリア」されるので起動直後に 1 回だけ読む
+    {
+        const uint32_t cr = vreg_and_chip_reset_hw->chip_reset;
+        const bool por = (cr & VREG_AND_CHIP_RESET_CHIP_RESET_HAD_POR_BITS) != 0;
+        const bool run = (cr & VREG_AND_CHIP_RESET_CHIP_RESET_HAD_RUN_BITS) != 0;
+        const bool psm = (cr & VREG_AND_CHIP_RESET_CHIP_RESET_HAD_PSM_RESTART_BITS) != 0;
+        remote_log_eventf("RESET por=%u run=%u psm=%u wdg=%u raw=0x%06X",
+                          por ? 1u : 0u, run ? 1u : 0u, psm ? 1u : 0u,
+                          watchdog_caused_reboot() ? 1u : 0u, (unsigned) (cr & 0xFFFFFFu));
+    }
 #if defined(BLE_LOCK_DISABLE) && BLE_LOCK_DISABLE
     // 切り分け用ビルドの取り違え防止 (常用ビルドでは出ない)
     remote_log_eventf("BUILD VARIANT ble_lock=disabled");
