@@ -2578,14 +2578,17 @@ static void ble_hid_task_locked(void) {
             return;
         }
 
-        // 【2026-11-15】BLE リンクの RSSI を 5 秒ごとに取得する。
+        // 【2026-11-15】BLE リンクの RSSI を取得する。
         // これまで rssi= は Wi-Fi の値しか無く、BLE 側が弱っているのか
-        // チップが黙っているのかを区別できなかった。取得は HCI コマンド 1 個
-        // なので、5 秒間隔に留める (コマンドクレジットを圧迫しない)
+        // チップが黙っているのかを区別できなかった。
+        // 【2026-11-16】取得周期を 5 秒 → 1 秒に短縮。HB の区間が 5 秒なので、
+        // 5 秒周期では区間あたり 1 サンプルしか入らず「最小=最大=直近」となり、
+        // フェージングを見る意味が無かった (実測: 全区間で 3 値が同一)。
+        // 1 秒に 1 個の HCI コマンドはクレジット的に十分余裕がある
         if (connected_now && con_handle != HCI_CON_HANDLE_INVALID &&
             !ctrl_reset_pending && !health_tx_stalled &&
             (int64_t) (now_us - next_rssi_read_us) >= 0) {
-            next_rssi_read_us = now_us + 5000000ULL;
+            next_rssi_read_us = now_us + 1000000ULL;
             gap_read_rssi(con_handle);
         }
 
