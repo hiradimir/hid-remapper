@@ -53,10 +53,37 @@
 - 再接続カウントダウン表示も `BLE_RECONN_TIMEOUT_MS` に追随（60 秒に伸ばしたのに
   表示だけ 30 秒から減っていた）
 
-- ビルド: `firmware/artifacts/remapper_anchor_wake85_switchgap.uf2`（11/20 16:3x）
-- 検証: 切替後に `SLOT-ADV-BLOCK` が出る（＝待機中に広告要求が来ていた証拠）/
-  `SLOT-APPLY slot=N` の後に `LE-CONN slot=N` が来る / 切替直後に
-  前スロットで `CONNECTED slot=旧` が出ない
+- ビルド: `firmware/artifacts/remapper_anchor_wake85_switchgap.uf2`（11/20 16:38 ビルド）
+
+### 実機検証 (16:41〜16:42、4 回切替)
+
+**合格**。`SLOT-APPLY` → `ADV-EN slot=N` → `LE-CONN slot=N` → `CONNECTED slot=N`
+の順序が全 4 回で揃い、切替直後に前スロットで `CONNECTED` が出る事象は消えた。
+
+```
+16:41:42.167  SWITCH-REQ cur=2 -> 1
+16:41:42.231  SLOT-MARGIN slot=1 pair=0 ms=800
+16:41:43.038  SLOT-APPLY slot=1          ← 待機終了
+16:41:43.236  ADV-EN en=1 slot=1 st=2    ← ここで初めて広告
+16:41:43.438  LE-CONN slot=1             ← 適用後に接続
+16:41:43.761  CONNECTED slot=1           ← 切替から 1.59 秒
+```
+
+| 切替 | 所要 | 結果 |
+|---|---|---|
+| 2 → 1 | 1.59 秒 | OK |
+| 1 → 2 | 2.34 秒 | OK |
+| 2 → 1 | 1.80 秒 | OK |
+| 1 → 2 | 1.96 秒 | OK |
+
+- `rs=0x22` は **0 件**（`wake84` で懸念した LMP タイムアウトは再発せず）
+- `CANSEND-TO` / `PROACT` / `HCI-RECYCLE` / `RECONN-TO` / `BACKOFF` も **0 件**
+- 切断理由は 4 回とも `rs=0x16`（local host terminated = 自分から切った正常な切替）
+
+**注目点: `SLOT-ADV-BLOCK` は 0 件だった。** つまり `adv_set` のガードは発火せず、
+効いたのは「切断完了ハンドラが切替中に広告を張り直さない」の 1 点だった。
+ガードは将来 `ADV-RETRY` 等が割り込んだときの保険として残す（発火すれば
+`SLOT-ADV-BLOCK` がログに出るので、その時点で経路を特定できる）。
 
 ## 2026-11-20 `wake84`: 切替後の広告を 800ms 遅らせる + 再接続タイムアウトを 60 秒に
 
