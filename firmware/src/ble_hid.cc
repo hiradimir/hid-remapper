@@ -1180,9 +1180,22 @@ static void pairing_mode_timeout_handler(btstack_timer_source_t *ts) {
 // スロットを分離する
 
 
-// 【BL-32】切断完了後の CYW43 内部リソース解放猶予タイマ（150ms）
+// 【BL-32】切断完了後の CYW43 内部リソース解放猶予タイマ
 // 切断直後に連続して HCI コマンド（アドレス変更・広告開始）を投げると
-// コントローラ側でドロップして電波不発となる問題を確実に防止する
+// コントローラ側でドロップして電波不発となる問題を確実に防止する。
+// 【2026-11-20】150ms → 800ms に延長。実測で切替後 479ms でホストが接続し、
+// その 2.8 秒後に rs=0x22 (LMP 応答タイムアウト) で落ちる事例があった。
+// ホスト側ドライバの準備が整う前に接続させるとリンク層で崩れるため、
+// 広告を出すタイミングを遅らせる
+#ifndef BLE_SLOT_MARGIN_MS
+#define BLE_SLOT_MARGIN_MS 800
+#endif
+// 【2026-11-20】再接続タイムアウト (電波 OFF までの猶予)。
+// rs=0x22 の後はホスト側の BT スタックが復帰するまで 30 秒以上かかる
+// (実測: 0x22 → 30 秒間接続要求が来ず、RECONN-TO で電波を切った直後に復帰)
+#ifndef BLE_RECONN_TIMEOUT_MS
+#define BLE_RECONN_TIMEOUT_MS 60000
+#endif
 static void slot_transition_timer_handler(btstack_timer_source_t *ts) {
     if (slot_transition_target >= 0 && slot_transition_target < MAX_SLOTS) {
         int slot = slot_transition_target;
@@ -1199,7 +1212,8 @@ static void slot_transition_timer_handler(btstack_timer_source_t *ts) {
             btstack_run_loop_set_timer(&pairing_timeout_timer, 60000);
             btstack_run_loop_add_timer(&pairing_timeout_timer);
         }
-        printf("[BT] Slot transition margin (150ms) complete -> apply_slot_identity(Slot %d, pairing=%d)\r\n",
+        printf("[BT] Slot transition margin (%dms) complete -> apply_slot_identity(Slot %d, pairing=%d)\r\n",
+               (int) BLE_SLOT_MARGIN_MS,
                slot + 1, is_pairing_mode);
         remote_log_eventf("SLOT-APPLY slot=%d pair=%d", slot + 1, is_pairing_mode);
         apply_slot_identity(slot);
@@ -1209,11 +1223,13 @@ static void slot_transition_timer_handler(btstack_timer_source_t *ts) {
 static void schedule_slot_transition(int slot, bool is_pairing) {
     slot_transition_target = slot;
     slot_transition_pairing = is_pairing;
-    printf("[BT] Starting 150ms slot transition margin: Slot %d (pairing=%d)\r\n", slot + 1, is_pairing);
-    remote_log_eventf("SLOT-MARGIN slot=%d pair=%d", slot + 1, is_pairing);
+    printf("[BT] Starting %dms slot transition margin: Slot %d (pairing=%d)\r\n",
+           (int) BLE_SLOT_MARGIN_MS, slot + 1, is_pairing);
+    remote_log_eventf("SLOT-MARGIN slot=%d pair=%d ms=%u", slot + 1, is_pairing,
+                      (unsigned) BLE_SLOT_MARGIN_MS);
     btstack_run_loop_remove_timer(&slot_transition_timer);
     btstack_run_loop_set_timer_handler(&slot_transition_timer, slot_transition_timer_handler);
-    btstack_run_loop_set_timer(&slot_transition_timer, 150);
+    btstack_run_loop_set_timer(&slot_transition_timer, BLE_SLOT_MARGIN_MS);
     btstack_run_loop_add_timer(&slot_transition_timer);
 }
 
@@ -1314,7 +1330,7 @@ static void apply_slot_identity(int slot) {
         btstack_run_loop_remove_timer(&reconnect_timeout_timer);
         if (is_bonded) {
             btstack_run_loop_set_timer_handler(&reconnect_timeout_timer, reconnect_timeout_handler);
-            btstack_run_loop_set_timer(&reconnect_timeout_timer, 30000); // 30秒タイムアウト
+            btstack_run_loop_set_timer(&reconnect_timeout_timer, BLE_RECONN_TIMEOUT_MS);
             btstack_run_loop_add_timer(&reconnect_timeout_timer);
             reconnect_start_us = time_us_64();
         }
@@ -2141,7 +2157,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     current_state = BLE_STATE_RECONNECTING;
                     btstack_run_loop_remove_timer(&reconnect_timeout_timer);
                     btstack_run_loop_set_timer_handler(&reconnect_timeout_timer, reconnect_timeout_handler);
-                    btstack_run_loop_set_timer(&reconnect_timeout_timer, 30000);
+                    btstack_run_loop_set_timer(&reconnect_timeout_timer, BLE_RECONN_TIMEOUT_MS);
                     btstack_run_loop_add_timer(&reconnect_timeout_timer);
                 } else {
                     current_state = BLE_STATE_STANDBY_SILENT;
@@ -2963,7 +2979,7 @@ static void ble_hid_kick_reconnect_locked(void) {
             adv_set(1);
             btstack_run_loop_remove_timer(&reconnect_timeout_timer);
             btstack_run_loop_set_timer_handler(&reconnect_timeout_timer, reconnect_timeout_handler);
-            btstack_run_loop_set_timer(&reconnect_timeout_timer, 30000);
+            btstack_run_loop_set_timer(&reconnect_timeout_timer, BLE_RECONN_TIMEOUT_MS);
             btstack_run_loop_add_timer(&reconnect_timeout_timer);
         }
     }

@@ -1806,6 +1806,21 @@ patch(WT + '/firmware/src/remote_log.cc', [
 ])
 
 
+# --- 2026-11-20: 切替後の広告遅延 (800ms) + 再接続タイムアウト延長 (60s) ---
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ('// 【BL-32】切断完了後の CYW43 内部リソース解放猶予タイマ（150ms）\n// 切断直後に連続して HCI コマンド（アドレス変更・広告開始）を投げると\n// コントローラ側でドロップして電波不発となる問題を確実に防止する',
+     '// 【BL-32】切断完了後の CYW43 内部リソース解放猶予タイマ\n// 【2026-11-20】150ms → 800ms に延長。実測で切替後 479ms でホストが接続し、\n// その 2.8 秒後に rs=0x22 (LMP 応答タイムアウト) で落ちた。ホスト側ドライバの\n// 準備が整う前に接続させるとリンク層で崩れるため、広告を出すのを遅らせる\n#ifndef BLE_SLOT_MARGIN_MS\n#define BLE_SLOT_MARGIN_MS 800\n#endif\n// 【2026-11-20】再接続タイムアウト (電波 OFF までの猶予)。rs=0x22 の後は\n// ホスト側の BT スタックが復帰するまで 30 秒以上かかる\n// (実測: 0x22 → 30 秒間接続要求が来ず、RECONN-TO で電波を切った直後に復帰)\n#ifndef BLE_RECONN_TIMEOUT_MS\n#define BLE_RECONN_TIMEOUT_MS 60000\n#endif'),
+    ('    btstack_run_loop_set_timer(&slot_transition_timer, 150);',
+     '    btstack_run_loop_set_timer(&slot_transition_timer, BLE_SLOT_MARGIN_MS);'),
+    ('        printf("[BT] Slot transition margin (150ms) complete -> apply_slot_identity(Slot %d, pairing=%d)\\r\\n",',
+     '        printf("[BT] Slot transition margin (%dms) complete -> apply_slot_identity(Slot %d, pairing=%d)\\r\\n",\n               (int) BLE_SLOT_MARGIN_MS,'),
+    ('    printf("[BT] Starting 150ms slot transition margin: Slot %d (pairing=%d)\\r\\n", slot + 1, is_pairing);',
+     '    printf("[BT] Starting %dms slot transition margin: Slot %d (pairing=%d)\\r\\n",\n           (int) BLE_SLOT_MARGIN_MS, slot + 1, is_pairing);'),
+    ('    remote_log_eventf("SLOT-MARGIN slot=%d pair=%d", slot + 1, is_pairing);',
+     '    remote_log_eventf("SLOT-MARGIN slot=%d pair=%d ms=%u", slot + 1, is_pairing,\n                      (unsigned) BLE_SLOT_MARGIN_MS);'),
+])
+
+
 # --- 生成物の自己検算 (2026-11-01 追加) ---
 REQUIRED_MARKERS = [
     ('firmware/src/ble_hid.cc', 'health_acl_run < 0xFFFF'),
@@ -1864,6 +1879,9 @@ REQUIRED_MARKERS = [
     ('firmware/src/ble_hid.cc', 'health_reconn_60s'),
     ('firmware/src/remote_log.cc', 'reconn=%u'),
     ('firmware/src/ble_hid.cc', 'BT BACKOFF n=%u'),
+    ('firmware/src/ble_hid.cc', 'BLE_SLOT_MARGIN_MS'),
+    ('firmware/src/ble_hid.cc', 'BLE_RECONN_TIMEOUT_MS'),
+    ('firmware/src/ble_hid.cc', 'ms=%u'),
     ('firmware/src/remote_log.cc', 'bof=%u'),
     ('firmware/src/ble_hid.cc', 'saved_bonded_mask_cache'),
     ('firmware/src/ble_hid.cc', 'saved_slot_peers_valid'),
