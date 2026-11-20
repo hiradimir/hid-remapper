@@ -9,6 +9,55 @@
 
 ---
 
+## 2026-11-20 `wake85`: 切替の待機中は広告を出さない（`wake84` の副作用を修正）
+
+### 症状（wake84 焼き込み直後、15:55）
+
+「slot2 に切り替えているはずなのに slot2 として動かない」。ログで確認:
+
+```
+15:55:37.080  SWITCH-REQ cur=1 -> 2          ← slot2 にしたい
+15:55:37.240  SLOT-MARGIN slot=2 ms=800      ← 800ms 待つ
+15:55:37.372  ADV-EN ... en=1 slot=1 st=5    ← まだ slot1 の広告が生きている
+15:55:37.407  LE-CONN slot=1                 ← Mac が slot1 に接続
+15:55:37.775  CONNECTED slot=1               ← Mac として動き出す
+15:55:37.981  SLOT-APPLY slot=2              ← 今さら slot2 を適用
+15:55:38.017  APPLY-DONE addr=...22:2F       ← アドレスは slot2 に
+15:55:38.283  （切断）
+15:55:38.308  CONNECTED slot=2               ← Windows が繋がるが…
+```
+
+**800ms 待つ間に、前スロットの広告が残ってそちらのホストが繋いでしまった。**
+150ms 時代はホストが繋ぐ前に切り替わっていたため表面化していなかった。
+
+### 原因は待機中の広告復活（1 つではなかった）
+
+1. 切断完了ハンドラが **200ms 後に広告を張り直す**。条件が
+   `!(switch_pending && pending_toggle_off)` だったので、単純な切替
+   (`switch_pending=1, tg=0`) では除外されず前スロットの広告が復活していた
+2. `adv_retry_pending`（BL-45 の張り直し）や `kick_reconnect` も待機中に
+   広告を出せる状態だった
+
+### 修正
+
+- `adv_set(1)` を `slot_adv_block` で塞ぐ（待機中は広告要求を捨てる）。
+  塞いだときは `SLOT-ADV-BLOCK st=%d` を残すので、後から経路を特定できる
+- `schedule_slot_transition` の先頭で **広告停止 + ブロック開始**（ロック取得込み）。
+  呼び出し元が main ループ（ロック非保持）と切断ハンドラ（async, 保持）の
+  両方あるため、関数内で明示的に `ble_lock()/ble_unlock()` する
+- 切断完了時の広告再開は `switch_pending` 中は行わない
+- ブロック解除: 待機終了（`SLOT-APPLY`）/ ペアリング開始 / バックオフ経路 /
+  ボンド全消去
+- `proact_pending_us` の解除は `switch_pending` に依らず常に行う（切替中でも
+  「チップは生きている」事実は変わらないため）
+- 再接続カウントダウン表示も `BLE_RECONN_TIMEOUT_MS` に追随（60 秒に伸ばしたのに
+  表示だけ 30 秒から減っていた）
+
+- ビルド: `firmware/artifacts/remapper_anchor_wake85_switchgap.uf2`（11/20 16:3x）
+- 検証: 切替後に `SLOT-ADV-BLOCK` が出る（＝待機中に広告要求が来ていた証拠）/
+  `SLOT-APPLY slot=N` の後に `LE-CONN slot=N` が来る / 切替直後に
+  前スロットで `CONNECTED slot=旧` が出ない
+
 ## 2026-11-20 `wake84`: 切替後の広告を 800ms 遅らせる + 再接続タイムアウトを 60 秒に
 
 15:38 と 15:46 に「スロット切替直後は繋がらず、時間が経つと繋がる」が再現。
