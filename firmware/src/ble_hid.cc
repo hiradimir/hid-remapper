@@ -473,6 +473,26 @@ static volatile uint64_t health_last_cp_us = 0;
 static volatile uint32_t health_conn_count = 0;
 // 【2026-11-20】直近 60 秒の接続成立回数 (再接続ループの検出用)
 static volatile uint8_t health_reconn_60s = 0;
+
+// 【2026-11-20】連続切断のバックオフ。
+// 実測: DISC-08 の直後 60 秒に 40% の確率で膠着 (CANSEND-TO) する。
+// 「1 回切れたら連鎖する」性質があるため、短時間に連続で切れたら
+// 再接続を遅らせて、ホスト・チップ双方の状態が落ち着くのを待つ。
+// 60 秒安定して繋がっていたらカウントをリセットする
+static uint8_t consecutive_disc_count = 0; // 連続切断の回数 (安定でリセット)
+static uint64_t last_disc_us = 0;          // 最後に切断した時刻
+#ifndef BLE_BACKOFF_FIRST_MS
+// 2 回連続切断からバックオフ開始。1 回目は即再接続 (従来どおり)
+#define BLE_BACKOFF_FIRST_MS 2000
+#endif
+#ifndef BLE_BACKOFF_SECOND_MS
+// 3 回以上連続したら 5 秒待つ
+#define BLE_BACKOFF_SECOND_MS 5000
+#endif
+#ifndef BLE_BACKOFF_STABLE_MS
+// この時間つながっていれば「安定」とみなしてカウントをリセット
+#define BLE_BACKOFF_STABLE_MS 60000
+#endif
 static volatile uint32_t health_cp_packets = 0;   // 0x57 以外の送信エラー (ok が伸びない原因の切り分け)
 static volatile uint32_t health_disc = 0;
 static volatile uint8_t health_disc_reason = 0;
@@ -494,6 +514,7 @@ void ble_hid_get_health(ble_hid_health_t* out) {
     out->acl_run = health_acl_run;
     out->conn_count = health_conn_count;
     out->reconn_60s = health_reconn_60s;
+    out->backoff_n = consecutive_disc_count;
     out->rssi = health_ble_rssi;
     out->last_hci_event = health_last_hci_event;
     out->hci_events = health_hci_events;
@@ -2140,7 +2161,38 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     btstack_run_loop_set_timer(&bl17_cooldown_timer, 2500);
                     btstack_run_loop_add_timer(&bl17_cooldown_timer);
                 } else if (current_state != BLE_STATE_STANDBY_SILENT) {
-                    schedule_slot_transition(current_slot, is_pairing_mode);
+                    // 【2026-11-20】連続切断のバックオフ。
+                    // DISC-08 の直後 60 秒は 40% の確率で膠着する実測があるため、
+                    // 短時間に連続で切れたら再接続を遅らせる
+                    uint64_t now_bo = time_us_64();
+                    if (last_disc_us != 0 &&
+                        (now_bo - last_disc_us) > ((uint64_t) BLE_BACKOFF_STABLE_MS * 1000ULL)) {
+                        consecutive_disc_count = 0; // 十分安定していた
+                    }
+                    last_disc_us = now_bo;
+                    if (consecutive_disc_count < 0xFF) consecutive_disc_count++;
+
+                    uint32_t backoff_ms = 0;
+                    if (consecutive_disc_count >= 3) {
+                        backoff_ms = BLE_BACKOFF_SECOND_MS;
+                    } else if (consecutive_disc_count == 2) {
+                        backoff_ms = BLE_BACKOFF_FIRST_MS;
+                    }
+                    if (backoff_ms > 0) {
+                        remote_log_eventf("BT BACKOFF n=%u ms=%u",
+                                          (unsigned) consecutive_disc_count,
+                                          (unsigned) backoff_ms);
+                        btstack_run_loop_remove_timer(&slot_transition_timer);
+                        slot_transition_target = current_slot;
+                        slot_transition_pairing = is_pairing_mode;
+                        btstack_run_loop_set_timer_handler(&slot_transition_timer, slot_transition_timer_handler);
+                        btstack_run_loop_set_timer(&slot_transition_timer, backoff_ms);
+                        btstack_run_loop_add_timer(&slot_transition_timer);
+                        // 広告の予約を取り消しておく (バックオフ中に出さない)
+                        adv_enable_pending = false;
+                    } else {
+                        schedule_slot_transition(current_slot, is_pairing_mode);
+                    }
                 } else {
                     // 【2026-11-04】未ボンド (ボンド消去直後など) は広告を出さない。
                     // 以前は切断直後に予約した「200ms 後の広告有効化」がそのまま
@@ -2503,6 +2555,9 @@ static void ble_hid_task_locked(void) {
             // (2026-11-05: 再接続 20ms 後に stale な aclrun=51 で誤って絞った)
             health_acl_run = 0;
             health_conn_count++;
+            // 【2026-11-20】接続が成立したので連続切断カウントを戻す。
+            // ただし「すぐ切れる」を繰り返すケースを数えたいので、
+            // ここではリセットせず、安定判定 (BLE_BACKOFF_STABLE_MS) に任せる
             // 【2026-11-20】直近 60 秒の接続成立回数。
             // 「再接続ループに入っている」を数字で見るため (conn= は起動からの累計
             // なのでレートが分からない)。HB の reconn= に出す

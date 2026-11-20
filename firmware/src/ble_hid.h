@@ -49,6 +49,8 @@ typedef struct {
     uint32_t conn_count;
     // 【2026-11-20】直近 60 秒の接続成立回数。2 以上なら再接続ループ
     uint8_t reconn_60s;
+    // 【2026-11-20】連続切断の回数。2 以上でバックオフが入っている
+    uint8_t backoff_n;
     uint64_t last_ok_us; // 最後に受理された通知の時刻 (0 = まだ)
     // 【2026-11-15】BLE リンクの RSSI (dBm)。これまで HB/DEAD-SNAP の rssi= は
     // Wi-Fi の値で、BLE 側は一度も測っていなかった (電波か / チップかを

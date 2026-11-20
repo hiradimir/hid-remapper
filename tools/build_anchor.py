@@ -1783,6 +1783,29 @@ patch(WT + '/firmware/src/remote_log.cc', [
 ])
 
 
+# --- 2026-11-20: 連続切断のバックオフ (DISC-08 連鎖の遮断) ---
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ('// 【2026-11-20】直近 60 秒の接続成立回数 (再接続ループの検出用)\nstatic volatile uint8_t health_reconn_60s = 0;',
+     '// 【2026-11-20】直近 60 秒の接続成立回数 (再接続ループの検出用)\nstatic volatile uint8_t health_reconn_60s = 0;\n\n// 【2026-11-20】連続切断のバックオフ。\n// 実測: DISC-08 の直後 60 秒に 40% の確率で膠着 (CANSEND-TO) する。\n// 「1 回切れたら連鎖する」ため、短時間に連続で切れたら再接続を遅らせる\nstatic uint8_t consecutive_disc_count = 0;\nstatic uint64_t last_disc_us = 0;\n#ifndef BLE_BACKOFF_FIRST_MS\n#define BLE_BACKOFF_FIRST_MS 2000\n#endif\n#ifndef BLE_BACKOFF_SECOND_MS\n#define BLE_BACKOFF_SECOND_MS 5000\n#endif\n#ifndef BLE_BACKOFF_STABLE_MS\n#define BLE_BACKOFF_STABLE_MS 60000\n#endif'),
+    ('                } else if (current_state != BLE_STATE_STANDBY_SILENT) {\n                    schedule_slot_transition(current_slot, is_pairing_mode);\n                } else {',
+     '                } else if (current_state != BLE_STATE_STANDBY_SILENT) {\n                    // 【2026-11-20】連続切断のバックオフ。\n                    // DISC-08 の直後 60 秒は 40% の確率で膠着する実測があるため、\n                    // 短時間に連続で切れたら再接続を遅らせる\n                    uint64_t now_bo = time_us_64();\n                    if (last_disc_us != 0 &&\n                        (now_bo - last_disc_us) > ((uint64_t) BLE_BACKOFF_STABLE_MS * 1000ULL)) {\n                        consecutive_disc_count = 0; // 十分安定していた\n                    }\n                    last_disc_us = now_bo;\n                    if (consecutive_disc_count < 0xFF) consecutive_disc_count++;\n\n                    uint32_t backoff_ms = 0;\n                    if (consecutive_disc_count >= 3) {\n                        backoff_ms = BLE_BACKOFF_SECOND_MS;\n                    } else if (consecutive_disc_count == 2) {\n                        backoff_ms = BLE_BACKOFF_FIRST_MS;\n                    }\n                    if (backoff_ms > 0) {\n                        remote_log_eventf("BT BACKOFF n=%u ms=%u",\n                                          (unsigned) consecutive_disc_count,\n                                          (unsigned) backoff_ms);\n                        btstack_run_loop_remove_timer(&slot_transition_timer);\n                        slot_transition_target = current_slot;\n                        slot_transition_pairing = is_pairing_mode;\n                        btstack_run_loop_set_timer_handler(&slot_transition_timer, slot_transition_timer_handler);\n                        btstack_run_loop_set_timer(&slot_transition_timer, backoff_ms);\n                        btstack_run_loop_add_timer(&slot_transition_timer);\n                        adv_enable_pending = false;\n                    } else {\n                        schedule_slot_transition(current_slot, is_pairing_mode);\n                    }\n                } else {'),
+    ('    out->reconn_60s = health_reconn_60s;',
+     '    out->reconn_60s = health_reconn_60s;\n    out->backoff_n = consecutive_disc_count;'),
+])
+
+patch(WT + '/firmware/src/ble_hid.h', [
+    ('    uint8_t reconn_60s;',
+     '    uint8_t reconn_60s;\n    // 【2026-11-20】連続切断の回数。2 以上でバックオフが入っている\n    uint8_t backoff_n;'),
+])
+
+patch(WT + '/firmware/src/remote_log.cc', [
+    ('cpg=%u/%u/%u reconn=%u",',
+     'cpg=%u/%u/%u reconn=%u bof=%u",'),
+    ('                              (unsigned) h.reconn_60s);',
+     '                              (unsigned) h.reconn_60s,\n                              // 【2026-11-20】連続切断回数 (2 以上でバックオフ中)\n                              (unsigned) h.backoff_n);'),
+])
+
+
 # --- 生成物の自己検算 (2026-11-01 追加) ---
 REQUIRED_MARKERS = [
     ('firmware/src/ble_hid.cc', 'health_acl_run < 0xFFFF'),
@@ -1840,6 +1863,8 @@ REQUIRED_MARKERS = [
     ('firmware/src/ble_hid.cc', 'BT PARAM-ONCONNECT'),
     ('firmware/src/ble_hid.cc', 'health_reconn_60s'),
     ('firmware/src/remote_log.cc', 'reconn=%u'),
+    ('firmware/src/ble_hid.cc', 'BT BACKOFF n=%u'),
+    ('firmware/src/remote_log.cc', 'bof=%u'),
     ('firmware/src/ble_hid.cc', 'saved_bonded_mask_cache'),
     ('firmware/src/ble_hid.cc', 'saved_slot_peers_valid'),
 ]
