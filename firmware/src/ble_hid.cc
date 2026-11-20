@@ -363,7 +363,19 @@ static uint64_t adv_retry_next_us = 0;
 #define REPRO_FLOOD_IDLE_MS 2000
 #endif
 
+// 【2026-11-20】スロット切替の待機中フラグ。adv_set より前に宣言する必要がある
+static volatile bool slot_adv_block = false;
+
 static void adv_set(int enable) {
+    // 【2026-11-20】スロット切替の待機中 (slot_transition_target が立っている間) は
+    // 広告を出さない。ここを開けておくと、切断ハンドラ・ADV-RETRY・kick など
+    // 別経路の「広告を出し直す」要求が割り込み、前スロットの広告が復活して
+    // そちらのホストに繋がれる (実測: 切替直後に Mac が slot=1 へ接続した)
+    if (enable && slot_adv_block) {
+        remote_log_eventf("SLOT-ADV-BLOCK st=%d", (int) current_state);
+        adv_enable_req = 0;
+        return;
+    }
     adv_enable_req = enable;
     // 【2026-11-12】enable 要求から ADV-EN 完了までの経過を測る
     if (enable) {
@@ -1216,6 +1228,7 @@ static void slot_transition_timer_handler(btstack_timer_source_t *ts) {
                (int) BLE_SLOT_MARGIN_MS,
                slot + 1, is_pairing_mode);
         remote_log_eventf("SLOT-APPLY slot=%d pair=%d", slot + 1, is_pairing_mode);
+        slot_adv_block = false; // 待機終了 = 以降の広告要求は通す
         apply_slot_identity(slot);
     }
 }
@@ -1227,6 +1240,19 @@ static void schedule_slot_transition(int slot, bool is_pairing) {
            (int) BLE_SLOT_MARGIN_MS, slot + 1, is_pairing);
     remote_log_eventf("SLOT-MARGIN slot=%d pair=%d ms=%u", slot + 1, is_pairing,
                       (unsigned) BLE_SLOT_MARGIN_MS);
+    // 【2026-11-20】待つ前に広告を確実に止める。
+    // 800ms 待つあいだ前のスロットの広告が生きていると、そちらのホストが
+    // 接続してしまい「切り替えたのに前のスロットで動く」状態になる
+    // (実測: SWITCH-REQ cur=1->2 の直後に Mac が slot=1 へ接続し、
+    //  800ms 後に slot2 を適用しても Mac が掴んだままだった)
+    //
+    // 呼び出し元は main ループ (ロック非保持) と切断ハンドラ (async, 保持) の
+    // 両方あるため、ここで明示的にロックを取る。BLE_LOCK_DISABLE=1 では no-op
+    ble_lock();
+    slot_adv_block = true;
+    adv_enable_pending = false; // 予約済みの有効化も取り消す
+    adv_set(0);
+    ble_unlock();
     btstack_run_loop_remove_timer(&slot_transition_timer);
     btstack_run_loop_set_timer_handler(&slot_transition_timer, slot_transition_timer_handler);
     btstack_run_loop_set_timer(&slot_transition_timer, BLE_SLOT_MARGIN_MS);
@@ -1528,6 +1554,9 @@ static void ble_enter_pairing_mode_locked(int slot) {
     snprintf(p_toast, sizeof(p_toast), "Pairing Slot %d...", slot + 1);
     oled_show_toast(p_toast, 3000);
     btstack_run_loop_remove_timer(&slot_transition_timer);
+    // 待機中の切替は取り消されるので、広告ブロックも解除する
+    slot_adv_block = false;
+    slot_transition_target = -1;
     btstack_run_loop_remove_timer(&bl17_cooldown_timer);
     bl17_reject_in_progress = false;
     printf("[BT] Request Pairing Mode for Slot %d\r\n", slot + 1);
@@ -2114,13 +2143,20 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
 
             resolving_list_loaded = gap_load_resolving_list_from_le_device_db() == ERROR_CODE_SUCCESS;
             // 切断完了時は広告を張り直す (接続中は enable が無視されるため)。
-            // ただしユーザーが OFF を指示した切断 (pending_toggle_off) では張り直さない
-            if (!(switch_pending && pending_toggle_off)) {
+            // ただしユーザーが OFF を指示した切断 (pending_toggle_off) では張り直さない。
+            // 【2026-11-20 修正】スロット切替中 (switch_pending) も張り直さない。
+            // 以前は「切替 + OFF」のときだけ除外していたが、それだと切替時にも
+            // 200ms 後に**前のスロットで**広告が再開し、slot_transition の待ち時間
+            // (旧 150ms / 新 800ms) より先に前のホストが接続してしまう。
+            // 実測: 800ms に延ばした直後、切替の 300ms 後に Mac が slot=1 へ
+            // 接続し「slot2 に切り替えたのに slot1 として動く」状態になった。
+            // 切替時は apply_slot_identity が広告を張り直すのでここでは出さない
+            proact_pending_us = 0; // 切断完了 = チップは生きている (PROACT 監視を解除)
+            if (!switch_pending && !pending_toggle_off) {
                 adv_enable_pending = true;
                 adv_enable_at_us = time_us_64() + 200000ULL;
-                    // 【2026-11-13】切断完了 → 広告が立ち上がるまでの監視を開始
+                // 【2026-11-13】切断完了 → 広告が立ち上がるまでの監視を開始
                 adv_pending_since_us = time_us_64();
-                proact_pending_us = 0; // PROACT 起因の監視は解除
             }
             uint8_t reason = hci_event_disconnection_complete_get_reason(packet);
             printf("[BT] Disconnected (reason=0x%02X)\r\n", reason);
@@ -2206,6 +2242,8 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                         btstack_run_loop_add_timer(&slot_transition_timer);
                         // 広告の予約を取り消しておく (バックオフ中に出さない)
                         adv_enable_pending = false;
+                        // 切替待機のブロックは解除する (このタイマは広告再開用)
+                        slot_adv_block = false;
                     } else {
                         schedule_slot_transition(current_slot, is_pairing_mode);
                     }
@@ -2771,7 +2809,8 @@ static void ble_hid_task_locked(void) {
             if (reconnect_start_us == 0) {
                 reconnect_start_us = now_us;
             }
-            int rem = 30 - (int)((now_us - reconnect_start_us) / 1000000);
+            int rem = (int) (BLE_RECONN_TIMEOUT_MS / 1000) -
+                      (int) ((now_us - reconnect_start_us) / 1000000);
             if (rem < 0) rem = 0;
             oled_set_reconnect_remaining_sec(rem);
         } else {
@@ -3064,7 +3103,8 @@ static void ble_clear_bonds_locked(void) {
     zero_sent_waiting_ack = false;
     current_peer_addr[0] = '\0';
 
-    // 復帰用タイマ/遷移タイマを停止
+    // 復帰用タイマ/遷移タイマを停止 (切替待機のブロックも解除しておく)
+    slot_adv_block = false;
     btstack_run_loop_remove_timer(&slot_transition_timer);
     btstack_run_loop_remove_timer(&pairing_timeout_timer);
     btstack_run_loop_remove_timer(&reconnect_timeout_timer);

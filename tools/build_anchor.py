@@ -207,10 +207,17 @@ void ble_hid_wake_from_dormant(void) {
                 gap_advertisements_enable(0);"""),
 
     # 切断完了でも広告を張り直す (ユーザーの OFF 指示時は除く)
+    # 【2026-11-20 修正】スロット切替中 (switch_pending) も張り直さない。
+    # 切替時に 200ms 後に前のスロットで広告が再開すると、slot_transition の
+    # 待ち時間より先に前のホストが接続してしまう (実測: 800ms に延ばした直後、
+    # 切替の 300ms 後に Mac が slot=1 へ接続し slot1 として動いた)
     ("            uint8_t reason = hci_event_disconnection_complete_get_reason(packet);",
-     """            if (!(switch_pending && pending_toggle_off)) {
+     """            proact_pending_us = 0; // 切断完了 = チップは生きている (PROACT 監視を解除)
+            if (!switch_pending && !pending_toggle_off) {
                 adv_enable_pending = true;
                 adv_enable_at_us = time_us_64() + 200000ULL;
+                // 【2026-11-13】切断完了 → 広告が立ち上がるまでの監視を開始
+                adv_pending_since_us = time_us_64();
             }
             uint8_t reason = hci_event_disconnection_complete_get_reason(packet);"""),
     ("""                if (pending_toggle_off) {
@@ -1318,8 +1325,6 @@ patch(WT + '/firmware/src/ble_hid.cc', [
      '        // 【2026-11-13】「切断要求を出した後は広告が立ち上がるはず」という期待で\n        // タイマを張る。切断完了イベント自体が来ない（＝チップが固まった）ケースも\n        // 捕まえたいので、未接続かどうかでは判定しない。\n        // 接続が成立すればその時点でクリアされるので、正常な競合では発動しない\n        if (!ble_dead_declared && adv_pending_since_us != 0 &&\n            (now_d - adv_pending_since_us) > (BLE_DEAD_ADV_TIMEOUT_MS * 1000ULL)) {'),
     ('                remote_log_eventf("BT CANSEND-PROACT 2s no grant -> disconnect");',
      '                remote_log_eventf("BT CANSEND-PROACT 2s no grant -> disconnect");\n                // 【2026-11-13】切断要求を出した = 以降は広告が立ち上がるはず。\n                // 切断完了イベントが来ない場合はここから 3 秒で検出する\n                adv_pending_since_us = time_us_64();'),
-    ('            if (!(switch_pending && pending_toggle_off)) {\n                adv_enable_pending = true;\n                adv_enable_at_us = time_us_64() + 200000ULL;\n            }',
-     '            if (!(switch_pending && pending_toggle_off)) {\n                adv_enable_pending = true;\n                adv_enable_at_us = time_us_64() + 200000ULL;\n                // 【2026-11-13】切断完了 → 広告が立ち上がるまでの監視を開始\n                adv_pending_since_us = time_us_64();\n            }'),
 ])
 
 
@@ -1329,8 +1334,6 @@ patch(WT + '/firmware/src/ble_hid.cc', [
      'static volatile uint64_t adv_pending_since_us = 0;\n// 【2026-11-13】PROACT で切断要求を出した時刻。切断完了も広告も来ない\n// (= コントローラが HCI を受け付けない) ケースを、他の要因に邪魔されず検出する\n#ifndef BLE_PROACT_DEAD_MS\n#define BLE_PROACT_DEAD_MS 15000\n#endif\nstatic volatile uint64_t proact_pending_us = 0;'),
     ('                adv_pending_since_us = time_us_64();\n                gap_disconnect(con_handle);\n                return;',
      '                adv_pending_since_us = time_us_64();\n                proact_pending_us = time_us_64();\n                gap_disconnect(con_handle);\n                return;'),
-    ('                // 【2026-11-13】切断完了 → 広告が立ち上がるまでの監視を開始\n                adv_pending_since_us = time_us_64();',
-     '                // 【2026-11-13】切断完了 → 広告が立ち上がるまでの監視を開始\n                adv_pending_since_us = time_us_64();\n                proact_pending_us = 0; // PROACT 起因の監視は解除'),
     ('            adv_pending_since_us = 0;\n            adv_fail_count = 0;\n            ble_dead_declared = false;\n            ble_dead_snapshot_done = false;\n            ble_reboot_at_us = 0;\n        }\n        was_connected = connected_now;',
      '            adv_pending_since_us = 0;\n            adv_fail_count = 0;\n            ble_dead_declared = false;\n            ble_dead_snapshot_done = false;\n            ble_reboot_at_us = 0;\n            proact_pending_us = 0;\n        }\n        was_connected = connected_now;'),
     ('        if (!ble_dead_declared && adv_pending_since_us != 0 &&\n            (now_d - adv_pending_since_us) > (BLE_DEAD_ADV_TIMEOUT_MS * 1000ULL)) {',
@@ -1821,6 +1824,37 @@ patch(WT + '/firmware/src/ble_hid.cc', [
 ])
 
 
+# --- 2026-11-20: 再接続カウントダウンも BLE_RECONN_TIMEOUT_MS に追随させる ---
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ('            int rem = 30 - (int)((now_us - reconnect_start_us) / 1000000);',
+     '            int rem = (int) (BLE_RECONN_TIMEOUT_MS / 1000) - \n                      (int) ((now_us - reconnect_start_us) / 1000000);'),
+])
+
+
+# --- 2026-11-20: 切替中は広告を張り直さない (前スロットの接続を防ぐ) ---
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ('    btstack_run_loop_remove_timer(&slot_transition_timer);\n    btstack_run_loop_set_timer_handler(&slot_transition_timer, slot_transition_timer_handler);\n    btstack_run_loop_set_timer(&slot_transition_timer, BLE_SLOT_MARGIN_MS);\n    btstack_run_loop_add_timer(&slot_transition_timer);\n}',
+     '    // 【2026-11-20】待つ前に広告を確実に止める。800ms 待つあいだ前のスロットの\n    // 広告が生きていると、そちらのホストが接続してしまい\n    // 「切り替えたのに前のスロットで動く」状態になる。\n    // 呼び出し元は main ループ (ロック非保持) と切断ハンドラ (async, 保持) の\n    // 両方があるため、ここで明示的にロックを取る\n    ble_lock();\n    adv_enable_pending = false;\n    adv_set(0);\n    ble_unlock();\n    btstack_run_loop_remove_timer(&slot_transition_timer);\n    btstack_run_loop_set_timer_handler(&slot_transition_timer, slot_transition_timer_handler);\n    btstack_run_loop_set_timer(&slot_transition_timer, BLE_SLOT_MARGIN_MS);\n    btstack_run_loop_add_timer(&slot_transition_timer);\n}'),
+])
+
+
+# --- 2026-11-20 (wake85): 切替中は広告を出さない (前スロットへの接続を防ぐ) ---
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ('static void adv_set(int enable) {\n    adv_enable_req = enable;',
+     '// 【2026-11-20】スロット切替の待機中フラグ。adv_set より前に宣言する必要がある\nstatic volatile bool slot_adv_block = false;\n\nstatic void adv_set(int enable) {\n    // 【2026-11-20】スロット切替の待機中は広告を出さない。ここを開けておくと、\n    // 切断ハンドラ・ADV-RETRY・kick など別経路の「広告を出し直す」要求が割り込み、\n    // 前スロットの広告が復活してそちらのホストに繋がれる\n    // (実測: 切替直後に Mac が slot=1 へ接続し slot1 として動いた)\n    if (enable && slot_adv_block) {\n        remote_log_eventf("SLOT-ADV-BLOCK st=%d", (int) current_state);\n        adv_enable_req = 0;\n        return;\n    }\n    adv_enable_req = enable;'),
+    ('        remote_log_eventf("SLOT-APPLY slot=%d pair=%d", slot + 1, is_pairing_mode);\n        apply_slot_identity(slot);',
+     '        remote_log_eventf("SLOT-APPLY slot=%d pair=%d", slot + 1, is_pairing_mode);\n        slot_adv_block = false; // 待機終了 = 以降の広告要求は通す\n        apply_slot_identity(slot);'),
+    ('    ble_lock();\n    adv_enable_pending = false;\n    adv_set(0);\n    ble_unlock();\n    btstack_run_loop_remove_timer(&slot_transition_timer);',
+     '    ble_lock();\n    slot_adv_block = true; // 待機終了までは広告を出さない\n    adv_enable_pending = false;\n    adv_set(0);\n    ble_unlock();\n    btstack_run_loop_remove_timer(&slot_transition_timer);'),
+    ('    btstack_run_loop_remove_timer(&slot_transition_timer);\n    btstack_run_loop_remove_timer(&bl17_cooldown_timer);\n    bl17_reject_in_progress = false;\n    printf("[BT] Request Pairing Mode for Slot %d\\r\\n", slot + 1);',
+     '    btstack_run_loop_remove_timer(&slot_transition_timer);\n    // 待機中の切替は取り消されるので、広告ブロックも解除する\n    slot_adv_block = false;\n    slot_transition_target = -1;\n    btstack_run_loop_remove_timer(&bl17_cooldown_timer);\n    bl17_reject_in_progress = false;\n    printf("[BT] Request Pairing Mode for Slot %d\\r\\n", slot + 1);'),
+    ('                        btstack_run_loop_add_timer(&slot_transition_timer);\n                        adv_enable_pending = false;',
+     '                        btstack_run_loop_add_timer(&slot_transition_timer);\n                        adv_enable_pending = false;\n                        // 切替待機のブロックは解除する (このタイマは広告再開用)\n                        slot_adv_block = false;'),
+    ('    // 復帰用タイマ/遷移タイマを停止\n    btstack_run_loop_remove_timer(&slot_transition_timer);',
+     '    // 復帰用タイマ/遷移タイマを停止 (切替待機のブロックも解除しておく)\n    slot_adv_block = false;\n    btstack_run_loop_remove_timer(&slot_transition_timer);'),
+])
+
+
 # --- 生成物の自己検算 (2026-11-01 追加) ---
 REQUIRED_MARKERS = [
     ('firmware/src/ble_hid.cc', 'health_acl_run < 0xFFFF'),
@@ -1880,8 +1914,13 @@ REQUIRED_MARKERS = [
     ('firmware/src/remote_log.cc', 'reconn=%u'),
     ('firmware/src/ble_hid.cc', 'BT BACKOFF n=%u'),
     ('firmware/src/ble_hid.cc', 'BLE_SLOT_MARGIN_MS'),
+    ('firmware/src/ble_hid.cc', 'switch_pending && !pending_toggle_off'),
     ('firmware/src/ble_hid.cc', 'BLE_RECONN_TIMEOUT_MS'),
     ('firmware/src/ble_hid.cc', 'ms=%u'),
+    ('firmware/src/ble_hid.cc', '(int) (BLE_RECONN_TIMEOUT_MS / 1000)'),
+    ('firmware/src/ble_hid.cc', 'slot_adv_block'),
+    ('firmware/src/ble_hid.cc', 'SLOT-ADV-BLOCK st=%d'),
+    ('firmware/src/ble_hid.cc', 'proact_pending_us = 0; // 切断完了'),
     ('firmware/src/remote_log.cc', 'bof=%u'),
     ('firmware/src/ble_hid.cc', 'saved_bonded_mask_cache'),
     ('firmware/src/ble_hid.cc', 'saved_slot_peers_valid'),
