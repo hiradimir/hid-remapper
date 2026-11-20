@@ -1758,6 +1758,31 @@ patch(WT + '/firmware/src/remote_log.cc', [
 ])
 
 
+# --- 2026-11-20: 接続直後の無条件パラメータ要求の廃止 + reconn 計測 ---
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ('            health_acl_run = 0;\n            health_conn_count++;',
+     '            health_acl_run = 0;\n            health_conn_count++;\n            // 【2026-11-20】直近 60 秒の接続成立回数 (再接続ループの検出用)\n            {\n                static uint64_t reconn_win_us = 0;\n                static uint8_t reconn_in_win = 0;\n                if (reconn_win_us == 0 || (now_us - reconn_win_us) >= 60000000ULL) {\n                    reconn_win_us = now_us;\n                    reconn_in_win = 0;\n                }\n                if (reconn_in_win < 0xFF) reconn_in_win++;\n                health_reconn_60s = reconn_in_win;\n            }'),
+    ('static volatile uint32_t health_conn_count = 0;',
+     'static volatile uint32_t health_conn_count = 0;\n// 【2026-11-20】直近 60 秒の接続成立回数 (再接続ループの検出用)\nstatic volatile uint8_t health_reconn_60s = 0;'),
+    ('    out->conn_count = health_conn_count;',
+     '    out->conn_count = health_conn_count;\n    out->reconn_60s = health_reconn_60s;'),
+    ('        // 【極めて重要】接続安定化・暗号化完了直後に低遅延パラメータ（7.5ms〜11.25ms）を要求\n        // これがないとホスト（macOS/Win/Android）は 30ms〜50ms の省電力低速インターバルで動作し、\n        // 1秒間に20〜30パケットしか通らなくなるため、マウスが激しく飛び飛び（カクつき・遅延累積）になる。\n        gap_request_connection_parameter_update(con_handle, 9, 12, 0, 400);',
+     '        // 【2026-11-20】接続直後の無条件パラメータ要求を廃止した。\n        // 元は「低遅延パラメータ (7.5〜11.25ms) を引き出す」目的だったが、実測では\n        // 常に ci=12 に落ち着いており効果が無かった。一方で再接続ループ (実測: 68 秒間に\n        // 6 回接続) のたびに HCI コマンドを消費し、BT PARAM が 15 秒間に 11 回、\n        // 最終的に ccmd=0 (クレジット枯渇) に至っていた。30 秒周期の PARAM-REQ\n        // (wake75) と役割が重複しているため削除する。\n        // 削除の確認用に、ここへ到達したことだけ残す (焼いた後 0 件なら削除成功)\n        remote_log_eventf("BT PARAM-ONCONNECT ci=9 lat=0 to=4000");'),
+])
+
+patch(WT + '/firmware/src/ble_hid.h', [
+    ('    uint32_t conn_count;',
+     '    uint32_t conn_count;\n    // 【2026-11-20】直近 60 秒の接続成立回数。2 以上なら再接続ループ\n    uint8_t reconn_60s;'),
+])
+
+patch(WT + '/firmware/src/remote_log.cc', [
+    ('brssi=%d/%d/%d hev=0x%02X hcir=%u cpg=%u/%u/%u",',
+     'brssi=%d/%d/%d hev=0x%02X hcir=%u cpg=%u/%u/%u reconn=%u",'),
+    ('                              (unsigned) cpg_max, (unsigned) cpg_slow, (unsigned) cpg_last);',
+     '                              (unsigned) cpg_max, (unsigned) cpg_slow, (unsigned) cpg_last,\n                              // 【2026-11-20】直近 60 秒の接続回数 (2 以上で再接続ループ)\n                              (unsigned) h.reconn_60s);'),
+])
+
+
 # --- 生成物の自己検算 (2026-11-01 追加) ---
 REQUIRED_MARKERS = [
     ('firmware/src/ble_hid.cc', 'health_acl_run < 0xFFFF'),
@@ -1812,6 +1837,9 @@ REQUIRED_MARKERS = [
     ('firmware/src/ble_hid.cc', 'ble_hid_reset_rssi_range'),
     ('firmware/src/remote_log.cc', 'brssi=%d/%d/%d'),
     ('firmware/src/remote_log.cc', 'RESET por=%u'),
+    ('firmware/src/ble_hid.cc', 'BT PARAM-ONCONNECT'),
+    ('firmware/src/ble_hid.cc', 'health_reconn_60s'),
+    ('firmware/src/remote_log.cc', 'reconn=%u'),
     ('firmware/src/ble_hid.cc', 'saved_bonded_mask_cache'),
     ('firmware/src/ble_hid.cc', 'saved_slot_peers_valid'),
 ]

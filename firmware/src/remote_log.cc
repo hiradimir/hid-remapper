@@ -1083,7 +1083,7 @@ static void ble_health_task(uint64_t now_us) {
         loop_gap_max_us = 0;
 
         if (ever) {
-            remote_log_eventf("BLE-HB ci=%u ok=%u blk=%u acl=%u err=%u cp=%u/%u disc=%u rs=0x%02X tx=%ums omax=%ums lat=%ums burst=%u in=%u gmax=%ums dmax=%u sk=%u/%u/%u fl=0x%02X lps=%u lmax=%ums rtt=%ums rmax=%ums u=%u/%u sus=%u clat=%u st=%u cu=%u aclrun=%u cpd=%u conn=%u heap=%u temp=%d ccmd=%d brssi=%d/%d/%d hev=0x%02X hcir=%u cpg=%u/%u/%u",
+            remote_log_eventf("BLE-HB ci=%u ok=%u blk=%u acl=%u err=%u cp=%u/%u disc=%u rs=0x%02X tx=%ums omax=%ums lat=%ums burst=%u in=%u gmax=%ums dmax=%u sk=%u/%u/%u fl=0x%02X lps=%u lmax=%ums rtt=%ums rmax=%ums u=%u/%u sus=%u clat=%u st=%u cu=%u aclrun=%u cpd=%u conn=%u heap=%u temp=%d ccmd=%d brssi=%d/%d/%d hev=0x%02X hcir=%u cpg=%u/%u/%u reconn=%u",
                               (unsigned) h.ci, (unsigned) h.ok, (unsigned) h.blocked,
                               (unsigned) h.acl_full, (unsigned) h.err, (unsigned) h.cp_events, (unsigned) h.cp_packets, (unsigned) h.disc,
                               (unsigned) h.disc_reason, (unsigned) tx_ms,
@@ -1110,7 +1110,9 @@ static void ble_health_task(uint64_t now_us) {
                               (unsigned) h.last_hci_event,
                               (unsigned) hcir,
                               // 【2026-11-16】CP 間隔 最大/60ms超の回数/直近
-                              (unsigned) cpg_max, (unsigned) cpg_slow, (unsigned) cpg_last);
+                              (unsigned) cpg_max, (unsigned) cpg_slow, (unsigned) cpg_last,
+                              // 【2026-11-20】直近 60 秒の接続回数 (2 以上で再接続ループ)
+                              (unsigned) h.reconn_60s);
         } else {
             remote_log_eventf("BLE-HB ci=%u ok=0 blk=%u acl=%u err=%u cp=%u/%u disc=%u rs=0x%02X tx=none in=%u gmax=%ums lps=%u lmax=%ums rtt=%ums rmax=%ums u=%u/%u sus=%u",
                               (unsigned) h.ci, (unsigned) h.blocked,

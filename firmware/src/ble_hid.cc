@@ -471,6 +471,8 @@ void ble_hid_reset_rssi_range(void) {
 static volatile uint64_t health_last_cp_us = 0;
 // 【2026-11-12】起動後の接続成立回数 (寿命仮説①の判定用)
 static volatile uint32_t health_conn_count = 0;
+// 【2026-11-20】直近 60 秒の接続成立回数 (再接続ループの検出用)
+static volatile uint8_t health_reconn_60s = 0;
 static volatile uint32_t health_cp_packets = 0;   // 0x57 以外の送信エラー (ok が伸びない原因の切り分け)
 static volatile uint32_t health_disc = 0;
 static volatile uint8_t health_disc_reason = 0;
@@ -491,6 +493,7 @@ void ble_hid_get_health(ble_hid_health_t* out) {
     out->cu = conn_update_count;
     out->acl_run = health_acl_run;
     out->conn_count = health_conn_count;
+    out->reconn_60s = health_reconn_60s;
     out->rssi = health_ble_rssi;
     out->last_hci_event = health_last_hci_event;
     out->hci_events = health_hci_events;
@@ -778,10 +781,14 @@ static void conn_stabilize_timer_handler(btstack_timer_source_t *ts) {
             update_detected_os('M');
         }
 
-        // 【極めて重要】接続安定化・暗号化完了直後に低遅延パラメータ（7.5ms〜11.25ms）を要求
-        // これがないとホスト（macOS/Win/Android）は 30ms〜50ms の省電力低速インターバルで動作し、
-        // 1秒間に20〜30パケットしか通らなくなるため、マウスが激しく飛び飛び（カクつき・遅延累積）になる。
-        gap_request_connection_parameter_update(con_handle, 9, 12, 0, 400);
+        // 【2026-11-20】接続直後の無条件パラメータ要求を廃止した。
+        // 元は「低遅延パラメータ (7.5〜11.25ms) を引き出す」目的だったが、
+        // 実測では常に ci=12 に落ち着いており効果が無かった。一方で再接続ループ
+        // (実測: 68 秒間に 6 回接続) のたびに HCI コマンドを消費し、BT PARAM が
+        // 15 秒間に 11 回、最終的に ccmd=0 (クレジット枯渇) に至っていた。
+        // 30 秒周期の PARAM-REQ (wake75) と役割が重複しているため削除する。
+        // 削除の確認用に、ここへ到達したことだけ残す (焼いた後 0 件なら削除成功)
+        remote_log_eventf("BT PARAM-ONCONNECT ci=9 lat=0 to=4000");
 
         // ハンドシェイク完了・通信安定後に安全に Flash へ永続化（SPI 通信中の Flash 消去ブロック回避）
         save_slot_bonded_mask(slot_bonded_mask);
@@ -2496,6 +2503,19 @@ static void ble_hid_task_locked(void) {
             // (2026-11-05: 再接続 20ms 後に stale な aclrun=51 で誤って絞った)
             health_acl_run = 0;
             health_conn_count++;
+            // 【2026-11-20】直近 60 秒の接続成立回数。
+            // 「再接続ループに入っている」を数字で見るため (conn= は起動からの累計
+            // なのでレートが分からない)。HB の reconn= に出す
+            {
+                static uint64_t reconn_win_us = 0;
+                static uint8_t reconn_in_win = 0;
+                if (reconn_win_us == 0 || (now_us - reconn_win_us) >= 60000000ULL) {
+                    reconn_win_us = now_us;
+                    reconn_in_win = 0;
+                }
+                if (reconn_in_win < 0xFF) reconn_in_win++;
+                health_reconn_60s = reconn_in_win;
+            }
             // 接続した = 広告は不要。ADV 監視も解除する
             adv_pending_since_us = 0;
             adv_fail_count = 0;
