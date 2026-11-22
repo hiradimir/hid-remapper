@@ -61,6 +61,24 @@ typedef struct {
     uint8_t last_hci_event;
     // HCI イベント総数 (区間あたりの減少を見るため、HB 側で差分を取る)
     uint32_t hci_events;
+    // 【2026-11-22】HCI コマンド総数と、Command Status でクレジット 0 が返った累計。
+    // 膠着時に「1 個しかないクレジットを誰が掴んだか」を、平常時の伸び率と
+    // 比べて判断するためのベースライン
+    uint32_t hci_cmds;
+    uint32_t cmd_nocredit;
+    // 【2026-11-22】コマンド種別の累計。HB 側で差分を取って「区間で何が増えたか」を見る。
+    // 平常時は LE その他 (= RSSI 取得) が主成分。膠着時に link/connU が伸びれば
+    // それが犯人 (1 個しかないクレジットを掴んだまま返していない)
+    uint32_t cmd_adv_enable;
+    uint32_t cmd_adv_params;
+    uint32_t cmd_adv_addr;
+    uint32_t cmd_conn_update;
+    uint32_t cmd_le_other;
+    uint32_t cmd_link_ctrl;
+    uint32_t cmd_ctrl_bb;
+    uint32_t cmd_other;
+    // 【2026-11-22】RSSI 取得 (OGF 0x05 / OCF 0x05)。平常時の主成分
+    uint32_t cmd_read_rssi;
     // 【2026-11-16】Completed Packets (0x13) の到着間隔。LL 再送・衝突で伸びる。
     // 正常は 29-30ms (接続間隔 15ms の 2 倍)。RSSI では見えない瞬時の劣化を捉える
     uint32_t cp_gap_max_ms;  // 区間内の最大間隔
@@ -122,6 +140,8 @@ bool usb_is_mounted(void);
 bool usb_is_ready(void);
 bool usb_is_suspended(void);
 void usb_clear_kbd_report(void);
+// 【2026-11-22】BLE へ戻るときに USB 側の押下状態も消す (マウス/コンシューマ含む)
+void usb_clear_all_reports(void);
 
 #else
 
@@ -160,6 +180,17 @@ static inline void ble_hid_get_health(ble_hid_health_t* out) {
     out->err = 0;
     out->cp_events = 0;
     out->cp_packets = 0;
+    out->hci_cmds = 0;
+    out->cmd_nocredit = 0;
+    out->cmd_adv_enable = 0;
+    out->cmd_adv_params = 0;
+    out->cmd_adv_addr = 0;
+    out->cmd_conn_update = 0;
+    out->cmd_le_other = 0;
+    out->cmd_link_ctrl = 0;
+    out->cmd_ctrl_bb = 0;
+    out->cmd_other = 0;
+    out->cmd_read_rssi = 0;
     out->disc = 0;
     out->disc_reason = 0;
     out->last_ok_us = 0;

@@ -914,6 +914,12 @@ static uint32_t ble_hb_burst = 0;       // 直近 HB 時点の詰め込み送信
 static uint32_t ble_hb_loops = 0;       // 直近 HB 時点のループ周回数
 // 【2026-11-15】直近 HB 時点の HCI イベント総数 (1 秒あたりの到着数を見る)
 static uint32_t ble_hb_hci = 0;
+// 【2026-11-22】HCI コマンド総数の前回値 (区間差分 = 平常時のコマンドレート)
+static uint32_t ble_hb_cmds = 0;
+// 【2026-11-22】コマンド種別の前回値 (区間差分を HB に出す)
+static uint32_t ble_hb_advE = 0, ble_hb_advP = 0, ble_hb_addr = 0, ble_hb_connU = 0;
+static uint32_t ble_hb_leO = 0, ble_hb_link = 0, ble_hb_bb = 0, ble_hb_oth = 0;
+static uint32_t ble_hb_rssi_cmd = 0;
 static uint64_t ble_hb_us = 0;          // 直近 HB の時刻
 
 static void ble_health_task(uint64_t now_us) {
@@ -1054,6 +1060,31 @@ static void ble_health_task(uint64_t now_us) {
         // 【2026-11-15】HCI イベントの到着レート (件/秒)。
         // 正常時は毎秒数十件。これが 0 に落ちる瞬間が「チップが黙る」始まり
         const uint32_t hci_delta = h.hci_events - ble_hb_hci;
+        // 【2026-11-22】区間あたりの HCI コマンド数。平常時は 5 秒で 2〜4 個程度。
+        // 膠着時にここが跳ねたり、nocred が増えていれば「チップが返さない」側
+        const uint32_t cmd_delta = h.hci_cmds - ble_hb_cmds;
+        ble_hb_cmds = h.hci_cmds;
+        // 【2026-11-22】種別ごとの区間差分。平常時は leO (RSSI 取得) が主成分。
+        // 膠着時に connU/link/advE が伸びれば、そのコマンドがクレジットを掴んでいる
+        const uint32_t d_advE = h.cmd_adv_enable - ble_hb_advE;
+        const uint32_t d_advP = h.cmd_adv_params - ble_hb_advP;
+        const uint32_t d_addr = h.cmd_adv_addr - ble_hb_addr;
+        const uint32_t d_connU = h.cmd_conn_update - ble_hb_connU;
+        const uint32_t d_leO = h.cmd_le_other - ble_hb_leO;
+        const uint32_t d_link = h.cmd_link_ctrl - ble_hb_link;
+        const uint32_t d_bb = h.cmd_ctrl_bb - ble_hb_bb;
+        const uint32_t d_oth = h.cmd_other - ble_hb_oth;
+        ble_hb_advE = h.cmd_adv_enable;
+        ble_hb_advP = h.cmd_adv_params;
+        ble_hb_addr = h.cmd_adv_addr;
+        ble_hb_connU = h.cmd_conn_update;
+        ble_hb_leO = h.cmd_le_other;
+        ble_hb_link = h.cmd_link_ctrl;
+        ble_hb_bb = h.cmd_ctrl_bb;
+        ble_hb_oth = h.cmd_other;
+        // 【2026-11-22】RSSI 取得 (OGF 0x05) は LE ではないので独立で数える
+        const uint32_t d_rssi = h.cmd_read_rssi - ble_hb_rssi_cmd;
+        ble_hb_rssi_cmd = h.cmd_read_rssi;
         const uint32_t hcir = (RLOG_BLE_HB_MS > 0)
                                   ? (uint32_t) (((uint64_t) hci_delta * 1000ULL) / RLOG_BLE_HB_MS)
                                   : 0;
@@ -1083,7 +1114,7 @@ static void ble_health_task(uint64_t now_us) {
         loop_gap_max_us = 0;
 
         if (ever) {
-            remote_log_eventf("BLE-HB ci=%u ok=%u blk=%u acl=%u err=%u cp=%u/%u disc=%u rs=0x%02X tx=%ums omax=%ums lat=%ums burst=%u in=%u gmax=%ums dmax=%u sk=%u/%u/%u fl=0x%02X lps=%u lmax=%ums rtt=%ums rmax=%ums u=%u/%u sus=%u clat=%u st=%u cu=%u aclrun=%u cpd=%u conn=%u heap=%u temp=%d ccmd=%d brssi=%d/%d/%d hev=0x%02X hcir=%u cpg=%u/%u/%u reconn=%u bof=%u",
+            remote_log_eventf("BLE-HB ci=%u ok=%u blk=%u acl=%u err=%u cp=%u/%u disc=%u rs=0x%02X tx=%ums omax=%ums lat=%ums burst=%u in=%u gmax=%ums dmax=%u sk=%u/%u/%u fl=0x%02X lps=%u lmax=%ums rtt=%ums rmax=%ums u=%u/%u sus=%u clat=%u st=%u cu=%u aclrun=%u cpd=%u conn=%u heap=%u temp=%d ccmd=%d brssi=%d/%d/%d hev=0x%02X hcir=%u cpg=%u/%u/%u reconn=%u bof=%u hcmd=%u/%u/%u/%u/%u/%u/%u/%u/%u/%u nocred=%u",
                               (unsigned) h.ci, (unsigned) h.ok, (unsigned) h.blocked,
                               (unsigned) h.acl_full, (unsigned) h.err, (unsigned) h.cp_events, (unsigned) h.cp_packets, (unsigned) h.disc,
                               (unsigned) h.disc_reason, (unsigned) tx_ms,
@@ -1114,7 +1145,15 @@ static void ble_health_task(uint64_t now_us) {
                               // 【2026-11-20】直近 60 秒の接続回数 (2 以上で再接続ループ)
                               (unsigned) h.reconn_60s,
                               // 【2026-11-20】連続切断回数 (2 以上でバックオフ中)
-                              (unsigned) h.backoff_n);
+                              (unsigned) h.backoff_n,
+                              // 【2026-11-22】区間の HCI コマンド数 / クレジット 0 応答の累計
+                              // 合計/内訳: advE/advP/addr/connU/leO/link/bb/oth
+                              (unsigned) cmd_delta,
+                              (unsigned) d_advE, (unsigned) d_advP, (unsigned) d_addr,
+                              (unsigned) d_connU, (unsigned) d_leO, (unsigned) d_link,
+                              (unsigned) d_bb, (unsigned) d_oth,
+                              (unsigned) d_rssi,
+                              (unsigned) h.cmd_nocredit);
         } else {
             remote_log_eventf("BLE-HB ci=%u ok=0 blk=%u acl=%u err=%u cp=%u/%u disc=%u rs=0x%02X tx=none in=%u gmax=%ums lps=%u lmax=%ums rtt=%ums rmax=%ums u=%u/%u sus=%u",
                               (unsigned) h.ci, (unsigned) h.blocked,

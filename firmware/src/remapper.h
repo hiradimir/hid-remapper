@@ -48,6 +48,8 @@ void send_out_report();
 bool send_monitor_report(send_report_t do_send_report);
 void print_stats();
 void reset_state();
+// 【2026-11-22】スロット切替時に送信キューと前回値を捨てる (押しっぱなし防止)
+void reset_output_queue(void);
 
 void set_monitor_enabled(bool enabled);
 void monitor_usage(uint32_t usage, int32_t value, uint8_t hub_port);

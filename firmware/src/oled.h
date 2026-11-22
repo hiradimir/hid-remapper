@@ -32,6 +32,8 @@ void oled_set_peer_addr(const char* peer_addr_str);
 void oled_notify_tx(void);
 void oled_notify_activity(void);
 void oled_show_toast(const char* toast_msg, uint32_t duration_ms);
+// 【2026-11-22】ホットキーモードの入力バッファ表示。active=false で通常に戻る
+void oled_set_hotkey_mode(bool active, const char* buf, int rem_sec);
 void oled_set_radio_off(bool is_off);
 void oled_set_pairing_remaining_sec(int sec);
 void oled_set_reconnect_remaining_sec(int sec);

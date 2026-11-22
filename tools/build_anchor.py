@@ -1855,6 +1855,942 @@ patch(WT + '/firmware/src/ble_hid.cc', [
 ])
 
 
+# --- 2026-11-22 (wake86): adv_set の応答待ちタイマを実遷移時だけ立てる ---
+# 19:45 の誤検出 (ADV-EN 成功の 3 秒後に HCI-RECYCLE → AUTO-REBOOT) の原因。
+# apply_slot_identity は +200ms 後に adv_set(1) を予約するが、BTstack は
+# 内部状態が ACTIVE だと**コマンドを送らない** (hci.c:6976)。それでも毎回
+# タイマを立て直すと「送っていないのに応答待ち」になり DEAD と誤判定する。
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ("""    adv_enable_req = enable;
+    // 【2026-11-12】enable 要求から ADV-EN 完了までの経過を測る
+    if (enable) {
+        adv_pending_since_us = time_us_64();
+    } else {
+        adv_pending_since_us = 0;
+    }""",
+     """    // 【2026-11-22】タイマは「0→1 の実遷移」だけで立てる。
+    // すでに enable 要求中の状態で adv_set(1) を呼び直しても、BTstack は
+    // 内部状態が ACTIVE なら**コマンドを送らない** (hci.c:6976)。それなのに
+    // 毎回タイマを立て直すと「送っていないのに応答待ち」になり、
+    // 3 秒後に DEAD と誤判定する (19:45 実測: ADV-EN 成功直後に HCI-RECYCLE。
+    //  ADV-EN 36.311 → 遅延有効化 36.33 → 39.29 で HCI-RECYCLE)
+    const bool was_enable_req = (adv_enable_req != 0);
+    adv_enable_req = enable;
+    if (enable) {
+        if (!was_enable_req || adv_force_rearm) {
+            adv_pending_since_us = time_us_64();
+        }
+    } else {
+        adv_pending_since_us = 0;
+    }
+    adv_force_rearm = false;"""),
+    ("""static volatile int adv_enable_req = 0;""",
+     """static volatile int adv_enable_req = 0;
+// 【2026-11-22】素の gap_advertisements_enable(0) を挟んで広告を張り直す経路で、
+// adv_set(1) の応答待ちタイマを確実に再武装させるための 1 回限りフラグ
+static volatile bool adv_force_rearm = false;"""),
+    ("""                adv_pending_since_us = now_d;
+                gap_advertisements_enable(0);
+                adv_set(1);""",
+     """                adv_pending_since_us = now_d;
+                gap_advertisements_enable(0);
+                adv_force_rearm = true; // 素の disable を挟んだので再武装する
+                adv_set(1);"""),
+    ("""            adv_verify_deadline_us = now_us + 1500000ULL;
+            gap_advertisements_enable(0);
+            adv_set(1);""",
+     """            adv_verify_deadline_us = now_us + 1500000ULL;
+            gap_advertisements_enable(0);
+            adv_force_rearm = true; // 素の disable を挟んだので再武装する
+            adv_set(1);"""),
+])
+
+
+# --- 2026-11-22 (wake87): クレジット消費の内訳計装 ---
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ('        case HCI_EVENT_COMMAND_COMPLETE: {\n            uint16_t opcode = hci_event_command_complete_get_command_opcode(packet);\n            const uint8_t* params = hci_event_command_complete_get_return_parameters(packet);',
+     '        case HCI_EVENT_COMMAND_STATUS: {\n            // 【2026-11-22】Command Status は「受理したが完了は後で」の応答。\n            // packet[3] (num_hci_command_packets) が 0 だとクレジットが戻らない\n            uint8_t st_status = hci_event_command_status_get_status(packet);\n            uint8_t st_credits = hci_event_command_status_get_num_hci_command_packets(packet);\n            uint16_t st_opcode = hci_event_command_status_get_command_opcode(packet);\n            if (st_credits == 0) {\n                remote_log_eventf("BT CMDSTATUS-NOCRED status=0x%02X op=0x%04X",\n                                  st_status, (unsigned) st_opcode);\n                cmdstatus_nocredit++;\n            }\n            break;\n        }\n\n        case HCI_EVENT_COMMAND_COMPLETE: {\n            uint16_t opcode = hci_event_command_complete_get_command_opcode(packet);\n            const uint8_t* params = hci_event_command_complete_get_return_parameters(packet);\n            // 【2026-11-22】どのコマンドがクレジットを消費しているかを特定する。\n            // 膠着時に ccmd=0 になるが、その直前の HB では ccmd=1 だった\n            // (実測 10:22:07 ccmd=1 → 10:22:08 ccmd=0)。つまり「枯渇」ではなく\n            // 「1 個しかないクレジットを誰かが掴んだまま」の状態\n            {\n                uint8_t ogf = (uint8_t) (opcode >> 10);\n                uint8_t ocf = (uint8_t) (opcode & 0x3FF);\n                if (ogf == 0x08) {\n                    if (ocf == 0x0A) hci_cmd_le_set_adv_enable++;\n                    else if (ocf == 0x06) hci_cmd_le_set_adv_params++;\n                    else if (ocf == 0x05) hci_cmd_le_set_random_addr++;\n                    else if (ocf == 0x13) hci_cmd_le_conn_update++;\n                    else hci_cmd_le_other++;\n                } else if (ogf == 0x05) {\n                    // RSSI \u53d6\u5f97\u306f LE \u3067\u306f\u306a\u304f Status Parameters (OGF 0x05 / OCF 0x05)\n                    if (ocf == 0x05) hci_cmd_read_rssi++;\n                    else hci_cmd_other++;\n                } else if (ogf == 0x01) {\n                    hci_cmd_link_control++;\n                } else if (ogf == 0x03) {\n                    hci_cmd_ctrl_baseband++;\n                } else {\n                    hci_cmd_other++;\n                }\n            }'),
+    ('static volatile uint32_t health_hci_events = 0;',
+     'static volatile uint32_t health_hci_events = 0;\n// 【2026-11-22】HCI コマンドのオペコード別カウント (クレジット消費の内訳)\nstatic volatile uint16_t hci_cmd_le_set_adv_enable = 0;\nstatic volatile uint16_t hci_cmd_le_set_adv_params = 0;\nstatic volatile uint16_t hci_cmd_le_set_random_addr = 0;\nstatic volatile uint16_t hci_cmd_le_conn_update = 0;\nstatic volatile uint16_t hci_cmd_le_other = 0;\nstatic volatile uint16_t hci_cmd_link_control = 0;\nstatic volatile uint16_t hci_cmd_ctrl_baseband = 0;\nstatic volatile uint16_t hci_cmd_other = 0;\n// RSSI \u53d6\u5f97 (OGF 0x05 / OCF 0x05)\u3002\u5e73\u5e38\u6642\u306e\u4e3b\u6210\u5206\u306a\u306e\u3067\u72ec\u7acb\u3057\u3066\u6570\u3048\u308b\nstatic volatile uint16_t hci_cmd_read_rssi = 0;\nstatic volatile uint16_t cmdstatus_nocredit = 0;'),
+    ('            remote_log_eventf("CANSEND-TO n=%d hci_idle=%ums cp_idle=%ums rlog_age=%ums rssi=%d conn=%u heap=%u temp=%d ccmd=%d brssi=%d hev=0x%02X",',
+     '            remote_log_eventf("BT CMDCOUNT advE=%u advP=%u addr=%u connU=%u leO=%u link=%u bb=%u oth=%u nocred=%u",\n                              (unsigned) hci_cmd_le_set_adv_enable,\n                              (unsigned) hci_cmd_le_set_adv_params,\n                              (unsigned) hci_cmd_le_set_random_addr,\n                              (unsigned) hci_cmd_le_conn_update,\n                              (unsigned) hci_cmd_le_other,\n                              (unsigned) hci_cmd_link_control,\n                              (unsigned) hci_cmd_ctrl_baseband,\n                              (unsigned) hci_cmd_other,\n                              (unsigned) cmdstatus_nocredit);\n            remote_log_eventf("CANSEND-TO n=%d hci_idle=%ums cp_idle=%ums rlog_age=%ums rssi=%d conn=%u heap=%u temp=%d ccmd=%d brssi=%d hev=0x%02X",'),
+])
+
+
+# --- 2026-11-22 (wake88): HB に HCI コマンドレートと nocred を出す (ベースライン) ---
+patch(WT + '/firmware/src/ble_hid.h', [
+    ("""    // HCI イベント総数 (HB 側で差分を取り、1 秒あたりの到着数を見る)
+    uint32_t hci_events;""",
+     """    // HCI イベント総数 (HB 側で差分を取り、1 秒あたりの到着数を見る)
+    uint32_t hci_events;
+    // 【2026-11-22】HCI コマンド総数と、Command Status でクレジット 0 が返った累計。
+    // 膠着時に「1 個しかないクレジットを誰が掴んだか」を確率で判断するベースライン
+    uint32_t hci_cmds;
+    uint32_t cmd_nocredit;"""),
+    ("""    out->cp_events = 0;
+    out->cp_packets = 0;
+    out->disc = 0;""",
+     """    out->cp_events = 0;
+    out->cp_packets = 0;
+    out->hci_cmds = 0;
+    out->cmd_nocredit = 0;
+    out->disc = 0;"""),
+])
+
+
+# --- 2026-11-22 (wake88): コマンド総数を health 構造体へ ---
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ("    out->rssi = health_ble_rssi;",
+     """    out->rssi = health_ble_rssi;
+    out->hci_cmds = (uint32_t) hci_cmd_le_set_adv_enable + hci_cmd_le_set_adv_params +
+                    hci_cmd_le_set_random_addr + hci_cmd_le_conn_update +
+                    hci_cmd_le_other + hci_cmd_link_control +
+                    hci_cmd_ctrl_baseband + hci_cmd_other + hci_cmd_read_rssi;
+    out->cmd_nocredit = cmdstatus_nocredit;"""),
+])
+
+
+# --- 2026-11-22 (wake88): HB に hcmd= (区間コマンド数) と nocred= を追加 ---
+patch(WT + '/firmware/src/remote_log.cc', [
+    ("static uint32_t ble_hb_hci = 0;",
+     """static uint32_t ble_hb_hci = 0;
+// 【2026-11-22】HCI コマンド総数の前回値 (区間差分 = 平常時のコマンドレート)
+static uint32_t ble_hb_cmds = 0;"""),
+    ("        const uint32_t hci_delta = h.hci_events - ble_hb_hci;",
+     """        const uint32_t hci_delta = h.hci_events - ble_hb_hci;
+        // 【2026-11-22】区間あたりの HCI コマンド数。平常時は 5 秒で 2〜4 個程度
+        const uint32_t cmd_delta = h.hci_cmds - ble_hb_cmds;
+        ble_hb_cmds = h.hci_cmds;"""),
+    ('hcir=%u cpg=%u/%u/%u reconn=%u bof=%u",',
+     'hcir=%u cpg=%u/%u/%u reconn=%u bof=%u hcmd=%u nocred=%u",'),
+    ("""                              // 【2026-11-20】連続切断回数 (2 以上でバックオフ中)
+                              (unsigned) h.backoff_n);""",
+     """                              // 【2026-11-20】連続切断回数 (2 以上でバックオフ中)
+                              (unsigned) h.backoff_n,
+                              // 【2026-11-22】区間の HCI コマンド数 / クレジット 0 応答の累計
+                              (unsigned) cmd_delta,
+                              (unsigned) h.cmd_nocredit);"""),
+])
+
+
+# --- 2026-11-22 (wake89): HB にコマンド種別の区間差分を出す ---
+patch(WT + '/firmware/src/ble_hid.h', [
+    ("""    uint32_t hci_cmds;
+    uint32_t cmd_nocredit;""",
+     """    uint32_t hci_cmds;
+    uint32_t cmd_nocredit;
+    // 【2026-11-22】コマンド種別の累計。HB 側で差分を取り「区間で何が増えたか」を見る。
+    // 平常時は LE その他 (= RSSI 取得) が主成分。膠着時に link/connU が伸びれば
+    // それが犯人 (1 個しかないクレジットを掴んだまま返していない)
+    uint32_t cmd_adv_enable;
+    uint32_t cmd_adv_params;
+    uint32_t cmd_adv_addr;
+    uint32_t cmd_conn_update;
+    uint32_t cmd_le_other;
+    uint32_t cmd_link_ctrl;
+    uint32_t cmd_ctrl_bb;
+    uint32_t cmd_other;\n    // 【2026-11-22】RSSI \u53d6\u5f97 (OGF 0x05 / OCF 0x05)\u3002\u5e73\u5e38\u6642\u306e\u4e3b\u6210\u5206\n    uint32_t cmd_read_rssi;"""),
+    ("""    out->hci_cmds = 0;
+    out->cmd_nocredit = 0;""",
+     """    out->hci_cmds = 0;
+    out->cmd_nocredit = 0;
+    out->cmd_adv_enable = 0;
+    out->cmd_adv_params = 0;
+    out->cmd_adv_addr = 0;
+    out->cmd_conn_update = 0;
+    out->cmd_le_other = 0;
+    out->cmd_link_ctrl = 0;
+    out->cmd_ctrl_bb = 0;
+    out->cmd_other = 0;\n    out->cmd_read_rssi = 0;"""),
+])
+
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ("    out->cmd_nocredit = cmdstatus_nocredit;",
+     """    out->cmd_nocredit = cmdstatus_nocredit;
+    out->cmd_adv_enable = hci_cmd_le_set_adv_enable;
+    out->cmd_adv_params = hci_cmd_le_set_adv_params;
+    out->cmd_adv_addr = hci_cmd_le_set_random_addr;
+    out->cmd_conn_update = hci_cmd_le_conn_update;
+    out->cmd_le_other = hci_cmd_le_other;
+    out->cmd_link_ctrl = hci_cmd_link_control;
+    out->cmd_ctrl_bb = hci_cmd_ctrl_baseband;
+    out->cmd_other = hci_cmd_other;\n    out->cmd_read_rssi = hci_cmd_read_rssi;"""),
+])
+
+patch(WT + '/firmware/src/remote_log.cc', [
+    ("static uint32_t ble_hb_cmds = 0;",
+     """static uint32_t ble_hb_cmds = 0;
+// 【2026-11-22】コマンド種別の前回値 (区間差分を HB に出す)
+static uint32_t ble_hb_advE = 0, ble_hb_advP = 0, ble_hb_addr = 0, ble_hb_connU = 0;
+static uint32_t ble_hb_leO = 0, ble_hb_link = 0, ble_hb_bb = 0, ble_hb_oth = 0;\nstatic uint32_t ble_hb_rssi_cmd = 0;"""),
+    ("""        const uint32_t cmd_delta = h.hci_cmds - ble_hb_cmds;
+        ble_hb_cmds = h.hci_cmds;""",
+     """        const uint32_t cmd_delta = h.hci_cmds - ble_hb_cmds;
+        ble_hb_cmds = h.hci_cmds;
+        // 【2026-11-22】種別ごとの区間差分。平常時は leO (RSSI 取得) が主成分。
+        // 膠着時に connU/link/advE が伸びれば、そのコマンドがクレジットを掴んでいる
+        const uint32_t d_advE = h.cmd_adv_enable - ble_hb_advE;
+        const uint32_t d_advP = h.cmd_adv_params - ble_hb_advP;
+        const uint32_t d_addr = h.cmd_adv_addr - ble_hb_addr;
+        const uint32_t d_connU = h.cmd_conn_update - ble_hb_connU;
+        const uint32_t d_leO = h.cmd_le_other - ble_hb_leO;
+        const uint32_t d_link = h.cmd_link_ctrl - ble_hb_link;
+        const uint32_t d_bb = h.cmd_ctrl_bb - ble_hb_bb;
+        const uint32_t d_oth = h.cmd_other - ble_hb_oth;
+        ble_hb_advE = h.cmd_adv_enable;
+        ble_hb_advP = h.cmd_adv_params;
+        ble_hb_addr = h.cmd_adv_addr;
+        ble_hb_connU = h.cmd_conn_update;
+        ble_hb_leO = h.cmd_le_other;
+        ble_hb_link = h.cmd_link_ctrl;
+        ble_hb_bb = h.cmd_ctrl_bb;
+        ble_hb_oth = h.cmd_other;\n        const uint32_t d_rssi = h.cmd_read_rssi - ble_hb_rssi_cmd;\n        ble_hb_rssi_cmd = h.cmd_read_rssi;"""),
+    ('hcmd=%u nocred=%u",',
+     'hcmd=%u/%u/%u/%u/%u/%u/%u/%u/%u/%u nocred=%u",'),
+    ("""                              (unsigned) cmd_delta,
+                              (unsigned) h.cmd_nocredit);""",
+     """                              // 合計/内訳: advE/advP/addr/connU/leO/link/bb/oth
+                              (unsigned) cmd_delta,
+                              (unsigned) d_advE, (unsigned) d_advP, (unsigned) d_addr,
+                              (unsigned) d_connU, (unsigned) d_leO, (unsigned) d_link,
+                              (unsigned) d_bb, (unsigned) d_oth,
+                              (unsigned) d_rssi,
+                              (unsigned) h.cmd_nocredit);"""),
+])
+
+
+# --- 2026-11-22 (wake91): 切替時に送信キューを捨てる (押しっぱなし防止) ---
+# 切替直前の入力 (押下中のマウスボタン/キー) がキューに残り、切替先の
+# ホストへ送られ続けて「左クリックが解除されない・キーボードが効かない」。
+# 実測: 切替直前 in=357 → 切替後 in=0 なのに dmax=2 の同一レポートが 7/s。
+# prev_reports も消さないと needs_to_be_sent() が誤判定して積み直し続ける。
+patch(WT + '/firmware/src/remapper.cc', [
+    ("""void reset_state() {
+    memset(registers, 0, sizeof(registers));
+    accumulated.clear();
+    layer_state_mask = 1;
+    frame_counter = 0;
+}""",
+     """void reset_state() {
+    memset(registers, 0, sizeof(registers));
+    accumulated.clear();
+    layer_state_mask = 1;
+    frame_counter = 0;
+}
+
+// 【2026-11-22】送信キューと「前回送った値」を捨てる。
+// スロット切替をまたぐと、切替前の入力 (押下中のマウスボタンやキー) が
+// キューに残り、新しいスロットで送られ続ける。ホスト側では「押しっぱなし」
+// になり、左クリックが解除されない・キーボードが効かない症状になる。
+// 切替先には RELEASE-ALL で全キー離下を送るので、捨てても押しっぱなしにならない。
+// prev_reports も消す: 残すと needs_to_be_sent() が「前回と違う」と誤判定し、
+// 同じレポートを永久に積み直す (実測: in=0 dmax=2 で ok が 7/s 伸び続けた)
+void reset_output_queue(void) {
+    or_head = 0;
+    or_tail = 0;
+    or_items = 0;
+    memset(outgoing_reports, 0, sizeof(outgoing_reports));
+    for (unsigned int i = 0; i < report_ids.size(); i++) {
+        uint8_t report_id = report_ids[i];
+        if (reports[report_id] != nullptr) {
+            memset(reports[report_id], 0, report_sizes[report_id]);
+        }
+        if (prev_reports[report_id] != nullptr) {
+            memset(prev_reports[report_id], 0, report_sizes[report_id]);
+        }
+    }
+}"""),
+])
+
+patch(WT + '/firmware/src/remapper.h', [
+    ("void reset_state();",
+     "void reset_state();\n// 【2026-11-22】スロット切替時に送信キューと前回値を捨てる (押しっぱなし防止)\nvoid reset_output_queue(void);"),
+])
+
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ('#include "ble_hid.h"',
+     '#include "ble_hid.h"\n#include "remapper.h" // 【2026-11-22】切替時に送信キューを捨てる'),
+    ("""    ble_lock();
+    slot_adv_block = true; // 待機終了までは広告を出さない
+    adv_enable_pending = false;
+    adv_set(0);
+    ble_unlock();""",
+     """    // 【2026-11-22】切替前の入力を捨てる。残すと切替先のホストに
+    // 「押しっぱなし」のレポートが送られ、左クリックが解除されない・
+    // キーボードが効かない症状になる (実測: 切替直前に in=357 の入力があり、
+    // 切替後 in=0 なのに dmax=2 の同じレポートが 7/s で送られ続けた)。
+    // 切替先では RELEASE-ALL で全キー離下を送るので押しっぱなしにはならない。
+    // 注: 切断完了ハンドラ (async, ロック保持) からも呼ばれるが、
+    // この関数はキュー操作だけで BTstack に触らないためロック不要
+    reset_output_queue();
+    ble_lock();
+    slot_adv_block = true;
+    adv_enable_pending = false; // 予約済みの有効化も取り消す
+    adv_set(0);
+    ble_unlock();"""),
+])
+
+
+# --- 2026-11-22 (wake92): USB 側もマウス/コンシューマの押下を離す ---
+# ルディのシナリオ: slot2 -> slot1 切替中に USB ホストモードになり、その間に
+# マウスを操作 → 左クリックが PC 側に残り、BLE に戻っても解除されない。
+# 既存の usb_clear_kbd_report() はキーボード (report_id 2) だけだった。
+patch(WT + '/firmware/src/main.cc', [
+    ("""extern "C" void usb_clear_kbd_report(void) {
+    uint8_t zero_kbd[16] = {0};
+    if (tud_mounted() && !tud_suspended()) {
+        tud_hid_n_report(0, 2, zero_kbd, sizeof(zero_kbd));
+    }
+}""",
+     """extern "C" void usb_clear_kbd_report(void) {
+    uint8_t zero_kbd[16] = {0};
+    if (tud_mounted() && !tud_suspended()) {
+        tud_hid_n_report(0, 2, zero_kbd, sizeof(zero_kbd));
+    }
+}
+
+// 【2026-11-22】BLE へ戻るときに USB 側の押下状態も消す。
+// 以前はキーボード (report_id 2) だけ消していたため、USB モード中に
+// 左クリックを押すと PC 側に「押下中」が残り、BLE に戻っても解除されなかった
+// (実測: 切替中に USB モードで操作 → 以後ずっと左クリックが効きっぱなし)
+extern "C" void usb_clear_all_reports(void) {
+    if (!tud_mounted() || tud_suspended()) return;
+    uint8_t zero_kbd[16] = {0};
+    uint8_t zero_mouse[8] = {0};
+    uint8_t zero_consumer[4] = {0};
+    tud_hid_n_report(0, 2, zero_kbd, sizeof(zero_kbd));
+    tud_hid_n_report(0, 1, zero_mouse, sizeof(zero_mouse));
+    tud_hid_n_report(0, 3, zero_consumer, sizeof(zero_consumer));
+}"""),
+])
+
+patch(WT + '/firmware/src/ble_hid.h', [
+    ("void usb_clear_kbd_report(void);",
+     "void usb_clear_kbd_report(void);\n// 【2026-11-22】BLE へ戻るときに USB 側の押下状態も消す (マウス/コンシューマ含む)\nvoid usb_clear_all_reports(void);"),
+])
+
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ("""static void send_all_release_reports(void) {
+    usb_clear_kbd_report();""",
+     """static void send_all_release_reports(void) {
+    // 【2026-11-22】USB 側もキーボードだけでなくマウス/コンシューマを離す。
+    // 以前はキーボードだけだったため、切替中に USB モードで押した左クリックが
+    // PC 側に残り、BLE に戻っても解除されない症状が出ていた
+    usb_clear_all_reports();"""),
+])
+
+
+# --- 2026-11-22 (wake93): ホットキーをプレフィックス方式に作り直す ---
+# 旧方式 (Cmd+Ctrl+F1〜F4 の同時押し) は修飾キーを押している間ずっとホットキー
+# 扱いになり、その間の入力が飲まれる。スロット切替中の「押しっぱなし」
+# 「キーボードが効かない」症状の温床だった。
+#
+# 新方式:
+#   Cmd+Ctrl+Alt を押して 800ms 以内に離す → モード成立 (OLED に "$ ")
+#   コマンドを打って Enter で実行・終了 (成否に関わらず抜ける):
+#     s1..s4 / p1..p4 / clear [1-4|all] / bt [status|toggle] / exit|e / quit|q
+#   Esc で即抜け。5 秒無入力でタイムアウト (破棄)
+#
+# 【重要】キーボードレポートはビットマップ形式 (Usage 0x04-0x73 の 112 ビット)。
+# Usage ID の配列として読むと e→m / k→a になり Esc/Enter が来なくなる
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ("""bool ble_hid_check_hotkey(uint8_t interface, const uint8_t* report_with_id, uint8_t len) {
+    (void)interface;
+    if (len < 9) return false;
+
+    uint8_t report_id = report_with_id[0];
+    const uint8_t* report_data = report_with_id + 1;
+
+    // キーボードレポート（ID 2）のみ対象
+    if (report_id != 2) return false;
+
+    uint8_t modifier = report_data[0];
+
+    // Left/Right の Ctrl (0x01 / 0x10) と Win/GUI (0x08 / 0x80) の両方が含まれているか
+    bool ctrl_pressed = (modifier & 0x11) != 0; // Left/Right Ctrl
+    bool gui_pressed  = (modifier & 0x88) != 0; // Left/Right GUI (Win/Cmd)
+    bool alt_pressed  = (modifier & 0x44) != 0; // Left/Right Alt
+
+    // F1 〜 F4 のスロット判定（通常数字キーやテンキーの誤判定を完全に排除）
+    int slot = -1;
+    // Backspace (Usage 0x2A: report_data[5] bit 6 / 0x40) または Forward Delete (Usage 0x4C: report_data[10] bit 0 / 0x01) でボンド全消去
+    bool backspace_pressed = ((report_data[5] & 0x40) != 0) || ((report_data[10] & 0x01) != 0);
+    if      ((report_data[7] & 0x40) != 0) slot = 0; // F1 -> Slot 1
+    else if ((report_data[7] & 0x80) != 0) slot = 1; // F2 -> Slot 2
+    else if ((report_data[8] & 0x01) != 0) slot = 2; // F3 -> Slot 3
+    else if ((report_data[8] & 0x02) != 0) slot = 3; // F4 -> Slot 4
+
+    static int last_pressed_slot = -1;
+    static bool last_alt_pressed = false;
+    static bool clear_bonds_was_pressed = false;
+
+    // 全ボンド消去ホットキー: Ctrl + Win + Alt + Backspace / Delete
+    if (ctrl_pressed && gui_pressed && alt_pressed && backspace_pressed) {
+        if (!clear_bonds_was_pressed) {
+            clear_bonds_was_pressed = true;
+            send_all_release_reports();
+            printf("[BT] *** HOTKEY: Clear All BLE Bonds ***\\r\\n");
+            ble_clear_bonds();
+        }
+        return true;
+    }
+    clear_bonds_was_pressed = false;
+
+    // ペアリングホットキー（2段階・カレントスロット専用）: Ctrl + Win + Alt + Space
+    // 1回目: カレントスロットのボンドを消去 / 2回目 (消去済み): そのスロットでペアリング開始
+    bool space_pressed = (report_data[6] & 0x01) != 0; // Usage 0x2C (Space)
+    static bool space_was_pressed = false;
+    if (ctrl_pressed && gui_pressed && alt_pressed && space_pressed) {
+        if (!space_was_pressed) {
+            space_was_pressed = true;
+            send_all_release_reports();
+            if (is_slot_bonded(current_slot)) {
+                printf("[BT] *** HOTKEY: Clear bond of current slot %d ***\\r\\n", current_slot + 1);
+                ble_clear_slot_bonds(current_slot);
+            } else {
+                printf("[BT] *** HOTKEY: Start pairing for current slot %d ***\\r\\n", current_slot + 1);
+                ble_enter_pairing_mode(current_slot);
+            }
+        }
+        return true;
+    }
+    space_was_pressed = false;
+
+    // OS手動切替ホットキー: Ctrl + Win + Alt + 'O'
+    // 'O' は Usage 0x12 -> report_data[2] bit 6 (0x40)
+    bool o_pressed = (report_data[2] & 0x40) != 0;
+    static bool o_was_pressed = false;
+    if (ctrl_pressed && gui_pressed && alt_pressed && o_pressed) {
+        if (!o_was_pressed) {
+            o_was_pressed = true;
+            send_all_release_reports();
+            char cur = slot_os[current_slot];
+            char next_os = 'M';
+            if (cur == 'M') next_os = 'W';
+            else if (cur == 'W') next_os = 'A';
+            else if (cur == 'A') next_os = 'I';
+            else if (cur == 'I') next_os = '-';
+            else next_os = 'M';
+
+            slot_os[current_slot] = next_os;
+            oled_set_slot_os(current_slot, next_os);
+            schedule_save_slot_os(); // 2秒安定後にFlashへ遅延保存（連打時のFlash摩耗・競合防止）
+            char os_toast[32];
+            snprintf(os_toast, sizeof(os_toast), "Slot %d OS -> %c", current_slot + 1, next_os);
+            oled_show_toast(os_toast, 3000);
+            printf("[BT] *** HOTKEY: Slot %d OS set to %c ***\\r\\n", current_slot + 1, next_os);
+        }
+        return true;
+    }
+    o_was_pressed = false;
+
+    // Alt 付きの F キーはスロット操作に使わない（OS 側のショートカットへそのまま通す）
+    int current_slot_request = (ctrl_pressed && gui_pressed && !alt_pressed && slot >= 0) ? slot : -1;
+
+    if (current_slot_request >= 0) {
+        if (current_slot_request != last_pressed_slot || alt_pressed != last_alt_pressed) {
+            last_pressed_slot = current_slot_request;
+            last_alt_pressed = alt_pressed;
+            send_all_release_reports();
+            printf("[BT] *** HOTKEY: Switch to slot %d ***\\r\\n", slot + 1);
+            ble_switch_slot(slot);
+        }
+        return true; // ホットキー成立中は常に消費
+    }
+
+    // Fキーまたは修飾キーが離されたらリセット
+    last_pressed_slot = -1;
+    last_alt_pressed = false;
+    return false;
+}
+
+""",
+     """// =========================================================================
+// 【2026-11-22】ホットキー: プレフィックス方式 (Cmd+Ctrl+Alt を押して離す)
+//
+// 旧方式 (Cmd+Ctrl+F1〜F4 の同時押し) は、修飾キーを押している間ずっと
+// ホットキー扱いになり、その間の入力が飲まれる。スロット切替中に
+// 「押しっぱなし」「キーが効かない」症状の温床だったため作り直した。
+//
+// 流れ:
+//   IDLE       : Cmd+Ctrl+Alt が揃う        → PREFIX_HOLD
+//   PREFIX_HOLD: 800ms 以内に3つとも離す     → ARMED (OLED に "$ ")
+//              : 別キー押下 / 800ms 超過     → IDLE (そのままホストへ)
+//   ARMED      : 文字キー                    → TYPING
+//              : Esc / 5 秒経過              → IDLE
+//   TYPING     : 文字キー (Shift 可)         → バッファへ
+//              : Backspace                   → 1 文字削除
+//              : Enter                       → 解析・実行
+//              : Esc                         → 破棄して IDLE
+//              : Ctrl/Alt/GUI                → 破棄して IDLE (事故防止)
+//              : 5 秒無入力                  → 破棄して IDLE
+//
+// コマンド (スペースは無視、大文字小文字も区別しない):
+//   s1..s4 / p1..p4 / clear [1-4|all] / bt [status|on|off] / exit|e / quit|q
+// =========================================================================
+
+#define HOTKEY_PREFIX_RELEASE_US 800000ULL   // 3つを離しきるまでの猶予
+#define HOTKEY_ARMED_TIMEOUT_US  5000000ULL  // モードに入ってから打ち始めるまで
+#define HOTKEY_TYPING_TIMEOUT_US 5000000ULL  // 最後の打鍵から確定まで
+#define HOTKEY_BUF_MAX 24
+
+typedef enum {
+    HK_IDLE = 0,
+    HK_PREFIX_HOLD,
+    HK_ARMED,
+    HK_TYPING,
+    HK_CONSUMED, // 実行後、全キーが離れるまで消費し続ける
+} hotkey_state_t;
+
+static hotkey_state_t hk_state = HK_IDLE;
+static uint64_t hk_state_us = 0;             // 状態に入った時刻
+static uint64_t hk_prefix_release_us = 0;    // 離し始めの時刻 (0 = まだ揃っていない)
+static char hk_buf[HOTKEY_BUF_MAX + 1];
+static uint8_t hk_buf_len = 0;
+// エッジ検出用: 前回の 112 ビット分のキー状態 (bitmap をそのまま保持)
+static uint8_t hk_prev_keys[14];
+
+// 修飾キーのビット
+#define HK_MOD_CTRL 0x11 // Left/Right Ctrl
+#define HK_MOD_GUI  0x88 // Left/Right GUI (Win/Cmd)
+#define HK_MOD_ALT  0x44 // Left/Right Alt
+#define HK_MOD_SHIFT 0x22 // Left/Right Shift
+
+// 【2026-11-22】HID Usage ID → 文字。
+// ホットキーの入力に必要な範囲だけ対応する (英小文字・数字・スペース・コロン・
+// ハイフン・アンダースコア)。Shift の有無で変わる記号も考慮する。
+// JIS 配列では ':' が独立キー (Usage 0x34) にあるため、両方を受け付ける
+static char hk_keycode_to_char(uint8_t k, bool shift) {
+    // 英字 (Usage 0x04-0x1D = a-z)
+    if (k >= 0x04 && k <= 0x1D) {
+        char c = (char) ('a' + (k - 0x04));
+        return shift ? (char) (c - 'a' + 'A') : c;
+    }
+    // 数字 1-9 (0x1E-0x26), 0 (0x27)
+    if (k >= 0x1E && k <= 0x27) {
+        char c = (k == 0x27) ? '0' : (char) ('1' + (k - 0x1E));
+        return c;
+    }
+    switch (k) {
+        case 0x2C: return ' ';            // Space
+        case 0x2D: return shift ? '_' : '-'; // - _
+        // ';' の位置: US では Shift で ':'、JIS では Shift で '+'
+        case 0x33: return shift ? ':' : ';';
+        // ''' の位置: JIS では ':' が独立している (Shift 不要)。
+        // US では Shift で '"'。どちらでも ':' として受け付ける
+        case 0x34: return ':';
+        default: return 0;
+    }
+}
+
+// 【2026-11-22】このファームのキーボードレポートは「ビットマップ」形式。
+// 標準 HID の「Usage ID を 8 個並べる」配列ではない。
+//   @0      : modifier (8 bit)
+//   @1..@14 : Usage 0x04..0x73 の 112 ビット (1 bit = 1 Usage)
+// report_data[1 + (usage - 0x04) / 8] の ((usage - 0x04) % 8) ビット目が立つ。
+// Usage ID の配列として読むと e→m / k→a のように別のキーとして解釈され、
+// Esc/Enter が永久に来なくなる (2026-11-22 実測)。
+static bool hk_is_usage_pressed(const uint8_t* report_data, uint8_t usage) {
+    if (usage < 0x04 || usage > 0x73) return false;
+    uint8_t bit = (uint8_t) (usage - 0x04);
+    uint8_t byte_index = (uint8_t) (1 + (bit >> 3));
+    uint8_t mask = (uint8_t) (1u << (bit & 7));
+    return (report_data[byte_index] & mask) != 0;
+}
+
+// その Usage が押されているか (report_data 全体を見る)
+static void hk_reset(const char* why) {
+    if (hk_state != HK_IDLE && why != nullptr) {
+        remote_log_eventf("HOTKEY reset %s buf=%s", why, hk_buf);
+    }
+    hk_state = HK_IDLE;
+    hk_state_us = 0;
+    hk_prefix_release_us = 0;
+    hk_buf_len = 0;
+    hk_buf[0] = '\\0';
+    oled_set_hotkey_mode(false, nullptr, 0);
+}
+
+static void hk_update_oled(void) {
+    int rem = 0;
+    uint64_t now = time_us_64();
+    if (hk_state == HK_ARMED) {
+        uint64_t d = (now - hk_state_us);
+        rem = (d >= HOTKEY_ARMED_TIMEOUT_US) ? 0
+              : (int) ((HOTKEY_ARMED_TIMEOUT_US - d) / 1000000ULL);
+    } else if (hk_state == HK_TYPING) {
+        uint64_t d = (now - hk_state_us);
+        rem = (d >= HOTKEY_TYPING_TIMEOUT_US) ? 0
+              : (int) ((HOTKEY_TYPING_TIMEOUT_US - d) / 1000000ULL);
+    }
+    oled_set_hotkey_mode(true, hk_buf, rem);
+}
+
+// 【2026-11-22】タイムアウトのカウントダウンを毎秒更新する。
+// hk_update_oled() はキー入力時にしか呼ばれないため、放置すると
+// "(4s)" の表示が止まったままになる (実測)。
+// ble_hid_task から 1 秒ごとに呼ぶ
+static void hk_tick(void) {
+    static uint64_t last_update_us = 0;
+    if (hk_state != HK_ARMED && hk_state != HK_TYPING) return;
+    uint64_t now = time_us_64();
+    if ((now - last_update_us) < 900000ULL) return;
+    last_update_us = now;
+    hk_update_oled();
+}
+
+// バッファに 1 文字足す (小文字化)
+static void hk_push_char(char c) {
+    if (hk_buf_len >= HOTKEY_BUF_MAX) return;
+    if (c >= 'A' && c <= 'Z') c = (char) (c - 'A' + 'a');
+    hk_buf[hk_buf_len++] = c;
+    hk_buf[hk_buf_len] = '\\0';
+}
+
+// スペースを除いた比較用の文字列を作る
+static void hk_compact(char* out, size_t out_size) {
+    size_t j = 0;
+    for (size_t i = 0; i < hk_buf_len && j + 1 < out_size; i++) {
+        if (hk_buf[i] == ' ') continue;
+        out[j++] = hk_buf[i];
+    }
+    out[j] = '\\0';
+}
+
+// コマンドを解析して実行する。戻り値 true = 実行した (モード終了)
+static bool hk_execute(void) {
+    char cmd[HOTKEY_BUF_MAX + 1];
+    hk_compact(cmd, sizeof(cmd));
+
+    remote_log_eventf("HOTKEY exec buf=%s cmd=%s", hk_buf, cmd);
+
+    if (cmd[0] == '\\0') return false;
+
+    // exit / e / quit / q : 抜けるだけ
+    if (strcmp(cmd, "exit") == 0 || strcmp(cmd, "e") == 0 ||
+        strcmp(cmd, "quit") == 0 || strcmp(cmd, "q") == 0) {
+        hk_reset(nullptr);
+        return true;
+    }
+
+    // s1..s4 : スロット切替
+    // 【2026-11-22】カレントスロットを指定した場合は何もしない。
+    // ble_switch_slot() は同一スロットを「電波 ON/OFF のトグル」として扱う
+    // (旧 F キー方式の名残)。今は bt / bt toggle がその役目なので、
+    // s1 で s1 に居るときに BT が切れるのは直感に反する
+    if (cmd[0] == 's' && cmd[1] >= '1' && cmd[1] <= '4' && cmd[2] == '\\0') {
+        int slot = cmd[1] - '1';
+        if (slot == current_slot) {
+            char msg[32];
+            snprintf(msg, sizeof(msg), "Already Slot %d", slot + 1);
+            oled_show_toast(msg, 2000);
+            remote_log_eventf("HOTKEY slot=%d already (ignored)", slot + 1);
+            return true;
+        }
+        send_all_release_reports();
+        remote_log_eventf("HOTKEY slot=%d (cmd)", slot + 1);
+        ble_switch_slot(slot);
+        return true;
+    }
+
+    // p1..p4 : ペアリングモード (カレントスロットのみ)
+    if (cmd[0] == 'p' && cmd[1] >= '1' && cmd[1] <= '4' && cmd[2] == '\\0') {
+        int slot = cmd[1] - '1';
+        send_all_release_reports();
+        remote_log_eventf("HOTKEY pairing=%d (cmd)", slot + 1);
+        ble_enter_pairing_mode(slot);
+        return true;
+    }
+
+    // clear 1..4 / clear all / clearall
+    if (strncmp(cmd, "clear", 5) == 0) {
+        const char* arg = cmd + 5;
+        if (strcmp(arg, "all") == 0) {
+            send_all_release_reports();
+            remote_log_eventf("HOTKEY clear all (cmd)");
+            ble_clear_bonds();
+            return true;
+        }
+        if (arg[0] >= '1' && arg[0] <= '4' && arg[1] == '\\0') {
+            int slot = arg[0] - '1';
+            send_all_release_reports();
+            remote_log_eventf("HOTKEY clear slot=%d (cmd)", slot + 1);
+            ble_clear_slot_bonds(slot);
+            return true;
+        }
+        oled_show_toast("clear 1-4 / all", 2000);
+        return false;
+    }
+
+    // bt / bt toggle : カレントスロットの電波 ON/OFF をトグル
+    // bt status      : 状態表示
+    //
+    // 【2026-11-22】以前は "bt on" と "bt off" を用意していたが、どちらも
+    // 同じトグル動作だったため「off と打ったのに on になる」ことがあった。
+    // 嘘をつかないよう、トグルは "bt" 1 語に統一する
+    if (strncmp(cmd, "bt", 2) == 0) {
+        const char* arg = cmd + 2;
+        if (strcmp(arg, "status") == 0) {
+            const bool radio_off_now = (current_state == BLE_STATE_STANDBY_SILENT);
+            char msg[32];
+            snprintf(msg, sizeof(msg), "Radio:%s Slot%d%s",
+                     radio_off_now ? "OFF" : "ON ",
+                     current_slot + 1,
+                     ble_hid_is_connected() ? " Conn" : "");
+            oled_show_toast(msg, 3000);
+            remote_log_eventf("HOTKEY bt status radio_off=%d conn=%d slot=%d state=%d",
+                              radio_off_now ? 1 : 0,
+                              ble_hid_is_connected() ? 1 : 0,
+                              current_slot + 1, (int) current_state);
+            return true;
+        }
+        if (arg[0] == '\\0' || strcmp(arg, "toggle") == 0) {
+            // 同一スロットへの切替要求 = 電波 ON/OFF のトグル
+            remote_log_eventf("HOTKEY bt toggle state=%d", (int) current_state);
+            ble_switch_slot(current_slot);
+            return true;
+        }
+        oled_show_toast("bt | bt status", 2000);
+        return false;
+    }
+
+    {
+        char msg[32];
+        snprintf(msg, sizeof(msg), "? %s", hk_buf);
+        oled_show_toast(msg, 2000);
+    }
+    remote_log_eventf("HOTKEY unknown buf=%s", hk_buf);
+    return false;
+}
+
+bool ble_hid_check_hotkey(uint8_t interface, const uint8_t* report_with_id, uint8_t len) {
+    (void)interface;
+    // キーボードレポートは ID(1) + modifier(1) + 112bit(14) = 16 バイト
+    if (len < 16) return false;
+
+    uint8_t report_id = report_with_id[0];
+    const uint8_t* report_data = report_with_id + 1;
+
+    if (report_id != 2) return false; // キーボードのみ
+
+    uint8_t modifier = report_data[0];
+    const bool shift = (modifier & HK_MOD_SHIFT) != 0;
+    const bool ctrl = (modifier & HK_MOD_CTRL) != 0;
+    const bool gui = (modifier & HK_MOD_GUI) != 0;
+    const bool alt = (modifier & HK_MOD_ALT) != 0;
+    const uint64_t now = time_us_64();
+
+    // 何かキーが押されているか (ビットマップ全体)
+    bool any_key = false;
+    for (int i = 1; i <= 14; i++) {
+        if (report_data[i] != 0) { any_key = true; break; }
+    }
+
+    bool consumed = (hk_state != HK_IDLE);
+    bool reset_now = false;
+
+    // 【重要】早期 return はしない。末尾で必ず hk_prev_keys を更新する。
+    // 早期 return するとエッジ検出が壊れ、押しっぱなしのキーが毎回「新規」と
+    // 判定されて sssss のように連打になる
+    switch (hk_state) {
+        case HK_IDLE: {
+            consumed = false;
+            // 3 修飾キーが揃っていて、かつ他のキーが押されていない
+            if (ctrl && gui && alt && !any_key) {
+                hk_state = HK_PREFIX_HOLD;
+                hk_state_us = now;
+                hk_prefix_release_us = 0;
+                consumed = true;
+            }
+            break;
+        }
+        case HK_PREFIX_HOLD: {
+            consumed = true;
+            if (!ctrl && !gui && !alt) {
+                // 3つとも離れた → モード成立
+                hk_state = HK_ARMED;
+                hk_state_us = now;
+                hk_update_oled();
+                remote_log_eventf("HOTKEY armed");
+                break;
+            }
+            if (hk_prefix_release_us == 0 && (!ctrl || !gui || !alt)) {
+                hk_prefix_release_us = now;
+            }
+            bool abort = false;
+            if (hk_prefix_release_us != 0 &&
+                (now - hk_prefix_release_us) > HOTKEY_PREFIX_RELEASE_US) {
+                remote_log_eventf("HOTKEY prefix-timeout");
+                abort = true;
+            }
+            if (!abort && any_key) {
+                remote_log_eventf("HOTKEY prefix-abort");
+                abort = true;
+            }
+            if (abort) reset_now = true;
+            break;
+        }
+        case HK_ARMED: {
+            consumed = true;
+            if ((now - hk_state_us) > HOTKEY_ARMED_TIMEOUT_US) {
+                remote_log_eventf("HOTKEY armed-timeout");
+                reset_now = true;
+                break;
+            }
+            if (ctrl || gui || alt) {
+                remote_log_eventf("HOTKEY armed-mod");
+                reset_now = true;
+                break;
+            }
+            // 新しく押されたキーを 1 つ拾う
+            for (uint8_t usage = 0x04; usage <= 0x73; usage++) {
+                if (!hk_is_usage_pressed(report_data, usage)) continue;
+                uint8_t bit = (uint8_t) (usage - 0x04);
+                uint8_t byte_index = (uint8_t) (bit >> 3);
+                uint8_t mask = (uint8_t) (1u << (bit & 7));
+                if (hk_prev_keys[byte_index] & mask) continue; // 既に押されていた
+
+                if (usage == 0x29) { // Esc
+                    remote_log_eventf("HOTKEY esc");
+                    reset_now = true;
+                    break;
+                }
+                char c = hk_keycode_to_char(usage, shift);
+                if (c != 0) {
+                    hk_state = HK_TYPING;
+                    hk_state_us = now;
+                    hk_push_char(c);
+                    hk_update_oled();
+                    break;
+                }
+            }
+            break;
+        }
+        case HK_TYPING: {
+            consumed = true;
+            if ((now - hk_state_us) > HOTKEY_TYPING_TIMEOUT_US) {
+                remote_log_eventf("HOTKEY typing-timeout");
+                reset_now = true;
+                break;
+            }
+            if (ctrl || gui || alt) {
+                remote_log_eventf("HOTKEY typing-mod");
+                reset_now = true;
+                break;
+            }
+            for (uint8_t usage = 0x04; usage <= 0x73; usage++) {
+                if (!hk_is_usage_pressed(report_data, usage)) continue;
+                uint8_t bit = (uint8_t) (usage - 0x04);
+                uint8_t byte_index = (uint8_t) (bit >> 3);
+                uint8_t mask = (uint8_t) (1u << (bit & 7));
+                if (hk_prev_keys[byte_index] & mask) continue; // 押しっぱなし・リピート
+
+                if (usage == 0x29) { // Esc
+                    remote_log_eventf("HOTKEY esc");
+                    reset_now = true;
+                    break;
+                }
+                if (usage == 0x2A) { // Backspace
+                    if (hk_buf_len > 0) hk_buf[--hk_buf_len] = 0;
+                    hk_state_us = now;
+                    hk_update_oled();
+                    break;
+                }
+                if (usage == 0x28 || usage == 0x58) { // Enter / Keypad Enter
+                    // 【2026-11-22】Enter は成否に関わらずモードを抜ける。
+                    // 以前は不明コマンドで TYPING に留まったため、バッファが
+                    // 残ったまま Enter を押すと同じ内容が再実行された
+                    // (実測: 17:46 "a" が 7 回連続 exec)。失敗はトーストで知らせる
+                    hk_execute();
+                    hk_state = HK_CONSUMED;
+                    hk_state_us = now;
+                    oled_set_hotkey_mode(false, nullptr, 0);
+                    break;
+                }
+                char c = hk_keycode_to_char(usage, shift);
+                if (c != 0) {
+                    hk_push_char(c);
+                    hk_state_us = now;
+                    hk_update_oled();
+                    break;
+                }
+            }
+            break;
+        }
+        case HK_CONSUMED: {
+            consumed = true;
+            // 【2026-11-22】実行後は「全キーが離れる」まで待つ。
+            // Enter を押しっぱなしにするとキーリピートで押下が続くため、
+            // 離れるまで IDLE に戻さない (戻すと同じコマンドが連打される)
+            if (!ctrl && !gui && !alt && !any_key) {
+                hk_state = HK_IDLE;
+                hk_state_us = 0;
+                hk_buf_len = 0;
+                hk_buf[0] = 0;
+                oled_set_hotkey_mode(false, nullptr, 0);
+            }
+            break;
+        }
+        default: {
+            reset_now = true;
+            consumed = false;
+            break;
+        }
+    }
+
+    // 前回のキー状態を保存 (エッジ検出用)。全経路がここを通る
+    for (int i = 1; i <= 14; i++) hk_prev_keys[i - 1] = report_data[i];
+
+    if (reset_now) {
+        hk_reset("state");
+        consumed = (hk_state != HK_IDLE);
+    }
+    return consumed;
+}
+
+"""),
+    ("static void ble_hid_kick_reconnect_locked(void);",
+     "static void ble_hid_kick_reconnect_locked(void);\nstatic void hk_tick(void); // 【2026-11-22】ホットキー残り秒数の定期更新"),
+    # タイムアウトのカウントダウンを毎秒更新する (キー入力時だけだと止まって見える)
+    ("static void ble_hid_task_locked(void) {\n    static uint64_t last_countdown_check_us = 0;\n    uint64_t now_us = time_us_64();",
+     "static void ble_hid_task_locked(void) {\n    static uint64_t last_countdown_check_us = 0;\n    uint64_t now_us = time_us_64();\n\n    // 【2026-11-22】ホットキーモードの残り秒数を毎秒更新する\n    hk_tick();"),
+])
+
+# --- 2026-11-22 (wake93): OLED Line3 にホットキーモードの入力を出す ---
+patch(WT + '/firmware/src/oled.cc', [
+    ("""static char ui_toast_msg[32] = "";
+static uint32_t ui_toast_until_ms = 0;""",
+     """static char ui_toast_msg[32] = "";
+static uint32_t ui_toast_until_ms = 0;
+// 【2026-11-22】ホットキーモード (Cmd+Ctrl+Alt を離した後) の入力バッファ表示。
+// Line3 を占有し、残り秒数も出す。空なら通常の Line3 表示に戻る
+static char ui_hotkey_buf[24] = "";
+static volatile int ui_hotkey_rem_sec = 0;
+static volatile bool ui_hotkey_active = false;"""),
+    ("""void oled_show_toast(const char* toast_msg, uint32_t duration_ms) {""",
+     """// 【2026-11-22】ホットキーモードの入力バッファを Line3 に表示する。
+// active=false で通常表示に戻る。rem_sec は残り秒数 (タイムアウト表示用)
+void oled_set_hotkey_mode(bool active, const char* buf, int rem_sec) {
+    ui_hotkey_active = active;
+    if (buf != nullptr) {
+        strncpy(ui_hotkey_buf, buf, sizeof(ui_hotkey_buf) - 1);
+        ui_hotkey_buf[sizeof(ui_hotkey_buf) - 1] = 0;
+    } else {
+        ui_hotkey_buf[0] = 0;
+    }
+    ui_hotkey_rem_sec = rem_sec;
+}
+
+void oled_show_toast(const char* toast_msg, uint32_t duration_ms) {"""),
+    ("    char line3[32];\n    if (ui_toast_until_ms > now_ms && ui_toast_msg[0] != '\\0') {",
+     "    char line3[32];\n    if (ui_hotkey_active) {\n        // ホットキーモード中は Line3 を占有する。例: \"$ s2            (4s)\"\n        snprintf(line3, sizeof(line3), \"$ %-15.15s (%ds)\", ui_hotkey_buf, ui_hotkey_rem_sec);\n    } else if (ui_toast_until_ms > now_ms && ui_toast_msg[0] != '\\0') {"),
+])
+
+patch(WT + '/firmware/src/oled.h', [
+    ("void oled_show_toast(const char* toast_msg, uint32_t duration_ms);",
+     "void oled_show_toast(const char* toast_msg, uint32_t duration_ms);\n// 【2026-11-22】ホットキーモードの入力バッファ表示。active=false で通常に戻る\nvoid oled_set_hotkey_mode(bool active, const char* buf, int rem_sec);"),
+])
+
 # --- 生成物の自己検算 (2026-11-01 追加) ---
 REQUIRED_MARKERS = [
     ('firmware/src/ble_hid.cc', 'health_acl_run < 0xFFFF'),
@@ -1919,6 +2855,23 @@ REQUIRED_MARKERS = [
     ('firmware/src/ble_hid.cc', 'ms=%u'),
     ('firmware/src/ble_hid.cc', '(int) (BLE_RECONN_TIMEOUT_MS / 1000)'),
     ('firmware/src/ble_hid.cc', 'slot_adv_block'),
+    ('firmware/src/ble_hid.cc', 'was_enable_req'),
+    ('firmware/src/ble_hid.cc', 'adv_force_rearm'),
+    ('firmware/src/ble_hid.cc', 'CMDSTATUS-NOCRED'),
+    ('firmware/src/ble_hid.cc', 'BT CMDCOUNT advE=%u'),
+    ('firmware/src/ble_hid.cc', 'out->cmd_nocredit = cmdstatus_nocredit'),
+    ('firmware/src/remote_log.cc', 'hcmd=%u/%u/%u/%u/%u/%u/%u/%u/%u/%u nocred=%u'),
+    ('firmware/src/ble_hid.cc', 'hci_cmd_read_rssi'),
+    ('firmware/src/remapper.cc', 'void reset_output_queue(void)'),
+    ('firmware/src/ble_hid.cc', 'reset_output_queue();'),
+    ('firmware/src/main.cc', 'void usb_clear_all_reports(void)'),
+    ('firmware/src/ble_hid.cc', 'usb_clear_all_reports();'),
+    ('firmware/src/ble_hid.cc', 'HOTKEY_PREFIX_RELEASE_US'),
+    ('firmware/src/ble_hid.cc', 'HOTKEY exec buf=%s cmd=%s'),
+    ('firmware/src/oled.cc', 'ui_hotkey_active'),
+    ('firmware/src/oled.cc', '"$ %-15.15s (%ds)"'),
+    ('firmware/src/ble_hid.h', 'cmd_adv_enable'),
+    ('firmware/src/ble_hid.cc', '0→1 の実遷移'),
     ('firmware/src/ble_hid.cc', 'SLOT-ADV-BLOCK st=%d'),
     ('firmware/src/ble_hid.cc', 'proact_pending_us = 0; // 切断完了'),
     ('firmware/src/remote_log.cc', 'bof=%u'),

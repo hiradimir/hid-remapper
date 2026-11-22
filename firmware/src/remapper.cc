@@ -2053,6 +2053,29 @@ void reset_state() {
     frame_counter = 0;
 }
 
+// 【2026-11-22】送信キューと「前回送った値」を捨てる。
+// スロット切替をまたぐと、切替前の入力 (押下中のマウスボタンやキー) が
+// キューに残り、新しいスロットで送られ続ける。ホスト側では「押しっぱなし」
+// になり、左クリックが解除されない・キーボードが効かない症状になる。
+// 切替先には RELEASE-ALL で全キー離下を送るので、捨てても押しっぱなしにはならない。
+// prev_reports も消す: 残すと needs_to_be_sent() が「前回と違う」と誤判定し、
+// 同じレポートを永久に積み直す (実測: in=0 dmax=2 で ok が 7/s 伸び続けた)
+void reset_output_queue(void) {
+    or_head = 0;
+    or_tail = 0;
+    or_items = 0;
+    memset(outgoing_reports, 0, sizeof(outgoing_reports));
+    for (unsigned int i = 0; i < report_ids.size(); i++) {
+        uint8_t report_id = report_ids[i];
+        if (reports[report_id] != nullptr) {
+            memset(reports[report_id], 0, report_sizes[report_id]);
+        }
+        if (prev_reports[report_id] != nullptr) {
+            memset(prev_reports[report_id], 0, report_sizes[report_id]);
+        }
+    }
+}
+
 void set_monitor_enabled(bool enabled) {
     if (monitor_enabled != enabled) {
         monitor_input_state.clear();

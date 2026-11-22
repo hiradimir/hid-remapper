@@ -101,6 +101,21 @@ extern "C" void usb_clear_kbd_report(void) {
         tud_hid_n_report(0, 2, zero_kbd, sizeof(zero_kbd));
     }
 }
+
+// 【2026-11-22】BLE へ戻るときに USB 側の押下状態も消す。
+// 以前はキーボード (report_id 2) だけ消していたため、USB モード中に
+// 左クリックを押すと PC 側に「押下中」が残り、BLE に戻っても解除されなかった
+// (実測: 切替中に USB モードで操作 → 以後ずっと左クリックが効きっぱなし)。
+// マウス (1) とコンシューマ (3) もゼロレポートで明示的に離す
+extern "C" void usb_clear_all_reports(void) {
+    if (!tud_mounted() || tud_suspended()) return;
+    uint8_t zero_kbd[16] = {0};
+    uint8_t zero_mouse[8] = {0};
+    uint8_t zero_consumer[4] = {0};
+    tud_hid_n_report(0, 2, zero_kbd, sizeof(zero_kbd));
+    tud_hid_n_report(0, 1, zero_mouse, sizeof(zero_mouse));
+    tud_hid_n_report(0, 3, zero_consumer, sizeof(zero_consumer));
+}
 #endif
 
 // =========================================================================

@@ -167,6 +167,11 @@ static int8_t ss_dy = 1;
 
 static char ui_toast_msg[32] = "";
 static uint32_t ui_toast_until_ms = 0;
+// 【2026-11-22】ホットキーモード (Cmd+Ctrl+Alt を離した後) の入力バッファ表示。
+// Line3 を占有し、残り秒数も出す。空なら通常の Line3 表示に戻る
+static char ui_hotkey_buf[24] = "";
+static volatile int ui_hotkey_rem_sec = 0;
+static volatile bool ui_hotkey_active = false;
 static volatile bool ui_radio_off = false;
 static volatile int ui_rem_pairing_sec = 0;
 static volatile int ui_rem_reconnect_sec = 0;
@@ -395,6 +400,19 @@ void oled_notify_tx(void) {
     ui_tx_timer = 3;
     need_redraw = true;
     oled_notify_activity();
+}
+
+// 【2026-11-22】ホットキーモードの入力バッファを Line3 に表示する。
+// active=false で通常表示に戻る。rem_sec は残り秒数 (タイムアウト表示用)
+void oled_set_hotkey_mode(bool active, const char* buf, int rem_sec) {
+    ui_hotkey_active = active;
+    if (buf != nullptr) {
+        strncpy(ui_hotkey_buf, buf, sizeof(ui_hotkey_buf) - 1);
+        ui_hotkey_buf[sizeof(ui_hotkey_buf) - 1] = '\0';
+    } else {
+        ui_hotkey_buf[0] = '\0';
+    }
+    ui_hotkey_rem_sec = rem_sec;
 }
 
 void oled_show_toast(const char* toast_msg, uint32_t duration_ms) {
@@ -632,7 +650,11 @@ void oled_task(void) {
 
     // Line 3: リアルタイムイベント通知 または フルMACアドレス (21 chars)
     char line3[32];
-    if (ui_toast_until_ms > now_ms && ui_toast_msg[0] != '\0') {
+    if (ui_hotkey_active) {
+        // ホットキーモード中は Line3 を占有する。
+        // 例: "$ s2            (4s)"
+        snprintf(line3, sizeof(line3), "$ %-15.15s (%ds)", ui_hotkey_buf, ui_hotkey_rem_sec);
+    } else if (ui_toast_until_ms > now_ms && ui_toast_msg[0] != '\0') {
         snprintf(line3, sizeof(line3), "%-21.21s", ui_toast_msg);
     } else if (ui_bt_state == OLED_BT_CONNECTED && ui_peer_addr[0] != '\0') {
         snprintf(line3, sizeof(line3), "\x7F %-18.18s", ui_peer_addr);
