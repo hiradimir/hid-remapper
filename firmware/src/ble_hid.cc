@@ -625,8 +625,6 @@ static volatile bool switch_pending = false;
 
 // スロット切替・ON/OFF トグルの受付禁止時間 (3 秒)。切替直後の連続操作による
 // BT 状態の不整合を防ぐ保険。全消去・ボンド消去・ペアリングは対象外
-#define SWITCH_LOCK_US (3000000ULL)
-static uint64_t switch_lock_until_us = 0;
 
 
 
@@ -1510,18 +1508,12 @@ void ble_switch_slot(int slot) {
     // が対象で、制御経路のロックは BL-43 P1 の仮説として追加されたもの。
     // 実機で「ロック保持中のアドレス変更が広告を壊す」ことが判明したため戻した (BL-45)
 
-    // 切替・ON/OFFトグル直後の連続操作を禁止（BT 状態の不整合防止）。
-    // 受け付けた時点から SWITCH_LOCK_US の間は切替系ホットキーを無視する
-    uint64_t now_us = time_us_64();
-    if (switch_lock_until_us != 0 && now_us < switch_lock_until_us) {
-        printf("[BT] Slot switch locked (%llu ms left)\r\n",
-               (unsigned long long)((switch_lock_until_us - now_us) / 1000));
-        oled_show_toast("Can't switch now", 1500);
-        remote_log_eventf("SWITCH-LOCKED ignored slot=%d", slot + 1);
-        return;
-    }
-    switch_lock_until_us = now_us + SWITCH_LOCK_US;
-
+    // 【2026-11-22】切替直後の 3 秒ロックを撤去した。
+    // 旧方式 (Cmd+Ctrl+F1〜F4 の同時押し) は、キーを押している間ずっと
+    // ble_switch_slot() が呼ばれるため、2 回目以降を弾く必要があった。
+    // 新方式 (プレフィックス + Enter) は 1 コマンド 1 実行なので暴発せず、
+    // 短時間に 2 回切替えるのは意図的な操作とみなせる。
+    // 実際、3 秒ロックは「連続で切替えたい」ときに理不尽に弾いていた
     ble_switch_slot_locked(slot);
 }
 
@@ -3437,6 +3429,20 @@ static void hk_tick(void) {
     static uint64_t last_update_us = 0;
     if (hk_state != HK_ARMED && hk_state != HK_TYPING) return;
     uint64_t now = time_us_64();
+
+    // 【2026-11-22】タイムアウトの判定もここで行う。
+    // 以前は ble_hid_check_hotkey() (= キー入力時) にしか判定が無かったため、
+    // 放置すると 0s を表示したままモードに居座った (実測)。
+    // キーが来なくても時間だけで抜けるようにする
+    const uint64_t limit = (hk_state == HK_ARMED) ? HOTKEY_ARMED_TIMEOUT_US
+                                                  : HOTKEY_TYPING_TIMEOUT_US;
+    if ((now - hk_state_us) > limit) {
+        remote_log_eventf("HOTKEY timeout (%s) buf=%s",
+                          (hk_state == HK_ARMED) ? "armed" : "typing", hk_buf);
+        hk_reset(nullptr);
+        return;
+    }
+
     if ((now - last_update_us) < 900000ULL) return;
     last_update_us = now;
     hk_update_oled();
@@ -3523,6 +3529,41 @@ static bool hk_execute(void) {
         }
         oled_show_toast("clear 1-4 / all", 2000);
         return false;
+    }
+
+    // os [w|m|i|a] : カレントスロットの OS 表示を手動設定する
+    // 引数なしなら現在値をトーストで見せる。自動判定が外れたときの上書き用
+    if (strncmp(cmd, "os", 2) == 0) {
+        const char* arg = cmd + 2;
+        char cur = slot_os[current_slot];
+        if (arg[0] == '\0') {
+            char msg[32];
+            snprintf(msg, sizeof(msg), "Slot%d OS=%c", current_slot + 1,
+                     (cur == '-' ? '?' : cur));
+            oled_show_toast(msg, 2500);
+            remote_log_eventf("HOTKEY os show slot=%d os=%c", current_slot + 1, cur);
+            return true;
+        }
+        char want = arg[0];
+        if (want >= 'A' && want <= 'Z') want = (char) (want - 'A' + 'a');
+        char os_char = 0;
+        if (want == 'w') os_char = 'W';      // Windows
+        else if (want == 'm') os_char = 'M'; // macOS
+        else if (want == 'i') os_char = 'I'; // iOS/iPadOS
+        else if (want == 'a') os_char = 'A'; // Android
+        else if (want == '-') os_char = '-'; // 未設定に戻す
+        if (os_char == 0 || arg[1] != '\0') {
+            oled_show_toast("os w|m|i|a|-", 2000);
+            return true;
+        }
+        slot_os[current_slot] = os_char;
+        oled_set_slot_os(current_slot, os_char);
+        schedule_save_slot_os(); // 2秒安定後にFlashへ遅延保存
+        char msg[32];
+        snprintf(msg, sizeof(msg), "Slot%d OS -> %c", current_slot + 1, os_char);
+        oled_show_toast(msg, 2500);
+        remote_log_eventf("HOTKEY os set slot=%d os=%c", current_slot + 1, os_char);
+        return true;
     }
 
     // bt / bt toggle : カレントスロットの電波 ON/OFF をトグル
@@ -3758,6 +3799,30 @@ static bool do_send_report_offline(uint8_t interface, const uint8_t* report_with
     return true;
 }
 
+// 【2026-11-22】マウスの縦スクロールの符号を反転する (BLE 経路専用)。
+// Windows スロットのみ do_send_report_ble() から呼ばれる。
+// 理由: macOS/Android/iOS は「自然スクロール」が既定で、物理的な指の動きと
+// 画面の動きが一致する。Windows は逆が既定のため、同じ物理操作で同じ方向に
+// スクロールさせるには Windows 側だけ符号を反転する必要がある。
+//
+// マウスレポートの構造 (our_descriptor.cc):
+//   [0] buttons / [1-2] X / [3-4] Y / [5-6] Wheel / [7-8] AC Pan
+// 横スクロール (AC Pan) は対象外。
+//
+// USB 経路 (do_send_report_usb) は対象外。このプロジェクトは BLE 主体で、
+// USB モードはおまけの位置づけなので、ホスト OS の判定までは行わない。
+void ble_hid_transform_mouse_report(uint8_t* data, uint8_t len) {
+    // data は report_id を含まない生データ。縦スクロール (Wheel) の符号を反転する。
+    // OS 判定は呼び出し側 (do_send_report_ble) で行う。ここでは変換だけを担う
+    if (len < 7) return; // Wheel まで無い
+
+    int16_t wheel = (int16_t) (data[5] | (data[6] << 8));
+    if (wheel == 0) return;
+    wheel = (int16_t) -wheel;
+    data[5] = (uint8_t) (wheel & 0xFF);
+    data[6] = (uint8_t) ((wheel >> 8) & 0xFF);
+}
+
 static bool do_send_report_ble(uint8_t interface, const uint8_t* report_with_id, uint8_t len) {
     if (ble_hid_check_hotkey(interface, report_with_id, len)) {
         return true;
@@ -3796,6 +3861,16 @@ static bool do_send_report_ble(uint8_t interface, const uint8_t* report_with_id,
     }
 
     // 【2026-11-14】受理されたかを返す。false なら remapper が再試行する
+    // 【2026-11-22】BLE 経路のみ、Windows スロットでは縦スクロールを反転する。
+    // USB 経路 (do_send_report_usb) は対象外。このプロジェクトは BLE 主体で、
+    // USB モードはおまけの位置づけなので、ホスト OS の判定までは行わない。
+    // report_data は const なので、変換用にコピーしてから送る
+    if (report_id == 1 && report_len >= 7 && slot_os[current_slot] == 'W') {
+        uint8_t flipped[MAX_REPORT_SIZE];
+        memcpy(flipped, report_data, report_len);
+        ble_hid_transform_mouse_report(flipped, report_len);
+        return ble_hid_send_report(report_id, flipped, report_len);
+    }
     return ble_hid_send_report(report_id, report_data, report_len);
 }
 

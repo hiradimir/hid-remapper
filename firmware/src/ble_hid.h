@@ -129,6 +129,10 @@ uint16_t ble_hid_get_conn_interval(void);
 uint32_t ble_hid_get_connected_slot_mask(void);
 void ble_hid_get_health(ble_hid_health_t* out);
 
+// 【2026-11-22】OS に応じてマウスの縦スクロールを反転する (Windows のみ)。
+// send_report() が送出直前に呼ぶ。data は report_id を含まない生データ
+void ble_hid_transform_mouse_report(uint8_t* data, uint8_t len);
+
 // ホットキー判定（スロット切替・ペアリングモード・ボンド消去）
 bool ble_hid_check_hotkey(uint8_t interface, const uint8_t* report_with_id, uint8_t len);
 
@@ -148,6 +152,9 @@ void usb_clear_all_reports(void);
 // ENABLE_BLE=OFF 時のインラインスタブ（呼び出し側のオーバーヘッドを完全にゼロ化）
 static inline void ble_hid_init(void) {}
 static inline void ble_hid_task(void) {}
+static inline void ble_hid_transform_mouse_report(uint8_t* data, uint8_t len) {
+    (void)data; (void)len;
+}
 static inline bool ble_hid_is_connected(void) { return false; }
 static inline bool ble_hid_is_tx_stalled(void) { return false; }
 static inline bool ble_hid_is_dormant(void) { return false; }
