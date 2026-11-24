@@ -668,13 +668,15 @@ void oled_task(void) {
         snprintf(line3, sizeof(line3), "%-21.21s", ui_toast_msg);
     } else if ((ui_bt_state == OLED_BT_CONNECTED && ui_peer_addr[0] != '\0') ||
                ui_p1_dev[0] != '-' || ui_p2_dev[0] != '-') {
-        // 【2026-11-24】USB デバイス情報とピアアドレスを 2 秒ごとに交互表示する。
+        // 【2026-11-24】USB デバイス情報とピアアドレスを 5 秒ごとに交互表示する。
         // 4 行を使い切っており (Line1=1-4 / Line2=5-8 / Line3=通知)、両方を
         // 同時に出す余裕がないため。頻繁に見る情報ではないので交互で足りる。
         // 優先順位: ホットキー入力 > トースト > このフリップ
         const bool show_peer = (ui_bt_state == OLED_BT_CONNECTED &&
                                 ui_peer_addr[0] != '\0');
-        const bool flip_peer = ((now_ms / 2000) & 1) == 0;
+        // 2 秒では切り替わりが早すぎて読みづらい (実機の感想)。
+        // 頻繁に見る情報ではないので 5 秒に落ち着かせた
+        const bool flip_peer = ((now_ms / 5000) & 1) == 0;
         if (show_peer &&
             (flip_peer || (ui_p1_dev[0] == '-' && ui_p2_dev[0] == '-'))) {
             line3_is_peer = true;
