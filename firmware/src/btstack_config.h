@@ -20,15 +20,22 @@
 #define HCI_ACL_CHUNK_SIZE_ALIGNMENT 4
 
 // ペアリング・デバイスDB設定
-#define MAX_NR_LE_DEVICE_DB_ENTRIES 4
-#define NVM_NUM_DEVICE_DB_ENTRIES   4
+// 【2026-11-24】4 → 8。スロット数を 8 に拡張するため。
+// Flash の TLV 領域は 12KB (PICO_FLASH_BANK_STORAGE_OFFSET=0x1FD000) あり、
+// 1 エントリ約 100 バイトなので 8 でも余裕がある
+#define MAX_NR_LE_DEVICE_DB_ENTRIES 8
+#define NVM_NUM_DEVICE_DB_ENTRIES   8
 
 // メモリ・バッファ設定
 #define HCI_ACL_PAYLOAD_SIZE (1691 + 4)
 #define MAX_NR_HCI_CONNECTIONS 1
 #define MAX_NR_GATT_CLIENTS 1
-#define MAX_NR_WHITELIST_ENTRIES 4
-#define MAX_NR_SM_LOOKUP_ENTRIES 3
+// 【2026-11-24】リゾルビングリストも DB と同数にする。
+// これが 4 だと 5 台目以降の RPA ホストを accept list で照合できない
+#define MAX_NR_WHITELIST_ENTRIES 8
+// SM のルックアップはペアリング処理中の一時テーブル。同時ペアリングは 1 台
+// だが、DB サイズに合わせて余裕を持たせる
+#define MAX_NR_SM_LOOKUP_ENTRIES 8
 #define MAX_NR_SERVICE_RECORD_ITEMS 1
 
 // 【BL-43】cyw43 共有バス オーバーラン防止 (上流 pico-examples 準拠)

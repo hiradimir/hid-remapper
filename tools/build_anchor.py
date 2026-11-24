@@ -2649,12 +2649,20 @@ bool ble_hid_check_hotkey(uint8_t interface, const uint8_t* report_with_id, uint
                 hk_state = HK_PREFIX_HOLD;
                 hk_state_us = now;
                 hk_prefix_release_us = 0;
-                consumed = true;
+                // 【2026-11-24】ここで消費してはいけない。3 つ目を押した瞬間の
+                // レポートには「その修飾キーの押下」が入っており、消費すると
+                // ホストは修飾キーが押されたことを知らないまま次のキーを受け取る。
+                // 実測: Ctrl+Alt+Cmd+F12 を押すとホストには Ctrl+Alt+F12 が届いた
+                // (Cmd の押下が消えた)。プレフィックス待機中は常に通す
+                consumed = false;
             }
             break;
         }
         case HK_PREFIX_HOLD: {
-            consumed = true;
+            // 【2026-11-24】待機中は常に通す。修飾キーの押下/離上をホストへ
+            // 届けておかないと、中断時 (別キーが押された) に修飾キーが欠けた
+            // 状態のショートカットがホストへ渡ってしまう
+            consumed = false;
             if (!ctrl && !gui && !alt) {
                 // 3つとも離れた → モード成立
                 hk_state = HK_ARMED;
@@ -2928,6 +2936,161 @@ static inline void ble_hid_transform_mouse_report(uint8_t* data, uint8_t len) {
 ])
 
 
+# --- 2026-11-24 (wake100): スロット数を 4 → 8 に拡張 ---
+# BLE_MAX_SLOTS は ble_hid.h に置き、btstack_config.h の NVM_NUM_DEVICE_DB_ENTRIES と
+# 一致することを ble_hid.cc の static_assert で担保する (片方だけ変える事故の防止)。
+# ENABLE_BLE の外に置くのは、OLED 側が BLE オフのビルドでも参照するため。
+patch(WT + '/firmware/src/btstack_config.h', [
+    ("#define MAX_NR_LE_DEVICE_DB_ENTRIES 4\n#define NVM_NUM_DEVICE_DB_ENTRIES   4",
+     "// 【2026-11-24】4 → 8。スロット数を 8 に拡張するため。\n"
+     "// Flash の TLV 領域は 12KB (PICO_FLASH_BANK_STORAGE_OFFSET=0x1FD000) あり、\n"
+     "// 1 エントリ約 100 バイトなので 8 でも余裕がある\n"
+     "#define MAX_NR_LE_DEVICE_DB_ENTRIES 8\n#define NVM_NUM_DEVICE_DB_ENTRIES   8"),
+    ("#define MAX_NR_WHITELIST_ENTRIES 1\n#define MAX_NR_SM_LOOKUP_ENTRIES 3",
+     "// 【2026-11-24】リゾルビングリストも DB と同数にする。\n"
+     "// これが 4 だと 5 台目以降の RPA ホストを accept list で照合できない\n"
+     "#define MAX_NR_WHITELIST_ENTRIES 8\n"
+     "// SM のルックアップはペアリング処理中の一時テーブル。同時ペアリングは 1 台\n"
+     "// だが、DB サイズに合わせて余裕を持たせる\n"
+     "#define MAX_NR_SM_LOOKUP_ENTRIES 8"),
+])
+
+patch(WT + '/firmware/src/ble_hid.h', [
+    ("typedef bool (*ble_send_report_fn_t)(uint8_t interface, const uint8_t* report_with_id, uint8_t len);",
+     "// 【2026-11-24】スロット数。BLE 側と OLED 側の両方が参照する。\n"
+     "// btstack_config.h の NVM_NUM_DEVICE_DB_ENTRIES と必ず一致させること。\n"
+     "// ENABLE_BLE の外に置く: OLED 側は BLE オフのビルドでもこの値を参照するため\n"
+     "#define BLE_MAX_SLOTS 8\n\n"
+     "typedef bool (*ble_send_report_fn_t)(uint8_t interface, const uint8_t* report_with_id, uint8_t len);"),
+])
+
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ("#define MAX_SLOTS NVM_NUM_DEVICE_DB_ENTRIES",
+     "// 【2026-11-24】スロット数を 8 に拡張。ble_hid.h の BLE_MAX_SLOTS と\n"
+     "// btstack_config.h の NVM_NUM_DEVICE_DB_ENTRIES に一致させる\n"
+     "#define MAX_SLOTS BLE_MAX_SLOTS\n"
+     "static_assert(MAX_SLOTS == NVM_NUM_DEVICE_DB_ENTRIES,\n"
+     "              \"BLE_MAX_SLOTS must match NVM_NUM_DEVICE_DB_ENTRIES\");"),
+    ("static char slot_os[MAX_SLOTS] = {'-', '-', '-', '-'};",
+     "// 【2026-11-24】スロット数が可変になったので実行時初期化にした。\n"
+     "// 固定初期化子 {'-','-','-','-'} だと 5 個目以降が 0 (NUL) になり表示が壊れる\n"
+     "static char slot_os[MAX_SLOTS];"),
+    ("    for (int i = 0; i < 4; i++) {\n"
+     "        oled_set_slot_bonded(i, (slot_bonded_mask & (1 << i)) != 0);\n"
+     "        oled_set_slot_os(i, slot_os[i]);\n"
+     "    }",
+     "    // 【2026-11-24】4 固定だとスロット 5-8 の表示が初期化されない\n"
+     "    for (int i = 0; i < MAX_SLOTS; i++) {\n"
+     "        oled_set_slot_bonded(i, (slot_bonded_mask & (1 << i)) != 0);\n"
+     "        oled_set_slot_os(i, slot_os[i]);\n"
+     "    }"),
+    ("    for (int i = 0; i < 4; i++) {\n"
+     "        oled_set_slot_bonded(i, false);\n"
+     "        slot_os[i] = '-';\n"
+     "        oled_set_slot_os(i, '-');\n"
+     "    }",
+     "    // 【2026-11-24】4 固定だとスロット 5-8 のボンド表示と OS が消えない\n"
+     "    for (int i = 0; i < MAX_SLOTS; i++) {\n"
+     "        oled_set_slot_bonded(i, false);\n"
+     "        slot_os[i] = '-';\n"
+     "        oled_set_slot_os(i, '-');\n"
+     "    }"),
+    ("// コマンドを解析して実行する。戻り値 true = 実行した (モード終了)",
+     "// 【2026-11-24】数字 1 文字をスロット番号に変換する。範囲外なら -1。\n"
+     "// MAX_SLOTS が 8 なので '1'..'8' を受け付ける\n"
+     "static int hk_digit_to_slot(char c) {\n"
+     "    if (c < '1' || c > '9') return -1;\n"
+     "    int slot = c - '1';\n"
+     "    return (slot < MAX_SLOTS) ? slot : -1;\n"
+     "}\n"
+     "\n"
+     "// コマンドを解析して実行する。戻り値 true = 実行した (モード終了)"),
+    ("    // s1..s4 : スロット切替",
+     "    // s1..s8 : スロット切替"),
+    ("    if (cmd[0] == 's' && cmd[1] >= '1' && cmd[1] <= '4' && cmd[2] == '\\0') {\n        int slot = cmd[1] - '1';",
+     "    if (cmd[0] == 's' && cmd[2] == '\\0' && hk_digit_to_slot(cmd[1]) >= 0) {\n        int slot = hk_digit_to_slot(cmd[1]);"),
+    ("    // p1..p4 : ペアリングモード (カレントスロットのみ)\n"
+     "    if (cmd[0] == 'p' && cmd[1] >= '1' && cmd[1] <= '4' && cmd[2] == '\\0') {\n        int slot = cmd[1] - '1';",
+     "    // p1..p8 : ペアリングモード (カレントスロットのみ)\n"
+     "    if (cmd[0] == 'p' && cmd[2] == '\\0' && hk_digit_to_slot(cmd[1]) >= 0) {\n        int slot = hk_digit_to_slot(cmd[1]);"),
+    ("    // clear 1..4 / clear all / clearall",
+     "    // clear 1..8 / clear all / clearall"),
+    ("        if (arg[0] >= '1' && arg[0] <= '4' && arg[1] == '\\0') {\n            int slot = arg[0] - '1';",
+     "        if (arg[1] == '\\0' && hk_digit_to_slot(arg[0]) >= 0) {\n            int slot = hk_digit_to_slot(arg[0]);"),
+    ('        oled_show_toast("clear 1-4 / all", 2000);',
+     '        oled_show_toast("clear 1-8 / all", 2000);'),
+])
+
+patch(WT + '/firmware/src/oled.cc', [
+    ("static volatile bool ui_slot_bonded[4] = {false, false, false, false};\n"
+     "static volatile char ui_slot_os[4] = {'-', '-', '-', '-'};",
+     "// 【2026-11-24】スロット数を 8 に拡張 (ble_hid.h の BLE_MAX_SLOTS)。\n"
+     "// OLED は Line1 に 1-4、Line2 に 5-8 を出す\n"
+     "static volatile bool ui_slot_bonded[BLE_MAX_SLOTS];\n"
+     "static volatile char ui_slot_os[BLE_MAX_SLOTS];"),
+    ("    if (slot < 4 && ui_slot_bonded[slot] != bonded) {",
+     "    if (slot < BLE_MAX_SLOTS && ui_slot_bonded[slot] != bonded) {"),
+    ("    if (slot < 4 && ui_slot_os[slot] != os_char) {",
+     "    if (slot < BLE_MAX_SLOTS && ui_slot_os[slot] != os_char) {"),
+    ("    // Line 1: 各スロット状態 1:%c%c 2:%c%c 3:%c%c 4:%c%c\n"
+     "    // (各 glyph は 6px 幅のため、最大 21 chars まで描画)\n"
+     "    char line1[24];\n"
+     "    char s_os[4];\n"
+     "    char s_sym[4];\n"
+     "    for (int i = 0; i < 4; i++) {",
+     "    // Line 1/2: 各スロット状態 (Line1 に 1-4、Line2 に 5-8)\n"
+     "    // (各 glyph は 6px 幅のため、最大 21 chars まで描画)\n"
+     "    char line1[24];\n"
+     "    char line2[24];\n"
+     "    char s_os[BLE_MAX_SLOTS];\n"
+     "    char s_sym[BLE_MAX_SLOTS];\n"
+     "    for (int i = 0; i < BLE_MAX_SLOTS; i++) {"),
+    ("    // Line 2: USB 入力デバイス種別 \\x86 1:MS    \\x86 2:KBD  (21 chars)\n"
+     "    char line2[24];\n"
+     "    // P1/P2 の区切りは 2 スペース。右端 col18..20 は WiFi 状態 (BL-39) 用に空ける\n"
+     "    snprintf(line2, sizeof(line2), \"\\x86 1:%-3.3s  \\x86 2:%-3.3s\", ui_p1_dev, ui_p2_dev);",
+     "    // Line 2: スロット 5-8 の状態 (2026-11-24 追加)。\n"
+     "    // USB デバイス情報は Line3 のフリップ表示へ移した\n"
+     "    snprintf(line2, sizeof(line2), \"%c%c%c%c %c%c%c%c %c%c%c%c %c%c%c%c\",\n"
+     "             '5', (ui_current_slot == 4) ? '>' : ':', s_os[4], s_sym[4],\n"
+     "             '6', (ui_current_slot == 5) ? '>' : ':', s_os[5], s_sym[5],\n"
+     "             '7', (ui_current_slot == 6) ? '>' : ':', s_os[6], s_sym[6],\n"
+     "             '8', (ui_current_slot == 7) ? '>' : ':', s_os[7], s_sym[7]);"),
+    ("    char line3[32];\n    if (ui_hotkey_active) {",
+     "    char line3[32];\n"
+     "    // 【2026-11-24】ピアアドレス (17 文字 + アイコン 2) は col0-18 まで使い、\n"
+     "    // 右端 col18-20 の WiFi 欄と 2 文字分重なる。重ねて描くとアドレスが\n"
+     "    // 読めなくなるので、アドレス表示中は WiFi を描かない\n"
+     "    bool line3_is_peer = false;\n"
+     "    if (ui_hotkey_active) {"),
+    ("    } else if (ui_bt_state == OLED_BT_CONNECTED && ui_peer_addr[0] != '\\0') {\n"
+     "        snprintf(line3, sizeof(line3), \"\\x7F %-18.18s\", ui_peer_addr);",
+     "    } else if ((ui_bt_state == OLED_BT_CONNECTED && ui_peer_addr[0] != '\\0') ||\n"
+     "               ui_p1_dev[0] != '-' || ui_p2_dev[0] != '-') {\n"
+     "        // 【2026-11-24】USB デバイス情報とピアアドレスを 2 秒ごとに交互表示する。\n"
+     "        // 4 行を使い切っており (Line1=1-4 / Line2=5-8 / Line3=通知)、両方を\n"
+     "        // 同時に出す余裕がないため。頻繁に見る情報ではないので交互で足りる。\n"
+     "        // 優先順位: ホットキー入力 > トースト > このフリップ\n"
+     "        const bool show_peer = (ui_bt_state == OLED_BT_CONNECTED &&\n"
+     "                                ui_peer_addr[0] != '\\0');\n"
+     "        const bool flip_peer = ((now_ms / 2000) & 1) == 0;\n"
+     "        if (show_peer &&\n"
+     "            (flip_peer || (ui_p1_dev[0] == '-' && ui_p2_dev[0] == '-'))) {\n"
+     "            line3_is_peer = true;\n"
+     "            snprintf(line3, sizeof(line3), \"\\x7F %-18.18s\", ui_peer_addr);\n"
+     "        } else {\n"
+     "            snprintf(line3, sizeof(line3), \"\\x86 1:%-3.3s \\x86 2:%-3.3s\",\n"
+     "                     ui_p1_dev, ui_p2_dev);\n"
+     "        }"),
+    ("    if (ui_wifi_str[0] != '\\0') {\n        draw_string_6x8(18 * 6, 16, ui_wifi_str);\n    }",
+     "    // 【2026-11-24】WiFi 状態は Line2 がスロット 5-8 になったため Line3 右端へ移した。\n"
+     "    // ただしピアアドレス表示中 (col18 まで使う) は重なるので描かない\n"
+     "    if (ui_wifi_str[0] != '\\0' && !line3_is_peer) {\n"
+     "        draw_string_6x8(18 * 6, 24, ui_wifi_str);\n"
+     "    }"),
+])
+
+
 # --- 生成物の自己検算 (2026-11-01 追加) ---
 REQUIRED_MARKERS = [
     ('firmware/src/ble_hid.cc', 'health_acl_run < 0xFFFF'),
@@ -3018,6 +3181,17 @@ REQUIRED_MARKERS = [
     ('firmware/src/remote_log.cc', 'bof=%u'),
     ('firmware/src/ble_hid.cc', 'saved_bonded_mask_cache'),
     ('firmware/src/ble_hid.cc', 'saved_slot_peers_valid'),
+    # 2026-11-24 (wake100): スロット 8 拡張
+    ('firmware/src/btstack_config.h', '#define NVM_NUM_DEVICE_DB_ENTRIES   8'),
+    ('firmware/src/btstack_config.h', '#define MAX_NR_WHITELIST_ENTRIES 8'),
+    ('firmware/src/ble_hid.h', '#define BLE_MAX_SLOTS 8'),
+    ('firmware/src/ble_hid.cc', 'BLE_MAX_SLOTS must match NVM_NUM_DEVICE_DB_ENTRIES'),
+    ('firmware/src/ble_hid.cc', 'static char slot_os[MAX_SLOTS];'),
+    ('firmware/src/ble_hid.cc', 'static int hk_digit_to_slot(char c)'),
+    ('firmware/src/ble_hid.cc', 'clear 1-8 / all'),
+    ('firmware/src/oled.cc', 'ui_slot_bonded[BLE_MAX_SLOTS]'),
+    ('firmware/src/oled.cc', 'Line2 に 5-8'),
+    ('firmware/src/oled.cc', 'line3_is_peer'),
 ]
 for _rel, _needle in REQUIRED_MARKERS:
     _txt = open(WT + '/' + _rel).read()

@@ -57,7 +57,11 @@ extern volatile uint64_t last_real_ingest_us; // 【2026-11-14】人間の最終
 // BT-OFF（完全沈黙/STANDBY_SILENT）状態を保存する独自タグ ID ('R' 'O' 'F' 'F')
 #define TLV_TAG_RADIO_OFF 0x524f4646
 
-#define MAX_SLOTS NVM_NUM_DEVICE_DB_ENTRIES
+// 【2026-11-24】スロット数を 8 に拡張。ble_hid.h の BLE_MAX_SLOTS と
+// btstack_config.h の NVM_NUM_DEVICE_DB_ENTRIES に一致させる
+#define MAX_SLOTS BLE_MAX_SLOTS
+static_assert(MAX_SLOTS == NVM_NUM_DEVICE_DB_ENTRIES,
+              "BLE_MAX_SLOTS must match NVM_NUM_DEVICE_DB_ENTRIES");
 
 typedef struct {
     uint8_t valid;
@@ -76,7 +80,9 @@ static uint8_t saved_bonded_mask_cache = 0xFF;
 static slot_peer_t saved_slot_peers_cache[MAX_SLOTS];
 static bool saved_slot_peers_valid = false;
 static uint8_t slot_salts[MAX_SLOTS];
-static char slot_os[MAX_SLOTS] = {'-', '-', '-', '-'};
+// 【2026-11-24】スロット数が可変になったので実行時初期化にした。
+// 固定初期化子 {'-','-','-','-'} だと 5 個目以降が 0 (NUL) になり表示が壊れる
+static char slot_os[MAX_SLOTS];
 static bool radio_off_saved = false;
 static uint16_t ble_conn_latency = 0;
 static uint16_t ble_conn_timeout = 0;
@@ -1143,7 +1149,7 @@ static void load_current_slot(void) {
     printf("[BT] Bonded devices in DB: %d, slot_bonded_mask: 0x%02X\r\n", num_bonded, slot_bonded_mask);
     oled_set_slot(current_slot);
     oled_set_bt_state(OLED_BT_DISCONNECTED);
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < MAX_SLOTS; i++) {
         oled_set_slot_bonded(i, (slot_bonded_mask & (1 << i)) != 0);
         oled_set_slot_os(i, slot_os[i]);
     }
@@ -3245,7 +3251,7 @@ static void ble_clear_bonds_locked(void) {
     memset(slot_salts, 0, sizeof(slot_salts));
     save_slot_salts();
     printf("[BT] Cleared all bonds from DB and Resolving List (max_entries=%d)\r\n", max_entries);
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < MAX_SLOTS; i++) {
         oled_set_slot_bonded(i, false);
         slot_os[i] = '-';
         oled_set_slot_os(i, '-');
@@ -3466,6 +3472,14 @@ static void hk_compact(char* out, size_t out_size) {
     out[j] = '\0';
 }
 
+// 【2026-11-24】数字 1 文字をスロット番号に変換する。範囲外なら -1。
+// MAX_SLOTS が 8 なので '1'..'8' を受け付ける
+static int hk_digit_to_slot(char c) {
+    if (c < '1' || c > '9') return -1;
+    int slot = c - '1';
+    return (slot < MAX_SLOTS) ? slot : -1;
+}
+
 // コマンドを解析して実行する。戻り値 true = 実行した (モード終了)
 static bool hk_execute(void) {
     char cmd[HOTKEY_BUF_MAX + 1];
@@ -3482,13 +3496,13 @@ static bool hk_execute(void) {
         return true;
     }
 
-    // s1..s4 : スロット切替
+    // s1..s8 : スロット切替
     // 【2026-11-22】カレントスロットを指定した場合は何もしない。
     // ble_switch_slot() は同一スロットを「電波 ON/OFF のトグル」として扱う
     // (旧 F キー方式の名残)。今は bt / bt toggle がその役目なので、
     // s1 で s1 に居るときに BT が切れるのは直感に反する
-    if (cmd[0] == 's' && cmd[1] >= '1' && cmd[1] <= '4' && cmd[2] == '\0') {
-        int slot = cmd[1] - '1';
+    if (cmd[0] == 's' && cmd[2] == '\0' && hk_digit_to_slot(cmd[1]) >= 0) {
+        int slot = hk_digit_to_slot(cmd[1]);
         if (slot == current_slot) {
             char msg[32];
             snprintf(msg, sizeof(msg), "Already Slot %d", slot + 1);
@@ -3502,16 +3516,16 @@ static bool hk_execute(void) {
         return true;
     }
 
-    // p1..p4 : ペアリングモード (カレントスロットのみ)
-    if (cmd[0] == 'p' && cmd[1] >= '1' && cmd[1] <= '4' && cmd[2] == '\0') {
-        int slot = cmd[1] - '1';
+    // p1..p8 : ペアリングモード (カレントスロットのみ)
+    if (cmd[0] == 'p' && cmd[2] == '\0' && hk_digit_to_slot(cmd[1]) >= 0) {
+        int slot = hk_digit_to_slot(cmd[1]);
         send_all_release_reports();
         remote_log_eventf("HOTKEY pairing=%d (cmd)", slot + 1);
         ble_enter_pairing_mode(slot);
         return true;
     }
 
-    // clear 1..4 / clear all / clearall
+    // clear 1..8 / clear all / clearall
     if (strncmp(cmd, "clear", 5) == 0) {
         const char* arg = cmd + 5;
         if (strcmp(arg, "all") == 0) {
@@ -3520,14 +3534,14 @@ static bool hk_execute(void) {
             ble_clear_bonds();
             return true;
         }
-        if (arg[0] >= '1' && arg[0] <= '4' && arg[1] == '\0') {
-            int slot = arg[0] - '1';
+        if (arg[1] == '\0' && hk_digit_to_slot(arg[0]) >= 0) {
+            int slot = hk_digit_to_slot(arg[0]);
             send_all_release_reports();
             remote_log_eventf("HOTKEY clear slot=%d (cmd)", slot + 1);
             ble_clear_slot_bonds(slot);
             return true;
         }
-        oled_show_toast("clear 1-4 / all", 2000);
+        oled_show_toast("clear 1-8 / all", 2000);
         return false;
     }
 
@@ -3644,12 +3658,20 @@ bool ble_hid_check_hotkey(uint8_t interface, const uint8_t* report_with_id, uint
                 hk_state = HK_PREFIX_HOLD;
                 hk_state_us = now;
                 hk_prefix_release_us = 0;
-                consumed = true;
+                // 【2026-11-24】ここで消費してはいけない。3 つ目を押した瞬間の
+                // レポートには「その修飾キーの押下」が入っており、消費すると
+                // ホストは修飾キーが押されたことを知らないまま次のキーを受け取る。
+                // 実測: Ctrl+Alt+Cmd+F12 を押すとホストには Ctrl+Alt+F12 が届いた
+                // (Cmd の押下が消えた)。プレフィックス待機中は常に通す
+                consumed = false;
             }
             break;
         }
         case HK_PREFIX_HOLD: {
-            consumed = true;
+            // 【2026-11-24】待機中は常に通す。修飾キーの押下/離上をホストへ
+            // 届けておかないと、中断時 (別キーが押された) に修飾キーが欠けた
+            // 状態のショートカットがホストへ渡ってしまう
+            consumed = false;
             if (!ctrl && !gui && !alt) {
                 // 3つとも離れた → モード成立
                 hk_state = HK_ARMED;

@@ -146,8 +146,10 @@ static volatile oled_bt_state_t cur_bt_state = OLED_BT_DISCONNECTED;
 static volatile bool ui_ble_mode = true;
 static volatile oled_bt_state_t ui_bt_state = OLED_BT_DISCONNECTED;
 static volatile uint8_t ui_current_slot = 0;
-static volatile bool ui_slot_bonded[4] = {false, false, false, false};
-static volatile char ui_slot_os[4] = {'-', '-', '-', '-'};
+// 【2026-11-24】スロット数を 8 に拡張 (ble_hid.h の BLE_MAX_SLOTS)。
+// OLED は Line1 に 1-4、Line2 に 5-8 を出す
+static volatile bool ui_slot_bonded[BLE_MAX_SLOTS];
+static volatile char ui_slot_os[BLE_MAX_SLOTS];
 static char ui_p1_dev[4] = "---";
 static char ui_p2_dev[4] = "---";
 static char ui_status_msg[32] = "Remapper [Slot 1]";
@@ -341,14 +343,14 @@ void oled_set_bt_state(oled_bt_state_t state) {
 }
 
 void oled_set_slot_bonded(uint8_t slot, bool bonded) {
-    if (slot < 4 && ui_slot_bonded[slot] != bonded) {
+    if (slot < BLE_MAX_SLOTS && ui_slot_bonded[slot] != bonded) {
         ui_slot_bonded[slot] = bonded;
         need_redraw = true;
     }
 }
 
 void oled_set_slot_os(uint8_t slot, char os_char) {
-    if (slot < 4 && ui_slot_os[slot] != os_char) {
+    if (slot < BLE_MAX_SLOTS && ui_slot_os[slot] != os_char) {
         ui_slot_os[slot] = os_char;
         need_redraw = true;
     }
@@ -608,12 +610,13 @@ void oled_task(void) {
         snprintf(line0, sizeof(line0), "%s\x86%c%-8s        ", tx_icon, hb_char, out_str);
     }
 
-    // Line 1: 各スロット状態 1:%c%c 2:%c%c 3:%c%c 4:%c%c
+    // Line 1/2: 各スロット状態 (Line1 に 1-4、Line2 に 5-8)
     // (各 glyph は 6px 幅のため、最大 21 chars まで描画)
     char line1[24];
-    char s_os[4];
-    char s_sym[4];
-    for (int i = 0; i < 4; i++) {
+    char line2[24];
+    char s_os[BLE_MAX_SLOTS];
+    char s_sym[BLE_MAX_SLOTS];
+    for (int i = 0; i < BLE_MAX_SLOTS; i++) {
         if (!ui_slot_bonded[i]) {
             if (i == ui_current_slot && ui_bt_state == OLED_BT_PAIRING) {
                 s_os[i] = (ui_slot_os[i] != '-') ? ui_slot_os[i] : '?';
@@ -643,21 +646,43 @@ void oled_task(void) {
              '3', (ui_current_slot == 2) ? '>' : ':', s_os[2], s_sym[2],
              '4', (ui_current_slot == 3) ? '>' : ':', s_os[3], s_sym[3]);
 
-    // Line 2: USB 入力デバイス種別 \x86 1:MS    \x86 2:KBD  (21 chars)
-    char line2[24];
-    // P1/P2 の区切りは 2 スペース。右端 col18..20 は WiFi 状態 (BL-39) 用に空ける
-    snprintf(line2, sizeof(line2), "\x86 1:%-3.3s  \x86 2:%-3.3s", ui_p1_dev, ui_p2_dev);
+    // Line 2: スロット 5-8 の状態 (2026-11-24 追加)。
+    // USB デバイス情報は Line3 のフリップ表示へ移した
+    snprintf(line2, sizeof(line2), "%c%c%c%c %c%c%c%c %c%c%c%c %c%c%c%c",
+             '5', (ui_current_slot == 4) ? '>' : ':', s_os[4], s_sym[4],
+             '6', (ui_current_slot == 5) ? '>' : ':', s_os[5], s_sym[5],
+             '7', (ui_current_slot == 6) ? '>' : ':', s_os[6], s_sym[6],
+             '8', (ui_current_slot == 7) ? '>' : ':', s_os[7], s_sym[7]);
 
     // Line 3: リアルタイムイベント通知 または フルMACアドレス (21 chars)
     char line3[32];
+    // 【2026-11-24】ピアアドレス (17 文字 + アイコン 2) は col0-18 まで使い、
+    // 右端 col18-20 の WiFi 欄と 2 文字分重なる。重ねて描くとアドレスが
+    // 読めなくなるので、アドレス表示中は WiFi を描かない
+    bool line3_is_peer = false;
     if (ui_hotkey_active) {
         // ホットキーモード中は Line3 を占有する。
         // 例: "$ s2            (4s)"
         snprintf(line3, sizeof(line3), "$ %-15.15s (%ds)", ui_hotkey_buf, ui_hotkey_rem_sec);
     } else if (ui_toast_until_ms > now_ms && ui_toast_msg[0] != '\0') {
         snprintf(line3, sizeof(line3), "%-21.21s", ui_toast_msg);
-    } else if (ui_bt_state == OLED_BT_CONNECTED && ui_peer_addr[0] != '\0') {
-        snprintf(line3, sizeof(line3), "\x7F %-18.18s", ui_peer_addr);
+    } else if ((ui_bt_state == OLED_BT_CONNECTED && ui_peer_addr[0] != '\0') ||
+               ui_p1_dev[0] != '-' || ui_p2_dev[0] != '-') {
+        // 【2026-11-24】USB デバイス情報とピアアドレスを 2 秒ごとに交互表示する。
+        // 4 行を使い切っており (Line1=1-4 / Line2=5-8 / Line3=通知)、両方を
+        // 同時に出す余裕がないため。頻繁に見る情報ではないので交互で足りる。
+        // 優先順位: ホットキー入力 > トースト > このフリップ
+        const bool show_peer = (ui_bt_state == OLED_BT_CONNECTED &&
+                                ui_peer_addr[0] != '\0');
+        const bool flip_peer = ((now_ms / 2000) & 1) == 0;
+        if (show_peer &&
+            (flip_peer || (ui_p1_dev[0] == '-' && ui_p2_dev[0] == '-'))) {
+            line3_is_peer = true;
+            snprintf(line3, sizeof(line3), "\x7F %-18.18s", ui_peer_addr);
+        } else {
+            snprintf(line3, sizeof(line3), "\x86 1:%-3.3s \x86 2:%-3.3s",
+                     ui_p1_dev, ui_p2_dev);
+        }
     } else if (ui_bt_state == OLED_BT_PAIRING) {
         snprintf(line3, sizeof(line3), "Pairing Mode   (%2ds)", ui_rem_pairing_sec);
     } else if (ui_bt_state == OLED_BT_SWITCHING || (ui_slot_bonded[ui_current_slot] && !ui_radio_off && ui_bt_state != OLED_BT_CONNECTED)) {
@@ -682,8 +707,10 @@ void oled_task(void) {
     // BL-39: WiFi 状態 (最大 3 文字) を Line2 右端 (col17, x=102) に描く。
     // Line0 は BT 接続時に "BLE-FAST 11.25ms" で埋まるため、常時見える独立欄として
     // Line2 の末尾 3 文字分を確保した。リモートログ無効時は空文字列で何も出ない
-    if (ui_wifi_str[0] != '\0') {
-        draw_string_6x8(18 * 6, 16, ui_wifi_str);
+    // 【2026-11-24】WiFi 状態は Line2 がスロット 5-8 になったため Line3 右端へ移した。
+    // ただしピアアドレス表示中 (col18 まで使う) は重なるので描かない
+    if (ui_wifi_str[0] != '\0' && !line3_is_peer) {
+        draw_string_6x8(18 * 6, 24, ui_wifi_str);
     }
 
     // 画面へ転送 (Horizontal addressing: Page 0..3)

@@ -9,6 +9,70 @@
 
 ---
 
+## 2026-11-24 `wake100`: スロット数を 4 → 8 に拡張
+
+複数ホストの持ち方を増やしたいという要望から、スロット上限を 4 から 8 にした。
+
+### なぜ 8 が上限か
+
+`slot_bonded_mask` が `uint8_t` (8 ビット) でボンド有無を持つため、**9 以上は型の変更が要る**。
+Flash には余裕がある:
+
+```
+PICO_FLASH_BANK_STORAGE_OFFSET = 0x1FD000 (2084864)
+Flash 全体 2 MiB - オフセット = 12288 バイト (12 KB) = TLV 領域
+BTstack のボンド DB 1 エントリ ≒ 100 バイト → 8 でも 800 バイト程度
+```
+
+### 変更点
+
+| ファイル | 変更 |
+|---|---|
+| `btstack_config.h` | `MAX_NR_LE_DEVICE_DB_ENTRIES` / `NVM_NUM_DEVICE_DB_ENTRIES` 4→8<br>`MAX_NR_WHITELIST_ENTRIES` 4→8 / `MAX_NR_SM_LOOKUP_ENTRIES` 3→8 |
+| `ble_hid.h` | `#define BLE_MAX_SLOTS 8` を **`ENABLE_BLE` の外**に追加 |
+| `ble_hid.cc` | `MAX_SLOTS` を `BLE_MAX_SLOTS` に。<br>**`static_assert` で `NVM_NUM_DEVICE_DB_ENTRIES` との一致を強制** |
+| `ble_hid.cc` | `slot_os[]` を固定初期化子から**実行時初期化**へ (5 個目以降が NUL になるため) |
+| `ble_hid.cc` | `hk_digit_to_slot()` を追加し、`s1..s8` / `p1..p8` / `clear 1..8` に対応 (ハードコードの `'4'` を排除) |
+| `ble_hid.cc` | `for (int i = 0; i < 4; i++)` の OLED 反映ループ 2 箇所を `MAX_SLOTS` に |
+| `oled.cc` | `ui_slot_bonded[]` / `ui_slot_os[]` を `BLE_MAX_SLOTS` に |
+
+**`BLE_MAX_SLOTS` を `ENABLE_BLE` の外に置いた理由**: OLED 側は BLE オフのビルドでも
+この値を参照する。中に置くと `ENABLE_BLE=OFF` + `ENABLE_OLED=ON` で未定義になる。
+
+### OLED レイアウトの組み替え
+
+縦 32px はすでにフル使用 (6x8 フォント x 4 行) で、**5 行目は物理的に作れない**。
+そこで Line 2 を USB デバイス情報からスロット 5-8 に変え、USB 情報を Line 3 へ追い出した。
+
+```
+Line 0: トランスポート + 通信ヘルス
+Line 1: 1-4 のスロット状態
+Line 2: 5-8 のスロット状態   ← 旧: USB デバイス情報
+Line 3: 通知 > USB ⟷ ピアアドレスの 2 秒フリップ   ← 旧: ピアアドレス固定
+```
+
+- 「BT 接続中」と「USB に何が刺さっているか」は共存させる方針 (ルディ指示)
+- 「使用中スロットだけ動的に出す」案は却下 (5 台目で崩れるため固定レイアウト)
+- WiFi 状態 (BL-39) は Line 2 右端から **Line 3 右端**へ移動。ただしピアアドレスは
+  col18 まで使うので、フリップでアドレスを出している間は WiFi を描かない (重なり回避)
+
+### 検証
+
+- `-DENABLE_BLE=OFF -DENABLE_OLED=ON` でもビルドが通ることを確認 (`build-mac24`)
+- `-Wparentheses` 警告 (Line3 フリップの `&&` と `||` の混在) を括弧の明示で解消
+- `tools/build_anchor.py` にパッチ一式を追加 (自己検算 88 → 98 マーカー)
+- ビルド: `firmware/artifacts/remapper_anchor_wake100_slots8.uf2`
+
+### 未検証
+
+実機では未確認。確認したいこと:
+
+1. `s5`〜`s8` で切替でき、ペアリング (`p5`〜`p8`) も通るか
+2. OLED Line 2 に 5-8 が出て、カレントが `>` で動くか
+3. Line 3 のフリップ (USB 情報 ⟷ ピアアドレス) が 2 秒周期で回るか
+4. 8 台ペアリングしても 5 台目以降の RPA ホストが accept list で照合できるか
+   (`MAX_NR_WHITELIST_ENTRIES` を 4 → 8 にした効果)
+
 ## 2026-11-23 実機 soak: 26.9 時間で膠着 0 件（解消とは判断しない）
 
 `wake98` を焼いてから 11/22 18:38 → 11/23 21:32 まで **26 時間 54 分連続稼働**。

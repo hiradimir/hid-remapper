@@ -9,7 +9,7 @@ Raspberry Pi Pico W (RP2040) 1 枚で **BLE HID (マウス / キーボード) �
 このフォークで独自に追加した要素は:
 
 - Dual USB Host (Pico-PIO-USB) — 2 ポートの USB デバイス入力
-- BLE HID (CYW43 + BTstack) — 4 スロットのホストペアリング管理 (スロット切替 / ペアリングモード / ON-OFF トグル)
+- BLE HID (CYW43 + BTstack) — 8 スロットのホストペアリング管理 (スロット切替 / ペアリングモード / ON-OFF トグル)
 - SSD1306 OLED (128x32) 表示 (状態・ポート / スロット情報)
 - TLV 形式の Flash 保存 (設定・スロット & ボンディング DB)
 - OS 自動判定 (Apple / Android Sticky ガード、ATT MTU 判定) と表示手動切替
@@ -42,6 +42,23 @@ RP2040 Pico W / dual USB host (PIO-USB) / OLED SSD1306 128x32
 | GP4 / GP5 | OLED SSD1306 I2C0 SDA / SCL |
 | GP16 / GP17 | UART TX / RX (Debug, 921600 baud) |
 
+### OLED レイアウト (128x32 / 6x8 フォントで 21 文字 x 4 行)
+
+縦 32px をフルに使っており、**5 行目は物理的に作れない**。
+
+| 行 | 内容 |
+|---|---|
+| Line 0 | トランスポート (BLE-FAST / BLE-SLOW / USB-OUT / NO-HOST) + 通信ヘルス点滅 |
+| Line 1 | スロット 1〜4 の状態 (`1>M*` = カレント / 未ボンドは `--`) |
+| Line 2 | スロット 5〜8 の状態 (2026-11-24 追加) |
+| Line 3 | 通知 (優先順): ホットキー入力 > トースト > USB デバイス ⟷ ピアアドレスの 2 秒フリップ |
+
+- A〜 `>` はカレントスロット。`*` 接続中 / `+` ペアリング中 / `~` 待機中
+- Line 3 のフリップは「USB に何が刺さっているか」と「接続中のピアアドレス」を
+  2 秒ごとに交互表示する (両方同時に出す横幅がないため)
+- WiFi 状態 (BL-39、3 文字) は Line 3 右端に出す。ピアアドレス表示中は
+  col18 まで使うので重なりを避けて描かない
+
 ### ホットキー仕様 (2026-11-22 プレフィックス方式に変更)
 
 **プレフィックス**: `Cmd + Ctrl + Alt` を押し、**800ms 以内に全部離す**と
@@ -53,9 +70,9 @@ RP2040 Pico W / dual USB host (PIO-USB) / OLED SSD1306 128x32
 
 | 入力 | 動作 |
 |------|------|
-| `s1` 〜 `s4` | BT スロット切替。カレント指定は `Already Slot N` で無視 |
-| `p1` 〜 `p4` | そのスロットの BT ペアリングモード (カレントのみ有効) |
-| `clear 1` 〜 `clear 4` | そのスロットのボンド消去 (**移動不要・任意スロット**) |
+| `s1` 〜 `s8` | BT スロット切替。カレント指定は `Already Slot N` で無視 |
+| `p1` 〜 `p8` | そのスロットの BT ペアリングモード (カレントのみ有効) |
+| `clear 1` 〜 `clear 8` | そのスロットのボンド消去 (**移動不要・任意スロット**) |
 | `clear all` | ボンド全消去 (Flash DB・コントローラ・解決リスト) |
 | `bt` / `bt toggle` | カレントスロットの電波 ON/OFF トグル (OFF 状態は Flash 保持) |
 | `bt status` | `Radio:ON  Slot2 Conn` を OLED に表示 |
@@ -83,7 +100,7 @@ Usage 0x04〜0x73 の **112 ビットのビットマップ** (`our_descriptor.cc
 
 - `firmware/src/main.cc` — エントリポイント (BL-35 で BLE/OLED の分離済み)
 - `firmware/src/remapper.cc` — リマップ処理・送出制御
-- `firmware/src/ble_hid.cc/.h` — BLE スタック・スロット管理・ホットキー判定 (4 スロット)
+- `firmware/src/ble_hid.cc/.h` — BLE スタック・スロット管理・ホットキー判定 (8 スロット)
 - `firmware/src/oled.cc/.h` — OSD 表示 (BL-33 で接続ハンドシェイク状態 C:E_ K_ M_ 可視化)
 - `firmware/src/platform.h` / `tusb_config_*` — 構成別のビルド切替
 - Flash 保存: TLV 形式 (`PICO_FLASH_BANK_STORAGE_OFFSET=2084864` にスロット & ボンディング DB)

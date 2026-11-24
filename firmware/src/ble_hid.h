@@ -8,6 +8,11 @@
 extern "C" {
 #endif
 
+// 【2026-11-24】スロット数。BLE 側と OLED 側の両方が参照する。
+// btstack_config.h の NVM_NUM_DEVICE_DB_ENTRIES と必ず一致させること。
+// ENABLE_BLE の外に置く: OLED 側は BLE オフのビルドでもこの値を参照するため
+#define BLE_MAX_SLOTS 8
+
 typedef bool (*ble_send_report_fn_t)(uint8_t interface, const uint8_t* report_with_id, uint8_t len);
 
 // BLE ウェッジ観測用のヘルスカウンタ (BL-43/45)。
