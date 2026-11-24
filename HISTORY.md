@@ -111,6 +111,25 @@ Line 3: 通知 > USB ⟷ ピアアドレスの 2 秒フリップ   ← 旧: ピ�
 - WiFi 状態 (BL-39) は Line 2 右端から **Line 3 右端**へ移動。ただしピアアドレスは
   col18 まで使うので、フリップでアドレスを出している間は WiFi を描かない (重なり回避)
 
+### 既存のペアリングを壊さないための移行処理
+
+**見落としやすい罠**: TLV のレコードサイズはスロット数に比例する。4 → 8 にすると
+旧ファームが書いたレコードはサイズが合わず、`len != sizeof(...)` で
+**ボンド情報が全部消える**（実機の 4 台分のペアリングが飛ぶ）。
+
+`btstack_tlv_flash_bank_get_tag()` は `min(buffer_size, tag_len)` しかコピーしない
+（`btstack_tlv_flash_bank.c:419`）ので、小さいバッファで読めば先頭から詰まっている。
+これを使って先頭 4 個を引き継ぐ:
+
+| タグ | 旧サイズ | 移行方法 |
+|---|---|---|
+| `TLV_TAG_SLOT_PEERS` | `sizeof(slot_peer_t) * 4` | 先頭 4 個をそのまま採用。スロット番号は先頭から不変 |
+| `TLV_TAG_SLOT_SALTS` | 4 バイト | 先頭 4 個を採用し、残りは 0 |
+| `TLV_TAG_SLOT_OS` | 4 バイト | 先頭 4 個を採用し、残りを `'-'` で埋める |
+| `TLV_TAG_SLOT_BOND_MASK` | 1 バイト | 変更なし (uint8_t のビットマスクで 8 スロットまで表現可) |
+
+移行が走るとログに `[BT] Migrated slot_peers from 4-slot layout (4 -> 8 slots)` などが出る。
+
 ### 検証
 
 - `-DENABLE_BLE=OFF -DENABLE_OLED=ON` でもビルドが通ることを確認 (`build-mac24`)

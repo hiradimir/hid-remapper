@@ -3091,6 +3091,80 @@ patch(WT + '/firmware/src/oled.cc', [
 ])
 
 
+# --- 2026-11-24 (wake100): 旧 4 スロット TLV レコードからの移行 ---
+# スロット数を 8 にすると、旧ファームが Flash に書いたレコードはサイズが合わず
+# 「読めない → 全部消える」になる。既存のペアリングを壊さないよう、先頭 4 個を
+# 引き継ぐ。btstack_tlv_flash_bank_get_tag は min(buffer_size, tag_len) しか
+# コピーしないので、小さいバッファで 1 回読めば先頭から詰まっている。
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ("static uint8_t slot_bonded_mask = 0;",
+     "// 【2026-11-24】スロット 4 → 8 拡張前の TLV レコードサイズ。\n"
+     "// 旧ファームの Flash には 4 要素分しか入っていないので、そのまま読むと\n"
+     "// サイズ不一致で「ボンド情報が全部消える」。先頭 4 個だけ引き継ぐ移行処理を持つ\n"
+     "#define LEGACY_SLOT_COUNT 4\n"
+     "\n"
+     "static uint8_t slot_bonded_mask = 0;"),
+    ("""static void load_slot_salts(void) {
+    if (!tlv_impl) return;
+    int len = tlv_impl->get_tag(&tlv_context, TLV_TAG_SLOT_SALTS, (uint8_t*)slot_salts, sizeof(slot_salts));
+    if (len != sizeof(slot_salts)) {
+        memset(slot_salts, 0, sizeof(slot_salts));
+    }
+}""",
+     """static void load_slot_salts(void) {
+    if (!tlv_impl) return;
+    memset(slot_salts, 0, sizeof(slot_salts));
+    int len = tlv_impl->get_tag(&tlv_context, TLV_TAG_SLOT_SALTS, (uint8_t*)slot_salts, sizeof(slot_salts));
+    if (len == sizeof(slot_salts)) return;
+    // 【2026-11-24】旧 4 スロット形式からの移行。get_tag は
+    // min(buffer_size, tag_len) をコピーするので、先頭 LEGACY_SLOT_COUNT 個は
+    // すでに入っている。残りは memset 済みの 0 のままでよい
+    // (salt はスロット個別の値なので、先頭 4 個を引き継げばペアリングが維持される)
+    if (len == LEGACY_SLOT_COUNT) {
+        printf("[BT] Migrated slot_salts from 4-slot layout\\r\\n");
+        return;
+    }
+    memset(slot_salts, 0, sizeof(slot_salts));
+}"""),
+    ("""static void load_slot_peers(void) {
+    if (!tlv_impl) return;
+    int len = tlv_impl->get_tag(&tlv_context, TLV_TAG_SLOT_PEERS, (uint8_t*)slot_peers, sizeof(slot_peers));
+    if (len != sizeof(slot_peers)) {
+        memset(slot_peers, 0, sizeof(slot_peers));
+    }
+}""",
+     """static void load_slot_peers(void) {
+    if (!tlv_impl) return;
+    memset(slot_peers, 0, sizeof(slot_peers));
+    int len = tlv_impl->get_tag(&tlv_context, TLV_TAG_SLOT_PEERS, (uint8_t*)slot_peers, sizeof(slot_peers));
+    if (len == sizeof(slot_peers)) return;
+    // 【2026-11-24】旧ファーム (4 スロット) のレコードを引き継ぐ。
+    // get_tag は min(buffer_size, tag_len) をコピーするので先頭 4 個は入っており、
+    // スロット番号は先頭から変わらないためそのままでよい
+    if (len == (int) sizeof(slot_peer_t) * LEGACY_SLOT_COUNT) {
+        printf("[BT] Migrated slot_peers from 4-slot layout (%d -> %d slots)\\r\\n",
+               LEGACY_SLOT_COUNT, MAX_SLOTS);
+        return;
+    }
+    memset(slot_peers, 0, sizeof(slot_peers));
+}"""),
+    ("""    char saved_os[MAX_SLOTS];
+    int len = tlv_impl->get_tag(&tlv_context, TLV_TAG_SLOT_OS, (uint8_t*)saved_os, sizeof(saved_os));
+    if (len == sizeof(saved_os)) {""",
+     """    char saved_os[MAX_SLOTS];
+    memset(saved_os, 0, sizeof(saved_os));
+    int len = tlv_impl->get_tag(&tlv_context, TLV_TAG_SLOT_OS, (uint8_t*)saved_os, sizeof(saved_os));
+    // 【2026-11-24】旧 4 スロット形式 (4 バイト) からの移行。get_tag は
+    // 先頭 4 バイトをコピーして 4 を返すので、残りを '-' で埋めればよい
+    if (len == LEGACY_SLOT_COUNT) {
+        memset(saved_os + LEGACY_SLOT_COUNT, '-', sizeof(saved_os) - LEGACY_SLOT_COUNT);
+        len = sizeof(saved_os);
+        printf("[BT] Migrated slot_os from 4-slot layout\\r\\n");
+    }
+    if (len == sizeof(saved_os)) {"""),
+])
+
+
 # --- 生成物の自己検算 (2026-11-01 追加) ---
 REQUIRED_MARKERS = [
     ('firmware/src/ble_hid.cc', 'health_acl_run < 0xFFFF'),
@@ -3192,6 +3266,9 @@ REQUIRED_MARKERS = [
     ('firmware/src/oled.cc', 'ui_slot_bonded[BLE_MAX_SLOTS]'),
     ('firmware/src/oled.cc', 'Line2 に 5-8'),
     ('firmware/src/oled.cc', 'line3_is_peer'),
+    ('firmware/src/ble_hid.cc', '#define LEGACY_SLOT_COUNT 4'),
+    ('firmware/src/ble_hid.cc', 'Migrated slot_peers from 4-slot layout'),
+    ('firmware/src/ble_hid.cc', 'Migrated slot_os from 4-slot layout'),
 ]
 for _rel, _needle in REQUIRED_MARKERS:
     _txt = open(WT + '/' + _rel).read()

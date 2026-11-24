@@ -69,6 +69,11 @@ typedef struct {
     bd_addr_t addr;
 } slot_peer_t;
 
+// 【2026-11-24】スロット 4 → 8 拡張前の TLV レコードサイズ。
+// 旧ファームの Flash には 4 要素分しか入っていないので、そのまま読むと
+// サイズ不一致で「ボンド情報が全部消える」。先頭 4 個だけ引き継ぐ移行処理を持つ
+#define LEGACY_SLOT_COUNT 4
+
 static uint8_t slot_bonded_mask = 0;
 static slot_peer_t slot_peers[MAX_SLOTS];
 // 【2026-11-16】Flash に書いた値のキャッシュ。接続のたびに無条件で 2 回書き込んで
@@ -962,24 +967,48 @@ static void save_slot_salts(void) {
 
 static void load_slot_salts(void) {
     if (!tlv_impl) return;
+    memset(slot_salts, 0, sizeof(slot_salts));
     int len = tlv_impl->get_tag(&tlv_context, TLV_TAG_SLOT_SALTS, (uint8_t*)slot_salts, sizeof(slot_salts));
-    if (len != sizeof(slot_salts)) {
-        memset(slot_salts, 0, sizeof(slot_salts));
+    if (len == sizeof(slot_salts)) return;
+    // 【2026-11-24】旧 4 スロット形式からの移行。get_tag は
+    // min(buffer_size, tag_len) をコピーするので、先頭 LEGACY_SLOT_COUNT 個は
+    // すでに入っている。残りは memset 済みの 0 のままでよい
+    // (salt はスロット個別の値なので、先頭 4 個を引き継げばペアリングが維持される)
+    if (len == LEGACY_SLOT_COUNT) {
+        printf("[BT] Migrated slot_salts from 4-slot layout\r\n");
+        return;
     }
+    memset(slot_salts, 0, sizeof(slot_salts));
 }
 
 static void load_slot_peers(void) {
     if (!tlv_impl) return;
+    memset(slot_peers, 0, sizeof(slot_peers));
     int len = tlv_impl->get_tag(&tlv_context, TLV_TAG_SLOT_PEERS, (uint8_t*)slot_peers, sizeof(slot_peers));
-    if (len != sizeof(slot_peers)) {
-        memset(slot_peers, 0, sizeof(slot_peers));
+    if (len == sizeof(slot_peers)) return;
+    // 【2026-11-24】旧ファーム (4 スロット) のレコードを引き継ぐ。
+    // get_tag は min(buffer_size, tag_len) をコピーするので先頭 4 個は入っており、
+    // スロット番号は先頭から変わらないためそのままでよい
+    if (len == (int) sizeof(slot_peer_t) * LEGACY_SLOT_COUNT) {
+        printf("[BT] Migrated slot_peers from 4-slot layout (%d -> %d slots)\r\n",
+               LEGACY_SLOT_COUNT, MAX_SLOTS);
+        return;
     }
+    memset(slot_peers, 0, sizeof(slot_peers));
 }
 
 static void load_slot_os(void) {
     if (!tlv_impl) return;
     char saved_os[MAX_SLOTS];
+    memset(saved_os, 0, sizeof(saved_os));
     int len = tlv_impl->get_tag(&tlv_context, TLV_TAG_SLOT_OS, (uint8_t*)saved_os, sizeof(saved_os));
+    // 【2026-11-24】旧 4 スロット形式 (4 バイト) からの移行。get_tag は
+    // 先頭 4 バイトをコピーして 4 を返すので、残りを '-' で埋めればよい
+    if (len == LEGACY_SLOT_COUNT) {
+        memset(saved_os + LEGACY_SLOT_COUNT, '-', sizeof(saved_os) - LEGACY_SLOT_COUNT);
+        len = sizeof(saved_os);
+        printf("[BT] Migrated slot_os from 4-slot layout\r\n");
+    }
     if (len == sizeof(saved_os)) {
         for (int i = 0; i < MAX_SLOTS; i++) {
             char c = saved_os[i];
