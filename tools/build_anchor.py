@@ -3167,6 +3167,85 @@ patch(WT + '/firmware/src/ble_hid.cc', [
 ])
 
 
+# --- 2026-11-26 (wake103): rs=0x08 連鎖と bt OFF の上書きを直す ---
+# 09:52〜09:53 に st=100 (supervision timeout 1 秒) のまま 7 回切断された。
+# 原因は PARAM-REQ の「RESUME から 60 秒間は撃たない」封印。RESUME は
+# 10 秒以上入力が空いた後の再開で出るため、通常操作でも発動し、しかも
+# 切れて繋がるたびに更新されて封印が永久に延長されていた。
+# st が危険域 (<400) のときは封印を無視して優先的に直す。
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ("""        // 【2026-10-31】接続パラメータの再要求。ホスト (macOS) は既定の
+        // (12, 4, 100) = 15ms / latency 4 / supervision timeout 1.0 秒 を押し付ける。
+        // timeout 1 秒は取りこぼし 13 回で切断 (rs=0x08) になるため、
+        // Apple 準拠の値で出し直せるか試す。1 回目は 15ms、2 回目以降は
+        // 11.25ms (Apple が HID 向けに許す下限)。30 秒間隔で最大 3 回。
+        // 受理されたかは BT PARAM (更新完了ログ) の st= で判定する
+        // 復帰直後 (60 秒) は撃たない。スリープ明けはリンクが不安定で、
+        // パラメータ更新要求の直後に rs=0x08 が続いた実測がある (2026-11-01 13:20)
+        // 【2026-11-16】条件を「latency > 0」から「latency > 0 または
+        // timeout が 4 秒未満/不明」に広げた。latency が 0 でも supervision
+        // timeout が短ければ同じように切れるため、latency だけを見ると
+        // 要求が一度も出ない接続が生まれる (実測: スロット 2 は 0 回だった)
+        const bool param_needs_fix = (ble_conn_latency > 0) || (ble_conn_timeout < 400);
+        if (BLE_PARAM_REQ_ENABLE && connected_now && param_needs_fix &&
+            param_req_count < 3 &&
+            (now_us - last_param_req_us) >= 30000000ULL &&
+            (last_resume_us == 0 || (now_us - last_resume_us) >= 60000000ULL)) {""",
+     """        // 【2026-10-31】接続パラメータの再要求。ホスト (macOS) は既定の
+        // (12, 4, 100) = 15ms / latency 4 / supervision timeout 1.0 秒 を押し付ける。
+        // timeout 1 秒は取りこぼし 13 回で切断 (rs=0x08) になるため、
+        // Apple 準拠の値で出し直せるか試す。1 回目は 15ms、2 回目以降は
+        // 11.25ms (Apple が HID 向けに許す下限)。
+        // 受理されたかは BT PARAM (更新完了ログ) の st= で判定する
+        //
+        // 【2026-11-26】**封印条件を「危険度」で分けた**。
+        // 以前は RESUME (10 秒以上入力が空いた後の再開) から 60 秒間は
+        // 無条件に撃たなかった。スリープ明けのリンク不安定を避ける意図だったが、
+        // 通常の入力再開でも RESUME が出るため、st=100 のまま 60 秒間
+        // 手が出せず、その間に rs=0x08 で 7 回切断される実測があった
+        // (2026-11-26 09:52〜09:53)。しかも切れて繋がるたびに RESUME が
+        // 更新されるので封印が永久に延長されていた。
+        //
+        // st が 400 (4 秒) 未満なら「危険」とみなし、RESUME の封印を無視する。
+        // 安全域 (st>=400) のときだけ従来どおり 60 秒待つ。
+        // 【2026-11-16】条件を「latency > 0」から「latency > 0 または
+        // timeout が 4 秒未満/不明」に広げた。latency が 0 でも supervision
+        // timeout が短ければ同じように切れるため、latency だけを見ると
+        // 要求が一度も出ない接続が生まれる (実測: スロット 2 は 0 回だった)
+        const bool param_needs_fix = (ble_conn_latency > 0) || (ble_conn_timeout < 400);
+        // st=400 未満は「切れやすい設定」= RESUME の封印より優先して直す
+        const bool param_dangerous = (ble_conn_timeout < 400);
+        const bool resume_sealed =
+            (!param_dangerous && last_resume_us != 0 &&
+             (now_us - last_resume_us) < 60000000ULL);
+        // 危険なときは 30 秒間隔を 5 秒に縮める (切れて繋がるを繰り返す間に出し切る)
+        const uint64_t param_interval_us = param_dangerous ? 5000000ULL : 30000000ULL;
+        if (BLE_PARAM_REQ_ENABLE && connected_now && param_needs_fix &&
+            !resume_sealed &&
+            (now_us - last_param_req_us) >= param_interval_us) {"""),
+    ("""                    if (is_pairing_mode || current_state == BLE_STATE_PAIRING) {
+                        // Public / Static アドレス直結時の他スロット重複ガード (BL-17)""",
+     """                    // 【2026-11-26】ユーザーが `bt` で電波 OFF にした直後に
+                    // ホストが接続要求を出してくることがある。以前はそれを受け入れて
+                    // CONNECTED に遷移し、OFF 指示が 2 秒で上書きされていた
+                    // (実測: 09:53:41 `bt` OFF -> 09:53:44 CONNECTED)。
+                    // radio_off_saved が立っている間は接続を拒否する
+                    if (radio_off_saved && !is_pairing_mode) {
+                        if (!bl17_reject_in_progress) {
+                            printf("[BT] Rejecting connection: user turned radio OFF\\r\\n");
+                            remote_log_eventf("RADIO-OFF-REJECT slot=%d peer=%s",
+                                              current_slot + 1, current_peer_addr);
+                            bl17_reject_in_progress = true;
+                            gap_disconnect(con_handle);
+                        }
+                        break;
+                    }
+
+                    if (is_pairing_mode || current_state == BLE_STATE_PAIRING) {
+                        // Public / Static アドレス直結時の他スロット重複ガード (BL-17)"""),
+])
+
+
 # --- 生成物の自己検算 (2026-11-01 追加) ---
 REQUIRED_MARKERS = [
     ('firmware/src/ble_hid.cc', 'health_acl_run < 0xFFFF'),
@@ -3271,6 +3350,10 @@ REQUIRED_MARKERS = [
     ('firmware/src/ble_hid.cc', '#define LEGACY_SLOT_COUNT 4'),
     ('firmware/src/ble_hid.cc', 'Migrated slot_peers from 4-slot layout'),
     ('firmware/src/ble_hid.cc', 'Migrated slot_os from 4-slot layout'),
+    # 2026-11-26 (wake103): rs=0x08 連鎖と bt OFF の上書き
+    ('firmware/src/ble_hid.cc', 'const bool param_dangerous'),
+    ('firmware/src/ble_hid.cc', 'resume_sealed'),
+    ('firmware/src/ble_hid.cc', 'RADIO-OFF-REJECT'),
 ]
 for _rel, _needle in REQUIRED_MARKERS:
     _txt = open(WT + '/' + _rel).read()
