@@ -2798,6 +2798,19 @@ static void ble_hid_task_locked(void) {
             ble_reboot_at_us = 0;
             proact_pending_us = 0;
             hci_recycle_done = false;
+            // 【2026-11-27】**バックオフの予約タイマを取り消す**。
+            // 切断時に「5 秒後に広告を出し直す」予約を入れるが、その 5 秒を待たずに
+            // ホストが再接続してくることがある。以前はタイマが残ったまま発火し、
+            // 接続中なのに adv_set(1) を呼んで「広告の応答待ち」タイマを武装させ、
+            // 3 秒後に「広告が出ない = チップが死んだ」と誤判定して HCI-RECYCLE を
+            // 撃っていた (実測 2026-11-27 12:55:56 切断 -> 12:56:00 再接続 ->
+            // 12:56:01 SLOT-APPLY -> 12:56:04 HCI-RECYCLE の 8 秒周期ループ 11 回)。
+            // リサイクルすると接続が切れてまたバックオフが入るため、永久に回る。
+            btstack_run_loop_remove_timer(&slot_transition_timer);
+            slot_transition_target = -1;
+            // バックオフ経路は slot_adv_block を false にしてから予約するので
+            // 通常は既に解除済み。切替経路の取り消しと混ざっても詰まらないよう明示する
+            slot_adv_block = false;
             // 【2026-11-14】接続が成立したら tx_stalled を解除する。
             // これが残っていると転送先が USB に固定され、BLE では一度も送らないため
             // 「送信成功で解除」の条件が永久に成立しない（BLE が健全でも USB-OUT の

@@ -9,6 +9,83 @@
 
 ---
 
+## 2026-11-27 `wake104`: HCI-RECYCLE が 8 秒周期で永久に回るループ
+
+### 症状 (ルディ報告: s2 に変えたら途切れ途切れ)
+
+`bl39_1126_1004.log` の 12:55 台。**再起動するまで復旧しなかった。**
+
+```
+12:55:27  CANSEND-TO n=1 ccmd=0 brssi=-67    ← 本物の膠着
+12:55:36  CANSEND-TO ccmd=0
+12:55:54  CANSEND-TO ccmd=0 brssi=-79
+          ↓ ここまでが本物。以後 CANSEND-TO は 0 件
+12:55:59  BT HCI-RECYCLE ccmd=1
+12:56:04  BT HCI-RECYCLE ccmd=1
+12:56:13  BT HCI-RECYCLE ccmd=1
+...       12:57:27 まで 11 回（約 8 秒周期）
+```
+
+**2 回目以降は膠着していないのに HCI-RECYCLE が発動していた。**
+`ccmd=1`（クレジットあり）なのに「チップが死んだ」と判定していたのが矛盾。
+
+### 原因: バックオフの予約タイマが、再接続後に発火していた
+
+時系列を突き合わせると完全に一致する:
+
+```
+12:55:56.699  DISC rs=0x08 → BT BACKOFF n=3 ms=5000
+              → slot_transition_timer を 5 秒で予約
+12:56:00.472  CONNECTED（0.5 秒で復帰。もう繋がった）
+12:56:01.687  SLOT-APPLY ← 予約したタイマが発火（+4.99 秒）
+              接続中なのに apply_slot_identity → adv_set(1)
+              → 「広告の応答待ち」タイマを武装
+12:56:04.889  BT HCI-RECYCLE（+3.0 秒）
+              接続中だから広告は完了しない → 「広告が出ない = 死んだ」と誤判定
+12:56:04.950  BT BACKOFF n=4 ms=5000 → また 5 秒予約
+12:56:09.938  SLOT-APPLY ← また発火
+12:56:13.143  BT HCI-RECYCLE
+              ... 永久ループ
+```
+
+**接続が成立した時点でバックオフのタイマを消していなかった。**
+しかも HCI-RECYCLE は接続を落とすので、落ちる → 切断 → バックオフ、で
+ループが自己再生する。
+
+### なぜ「HCI-RECYCLE を止める」ではダメか
+
+ルディの指摘どおり。HCI-RECYCLE は**本物の膠着（12:55 の 3 回）から復帰する
+ための機構**なので、止めると膠着を検出できなくなる。
+
+止めるべきは**誤発動の引き金**（接続後に発火するバックオフタイマ）であって、
+検出機構そのものではない。
+
+### 修正
+
+接続成立時（`connected_now && !was_connected`）に、バックオフの予約タイマを
+取り消す:
+
+```c
+btstack_run_loop_remove_timer(&slot_transition_timer);
+slot_transition_target = -1;
+slot_adv_block = false;
+```
+
+バックオフ経路は `slot_transition_target = current_slot`（自分自身の再適用）
+なので、接続済みなら不要。取り消しても正規のスロット切替には影響しない
+（切替は `schedule_slot_transition` で別途予約され、`slot_transition_target`
+に切替先が入る。接続が来たら切替は中断されるのが正しい）。
+
+### 検証
+
+- ビルド: `firmware/artifacts/remapper_anchor_wake104_backofffix.uf2`
+- 検算: `RADIO-OFF-REJECT` 1 / `PARAM-REQ` 1 / `ADV-FILTER` 0（実機で動いた構成）/ `clear 1-8 / all` 1 / 誤 IP 0
+
+### 未確認
+
+- 12:55 と同じ状況（rs=0x08 → 即再接続）で HCI-RECYCLE が 1 回で止まるか
+- `SLOT-APPLY` のログが接続直後に出なくなったか
+
 ## 2026-11-26 `wake103`: rs=0x08 の連鎖切断と `bt` OFF の上書き
 
 ### 症状 (ルディ報告: 9:50 頃から不安定)

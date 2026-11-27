@@ -3246,6 +3246,36 @@ patch(WT + '/firmware/src/ble_hid.cc', [
 ])
 
 
+# --- 2026-11-27 (wake104): バックオフ予約タイマが接続後に発火して
+#     HCI-RECYCLE が 8 秒周期で永久に回る問題を直す ---
+# 切断時に「5 秒後に広告を出し直す」予約を入れるが、5 秒待たずにホストが
+# 再接続してくることがある。タイマが残ったまま発火すると、接続中なのに
+# adv_set(1) を呼んで「広告応答待ち」タイマを武装し、3 秒後に
+# 「広告が出ない = チップが死んだ」と誤判定して HCI-RECYCLE を撃つ。
+# リサイクルで接続が切れてまたバックオフが入るので永久に回る
+# (2026-11-27 12:55:56 切断 -> 12:56:00 再接続 -> 12:56:01 SLOT-APPLY
+#  -> 12:56:04 HCI-RECYCLE を 11 回)。
+patch(WT + '/firmware/src/ble_hid.cc', [
+    ("""            proact_pending_us = 0;
+            hci_recycle_done = false;""",
+     """            proact_pending_us = 0;
+            hci_recycle_done = false;
+            // 【2026-11-27】**バックオフの予約タイマを取り消す**。
+            // 切断時に「5 秒後に広告を出し直す」予約を入れるが、その 5 秒を待たずに
+            // ホストが再接続してくることがある。以前はタイマが残ったまま発火し、
+            // 接続中なのに adv_set(1) を呼んで「広告の応答待ち」タイマを武装させ、
+            // 3 秒後に「広告が出ない = チップが死んだ」と誤判定して HCI-RECYCLE を
+            // 撃っていた (実測 2026-11-27 12:55:56 切断 -> 12:56:00 再接続 ->
+            // 12:56:01 SLOT-APPLY -> 12:56:04 HCI-RECYCLE の 8 秒周期ループ 11 回)。
+            // リサイクルすると接続が切れてまたバックオフが入るため、永久に回る。
+            btstack_run_loop_remove_timer(&slot_transition_timer);
+            slot_transition_target = -1;
+            // バックオフ経路は slot_adv_block を false にしてから予約するので
+            // 通常は既に解除済み。切替経路の取り消しと混ざっても詰まらないよう明示する
+            slot_adv_block = false;"""),
+])
+
+
 # --- 生成物の自己検算 (2026-11-01 追加) ---
 REQUIRED_MARKERS = [
     ('firmware/src/ble_hid.cc', 'health_acl_run < 0xFFFF'),
@@ -3354,6 +3384,8 @@ REQUIRED_MARKERS = [
     ('firmware/src/ble_hid.cc', 'const bool param_dangerous'),
     ('firmware/src/ble_hid.cc', 'resume_sealed'),
     ('firmware/src/ble_hid.cc', 'RADIO-OFF-REJECT'),
+    # 2026-11-27 (wake104): バックオフ予約タイマの取り消し
+    ('firmware/src/ble_hid.cc', 'バックオフの予約タイマを取り消す'),
 ]
 for _rel, _needle in REQUIRED_MARKERS:
     _txt = open(WT + '/' + _rel).read()
